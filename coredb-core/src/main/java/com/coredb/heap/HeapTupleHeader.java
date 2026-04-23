@@ -5,8 +5,20 @@ import com.coredb.util.Constants;
 
 import java.nio.ByteBuffer;
 
-// Always allocates ceil(natts/8) bitmap bytes even when no columns are NULL;
-// PostgreSQL omits t_bits[] when HEAP_HASNULL is clear.
+/**
+ * Heap tuple header with PostgreSQL-compatible layout.
+ *
+ * Variable-length header: 23 fixed bytes + NULL bitmap (ceil(natts/8)).
+ *
+ * t_infomask2 vs t_infomask distinction:
+ * - t_infomask2 (offset 18): Stores natts (column count) in lower 11 bits + tuple update-chain flags.
+ *   Used when accessing tuple to determine how many columns to read.
+ * - t_infomask (offset 20): General status flags (NULL presence, transaction visibility, locking).
+ *   Used by MVCC visibility checks and vacuum.
+ *
+ * Note: Always allocates t_bits[] bitmap regardless of HEAP_HASNULL.
+ * PostgreSQL omits bitmap when no NULLs; we simplify by always including it.
+ */
 public final class HeapTupleHeader {
 
     private static final int OFF_XMIN       = 0;
@@ -16,26 +28,70 @@ public final class HeapTupleHeader {
     private static final int OFF_CTID_SLOT  = 16;
     private static final int OFF_INFOMASK2  = 18;
     private static final int OFF_INFOMASK   = 20;
+    // t_hoff: byte offset from tuple start to first data byte.
+    // Used to locate data when header has variable length (due to NULL bitmap).
+    // Equals 23 + ceil(natts/8) — computed at construction, stored for fast access.
     private static final int OFF_HOFF       = 22;
-    private static final int OFF_BITS       = 23;
+    private static final int OFF_BITS       = 23;  // Start of NULL bitmap
 
+    // t_infomask2: lower 11 bits store attribute count (natts)
     private static final short HEAP_NATTS_MASK = 0x07FF;
 
-    public static final short HEAP_HASNULL      = 0x0001;
-    public static final short HEAP_HASVARWIDTH  = 0x0002;
-    public static final short HEAP_HASEXTERNAL  = 0x0004;
-    public static final short XMIN_COMMITTED    = (short) 0x0100;
-    public static final short XMIN_INVALID      = (short) 0x0200;
-    public static final short XMAX_COMMITTED    = (short) 0x0400;
-    public static final short XMAX_INVALID      = (short) 0x0800;
+    // t_infomask flags: general tuple status (bits 0-2)
+    public static final short HEAP_HASNULL      = 0x0001;  // tuple has at least one NULL column.
+                                                           // Used to quickly check if NULL bitmap needs scanning.
+    public static final short HEAP_HASVARWIDTH  = 0x0002;  // has variable-width column (e.g., STRING).
+                                                           // Hints that tuple contains off-column data.
+    public static final short HEAP_HASEXTERNAL  = 0x0004;  // has TOAST/external data stored outside heap.
+                                                           // Requires following TOAST pointer to read full value.
 
+    // t_infomask flags: transaction visibility - inserting transaction (bits 8-9)
+    public static final short XMIN_COMMITTED    = (short) 0x0100;  // xmin transaction has committed.
+                                                                   // Tuple is visible to transactions started after xmin.
+    public static final short XMIN_INVALID      = (short) 0x0200;  // xmin transaction has aborted/rolled back.
+                                                                   // Tuple should be treated as never inserted (dead).
+
+    // t_infomask flags: transaction visibility - deleting transaction (bits 10-11)
+    public static final short XMAX_COMMITTED    = (short) 0x0400;  // xmax transaction has committed.
+                                                                   // Tuple has been deleted and is invisible to new transactions.
+    public static final short XMAX_INVALID      = (short) 0x0800;  // xmax transaction has aborted.
+                                                                   // Delete was rolled back; tuple is still live.
+
+    // t_infomask flags: locking (bits 12-13)
+    // HEAP_XMAX_EXCLUDED = 0x1000;  // xmax is a locking transaction (not delete)
+    // HEAP_KEYS_UPDATED  = 0x2000;  // xmax modified key columns (for UNIQUE index checks)
+
+    // Transaction ID that inserted this tuple.
+    // Visibility: tuple is invisible to transactions with ID < xmin (until xmin commits).
     private int xmin;
+
+    // Transaction ID that deleted this tuple (0 = not deleted, still live).
+    // When set and that transaction commits, tuple becomes invisible to new snapshots.
     private int xmax;
+
+    // Command ID within the inserting transaction.
+    // Used for cursor visibility: cursors should not see changes from commands >= their cid.
     private int cid;
+
+    // Current tuple location (pageId, slotNo).
+    // Points to newer version if this tuple was updated (HOT chain).
+    // For the latest version, ctid points to itself.
     private RecordId ctid;
+
+    // Combined field: lower 11 bits = natts (column count), upper bits = update flags.
+    // Used to determine how many columns to read and if tuple is in an update chain.
     private short infomask2;
+
+    // Status flags: NULL presence, transaction visibility hints, locking info.
+    // Used by MVCC to check tuple visibility without consulting pg_clog/pg_xact.
     private short infomask;
+
+    // Header size in bytes. Stored on disk to avoid recomputing.
+    // Data starts at offset hoff from tuple start.
     private final byte hoff;
+
+    // NULL bitmap: one bit per column. Bit set = column is NULL.
+    // Length = ceil(natts/8). Lives immediately after the 23-byte fixed header.
     private final byte[] tBits;
 
     public HeapTupleHeader(RecordId ctid, short natts, byte[] bitmap) {
