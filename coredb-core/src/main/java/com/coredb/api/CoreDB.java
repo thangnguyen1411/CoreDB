@@ -1,27 +1,25 @@
 package com.coredb.api;
 
+import com.coredb.storage.DiskManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.Path;
 
-/**
- * Entry point for opening and closing a CoreDB database instance.
- * Methods beyond open/close throw UnsupportedOperationException until
- * the relevant phases are implemented.
- */
 public final class CoreDB implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(CoreDB.class);
 
     private final Path dataPath;
     private final CoreDBConfig config;
+    private final DiskManager diskManager;
     private volatile boolean closed = false;
 
-    private CoreDB(Path dataPath, CoreDBConfig config) {
+    private CoreDB(Path dataPath, CoreDBConfig config, DiskManager diskManager) {
         this.dataPath = dataPath;
         this.config = config;
+        this.diskManager = diskManager;
         log.debug("CoreDB opened: path={} engine={} pageSize={}", dataPath, config.engineType(), config.pageSize());
     }
 
@@ -38,7 +36,8 @@ public final class CoreDB implements AutoCloseable {
     }
 
     public static CoreDB open(Path dataPath, CoreDBConfig config) throws IOException {
-        return new CoreDB(dataPath, config);
+        DiskManager dm = DiskManager.open(dataPath, config);
+        return new CoreDB(dataPath, config, dm);
     }
 
     public Path dataPath() {
@@ -49,6 +48,10 @@ public final class CoreDB implements AutoCloseable {
         return config;
     }
 
+    public DiskManager diskManager() {
+        return diskManager;
+    }
+
     public boolean isClosed() {
         return closed;
     }
@@ -57,6 +60,7 @@ public final class CoreDB implements AutoCloseable {
     public void close() throws IOException {
         if (!closed) {
             closed = true;
+            diskManager.close();
             log.debug("CoreDB closed: path={}", dataPath);
         }
     }

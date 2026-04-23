@@ -1,6 +1,7 @@
 package com.coredb.config;
 
 import com.coredb.api.CoreDBConfig;
+import com.coredb.util.Constants;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -25,7 +26,7 @@ import java.util.Map;
  * Supported keys and defaults:
  *   data-path    : data/core.db
  *   engine-type  : BTREE
- *   page-size    : 4096
+ *   page-size    : 8192
  */
 public final class CoreDBConfigLoader {
 
@@ -39,7 +40,7 @@ public final class CoreDBConfigLoader {
 
     private static final String DEFAULT_DATA_PATH   = "data/core.db";
     private static final String DEFAULT_ENGINE_TYPE = "BTREE";
-    private static final int    DEFAULT_PAGE_SIZE   = 4096;
+    private static final int    DEFAULT_PAGE_SIZE   = Constants.PAGE_SIZE;
 
     private CoreDBConfigLoader() {}
 
