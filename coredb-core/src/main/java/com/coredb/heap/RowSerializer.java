@@ -11,14 +11,27 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * Result of serializing a row: the data bytes and the null bitmap.
+ */
+record SerializedRow(byte[] data, byte[] nullBitmap) {}
+
 public final class RowSerializer {
 
     private RowSerializer() {}
 
-    public static byte[] serialize(Row row, Schema schema) {
+    public static SerializedRow serialize(Row row, Schema schema) {
         int numCols = schema.columnCount();
         if (row.size() != numCols) {
             throw new StorageException("row has " + row.size() + " values but schema has " + numCols + " columns");
+        }
+
+        // Build null bitmap: 1 bit per column, set to 1 if column is null
+        byte[] nullBitmap = new byte[(numCols + 7) / 8];
+        for (int i = 0; i < numCols; i++) {
+            if (row.get(i) == null) {
+                nullBitmap[i / 8] |= (1 << (i % 8));
+            }
         }
 
         int dataSize = 0;
@@ -45,7 +58,7 @@ public final class RowSerializer {
             }
         }
 
-        return buf.array();
+        return new SerializedRow(buf.array(), nullBitmap);
     }
 
     public static Row deserialize(byte[] data, Schema schema, HeapTupleHeader header) {
@@ -60,8 +73,9 @@ public final class RowSerializer {
         ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN);
 
         List<Object> values = new ArrayList<>(schemaCols);
-        for (int i = 0; i < tnatts; i++) {
-            if (header.isNull(i)) {
+        for (int i = 0; i < schemaCols; i++) {
+            // If this column is beyond what the tuple has, or it's marked null in bitmap
+            if (i >= tnatts || header.isNull(i)) {
                 values.add(null);
                 continue;
             }
@@ -77,9 +91,6 @@ public final class RowSerializer {
                     yield new String(bytes, StandardCharsets.UTF_8);
                 }
             });
-        }
-        for (int i = tnatts; i < schemaCols; i++) {
-            values.add(null);
         }
 
         return Row.of(values);

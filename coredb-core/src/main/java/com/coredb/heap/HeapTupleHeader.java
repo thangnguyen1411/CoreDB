@@ -18,6 +18,19 @@ import java.nio.ByteBuffer;
  *
  * Note: Always allocates t_bits[] bitmap regardless of HEAP_HASNULL.
  * PostgreSQL omits bitmap when no NULLs; we simplify by always including it.
+ *
+ * Layout on disk (23 bytes fixed + variable bitmap):
+ *
+ * Offset  Size  Field
+ * 0       4     t_xmin      (BOOTSTRAP_XID = 1 for Phase 2 stub)
+ * 4       4     t_xmax      (0 = not deleted, INVALID_XID)
+ * 8       4     t_cid       (0)
+ * 12      4     t_ctid.pageId
+ * 16      2     t_ctid.slotNo
+ * 18      2     t_infomask2 (natts in lower 11 bits)
+ * 20      2     t_infomask  (flags)
+ * 22      1     t_hoff      (byte offset to data)
+ * 23      var   t_bits[]    (NULL bitmap: ceil(natts/8) bytes)
  */
 public final class HeapTupleHeader {
 
@@ -100,9 +113,16 @@ public final class HeapTupleHeader {
         this.cid       = 0;
         this.ctid      = ctid;
         this.infomask2 = (short) (natts & HEAP_NATTS_MASK);
-        this.infomask  = 0;
+        this.infomask  = hasAnyNull(bitmap) ? HEAP_HASNULL : 0;
         this.hoff      = (byte) computeHeaderSize(natts);
         this.tBits     = bitmap.clone();
+    }
+
+    private static boolean hasAnyNull(byte[] bitmap) {
+        for (byte b : bitmap) {
+            if (b != 0) return true;
+        }
+        return false;
     }
 
     public HeapTupleHeader(RecordId ctid, short natts) {
