@@ -1,18 +1,27 @@
 package com;
 
-//TIP To <b>Run</b> code, press <shortcut actionId="Run"/> or
-// click the <icon src="AllIcons.Actions.Execute"/> icon in the gutter.
+/**
+ * This file is not used.
+ *
+ * The root pom.xml is a parent POM (packaging=pom) — nothing in src/ is compiled.
+ *
+ * HOW TO START COREDB
+ * -------------------
+ * 1. Build:
+ *      mvn package -q
+ *
+ * 2. Run the interactive shell:
+ *      java -jar coredb-core/target/coredb.jar
+ *
+ *    With a custom config file:
+ *      java -jar coredb-core/target/coredb.jar /path/to/myconfig.yaml
+ *
+ * Configuration is read from coredb.yaml in the current directory.
+ * A sample coredb.yaml is in the project root — edit it to change the
+ * data path, engine type, or page size.
+ *
+ * Entry point: com.coredb.shell.CoreDBShell (in coredb-core)
+ */
 public class Main {
-
-  public static void main(String[] args) {
-    //TIP Press <shortcut actionId="ShowIntentionActions"/> with your caret at the highlighted text
-    // to see how IntelliJ IDEA suggests fixing it.
-    System.out.printf("Hello and welcome!");
-
-    for (int i = 1; i <= 5; i++) {
-      //TIP Press <shortcut actionId="Debug"/> to start debugging your code. We have set one <icon src="AllIcons.Debugger.Db_set_breakpoint"/> breakpoint
-      // for you, but you can always add more by pressing <shortcut actionId="ToggleLineBreakpoint"/>.
-      System.out.println("i = " + i);
-    }
-  }
+    private Main() {}
 }

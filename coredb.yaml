@@ -1,0 +1,12 @@
+# CoreDB configuration
+# Edit this file to customise your database.
+# All fields are optional — built-in defaults apply for any missing key.
+
+# Path to the database file (created automatically if it does not exist)
+data-path: data/core.db
+
+# Storage engine: BTREE or LSM (LSM is a future phase)
+engine-type: BTREE
+
+# Page size in bytes — must be a power of two; 4096 is the standard default
+page-size: 4096

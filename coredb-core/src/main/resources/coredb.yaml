@@ -1,0 +1,7 @@
+# CoreDB built-in defaults (bundled inside the jar).
+# This file is used when no coredb.yaml is found in the working directory.
+# Copy it next to your jar and edit it to override these values.
+
+data-path: data/core.db
+engine-type: BTREE
+page-size: 4096
