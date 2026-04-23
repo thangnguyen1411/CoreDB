@@ -7,6 +7,8 @@ import com.coredb.util.StorageException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -111,6 +113,76 @@ class HeapPageTest {
             heapPage.insert(new byte[]{(byte) i});
         }
         assertThat(heapPage.slotCount()).isEqualTo(50);
+    }
+
+    @Test
+    void delete_marksSlotDead_getThrows() {
+        RecordId rid = heapPage.insert(new byte[]{1, 2, 3});
+        heapPage.delete(rid.slotNo());
+
+        assertThatThrownBy(() -> heapPage.get(rid.slotNo()))
+                .isInstanceOf(StorageException.class);
+    }
+
+    @Test
+    void delete_setsXmaxInTupleHeader() {
+        RecordId rid = heapPage.insert(new byte[]{5});
+        heapPage.delete(rid.slotNo());
+
+        // Read the raw bytes directly from the page buffer to verify t_xmax was written
+        int raw = heapPage.page().readItemId(rid.slotNo());
+        int offset = com.coredb.page.ItemId.offset(raw);
+        HeapTupleHeader h = HeapTupleHeader.readFrom(heapPage.page().buffer(), offset);
+        assertThat(h.xmax()).isNotEqualTo(Constants.INVALID_XID);
+    }
+
+    @Test
+    void delete_alreadyDead_throwsStorageException() {
+        RecordId rid = heapPage.insert(new byte[]{7});
+        heapPage.delete(rid.slotNo());
+
+        assertThatThrownBy(() -> heapPage.delete(rid.slotNo()))
+                .isInstanceOf(StorageException.class);
+    }
+
+    @Test
+    void scan_emptyPage_returnsEmptyList() {
+        assertThat(heapPage.scan()).isEmpty();
+    }
+
+    @Test
+    void scan_afterInserts_returnsAllSlots() {
+        heapPage.insert(new byte[]{1});
+        heapPage.insert(new byte[]{2});
+        heapPage.insert(new byte[]{3});
+
+        assertThat(heapPage.scan()).hasSize(3);
+    }
+
+    @Test
+    void scan_afterDeleteSome_returnsOnlyLiveSlots() {
+        RecordId r0 = heapPage.insert(new byte[]{1});
+        RecordId r1 = heapPage.insert(new byte[]{2});
+        RecordId r2 = heapPage.insert(new byte[]{3});
+        RecordId r3 = heapPage.insert(new byte[]{4});
+        RecordId r4 = heapPage.insert(new byte[]{5});
+
+        heapPage.delete(r1.slotNo());
+        heapPage.delete(r3.slotNo());
+
+        List<RecordId> live = heapPage.scan();
+        assertThat(live).hasSize(3);
+        assertThat(live).containsExactly(r0, r2, r4);
+    }
+
+    @Test
+    void scan_deleteAll_returnsEmptyList() {
+        RecordId r0 = heapPage.insert(new byte[]{1});
+        RecordId r1 = heapPage.insert(new byte[]{2});
+        heapPage.delete(r0.slotNo());
+        heapPage.delete(r1.slotNo());
+
+        assertThat(heapPage.scan()).isEmpty();
     }
 
     private static byte[] dataOf(byte[] raw) {
