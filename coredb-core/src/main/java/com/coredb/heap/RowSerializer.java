@@ -74,16 +74,23 @@ public final class RowSerializer {
         return buf.array();
     }
 
-    public static Row deserialize(byte[] data, Schema schema) {
-        int numCols = schema.columnCount();
-        int bitmapBytes = bitmapSize(numCols);
+    public static Row deserialize(byte[] data, Schema schema, short tupleNatts) {
+        int tnatts = Short.toUnsignedInt(tupleNatts);
+        int schemaCols = schema.columnCount();
+        if (tnatts > schemaCols) {
+            throw new StorageException(
+                "Tuple has " + tnatts + " attributes but schema expects " + schemaCols +
+                " (forward compatibility not supported)");
+        }
+
+        int bitmapBytes = bitmapSize(tnatts);
         ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN);
 
         byte[] bitmap = new byte[bitmapBytes];
         buf.get(bitmap);
 
-        List<Object> values = new ArrayList<>(numCols);
-        for (int i = 0; i < numCols; i++) {
+        List<Object> values = new ArrayList<>(schemaCols);
+        for (int i = 0; i < tnatts; i++) {
             boolean isNull = (bitmap[i / 8] & (1 << (i % 8))) != 0;
             if (isNull) {
                 values.add(null);
@@ -101,6 +108,9 @@ public final class RowSerializer {
                     yield new String(bytes, StandardCharsets.UTF_8);
                 }
             });
+        }
+        for (int i = tnatts; i < schemaCols; i++) {
+            values.add(null);
         }
 
         return Row.of(values);

@@ -18,7 +18,7 @@ public final class HeapPage {
         this.page = page;
     }
 
-    public RecordId insert(byte[] dataBytes) {
+    public RecordId insert(byte[] dataBytes, short natts) {
         int tupleSize = HeapTupleHeader.HEADER_SIZE + dataBytes.length;
         if (freeBytes() < tupleSize + ItemId.SIZE) {
             throw new StorageException("page " + page.pageId() + " has no room for " + tupleSize + " bytes");
@@ -28,7 +28,7 @@ public final class HeapPage {
         int newUpper = pdUpper() - tupleSize;
 
         RecordId self = new RecordId(page.pageId(), slotNo);
-        new HeapTupleHeader(self).writeTo(page.buffer(), newUpper);
+        new HeapTupleHeader(self, natts).writeTo(page.buffer(), newUpper);
 
         ByteBuffer buf = page.buffer();
         for (int i = 0; i < dataBytes.length; i++) {
