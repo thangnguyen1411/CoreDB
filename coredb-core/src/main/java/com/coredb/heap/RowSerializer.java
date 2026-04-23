@@ -11,21 +11,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Serializes and deserializes a Row to/from a compact byte array given a Schema.
- *
- * Binary layout:
- *   [null bitmap: ceil(numCols/8) bytes]  — bit i (LSB-first) set = column i is null
- *   [col0 bytes if not null]
- *   [col1 bytes if not null]
- *   ...
- *
- * Per-type encoding (big-endian):
- *   INT    — 4 bytes
- *   LONG   — 8 bytes
- *   BOOL   — 1 byte (0=false, 1=true)
- *   STRING — 4-byte length prefix + UTF-8 bytes
- */
 public final class RowSerializer {
 
     private RowSerializer() {}
@@ -36,24 +21,13 @@ public final class RowSerializer {
             throw new StorageException("row has " + row.size() + " values but schema has " + numCols + " columns");
         }
 
-        // Calculate bitmap size based on number of columns
-        int bitmapBytes = bitmapSize(numCols);
-        byte[] bitmap = new byte[bitmapBytes];
-
-        for (int i = 0; i < numCols; i++) {
-            if (row.get(i) == null) {
-                bitmap[i / 8] |= (byte) (1 << (i % 8));
-            }
-        }
-
         int dataSize = 0;
         for (int i = 0; i < numCols; i++) {
             if (row.get(i) == null) continue;
             dataSize += encodedSize(row.get(i), schema.column(i));
         }
 
-        ByteBuffer buf = ByteBuffer.allocate(bitmapBytes + dataSize).order(ByteOrder.BIG_ENDIAN);
-        buf.put(bitmap);
+        ByteBuffer buf = ByteBuffer.allocate(dataSize).order(ByteOrder.BIG_ENDIAN);
 
         for (int i = 0; i < numCols; i++) {
             Object val = row.get(i);
@@ -74,8 +48,19 @@ public final class RowSerializer {
         return buf.array();
     }
 
-    public static Row deserialize(byte[] data, Schema schema, short tupleNatts) {
-        int tnatts = Short.toUnsignedInt(tupleNatts);
+    public static byte[] nullBitmap(Row row, Schema schema) {
+        int numCols = schema.columnCount();
+        byte[] bitmap = new byte[(numCols + 7) / 8];
+        for (int i = 0; i < numCols; i++) {
+            if (row.get(i) == null) {
+                bitmap[i / 8] |= (byte) (1 << (i % 8));
+            }
+        }
+        return bitmap;
+    }
+
+    public static Row deserialize(byte[] data, Schema schema, HeapTupleHeader header) {
+        int tnatts = Short.toUnsignedInt(header.natts());
         int schemaCols = schema.columnCount();
         if (tnatts > schemaCols) {
             throw new StorageException(
@@ -83,16 +68,11 @@ public final class RowSerializer {
                 " (forward compatibility not supported)");
         }
 
-        int bitmapBytes = bitmapSize(tnatts);
         ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN);
-
-        byte[] bitmap = new byte[bitmapBytes];
-        buf.get(bitmap);
 
         List<Object> values = new ArrayList<>(schemaCols);
         for (int i = 0; i < tnatts; i++) {
-            boolean isNull = (bitmap[i / 8] & (1 << (i % 8))) != 0;
-            if (isNull) {
+            if (header.isNull(i)) {
                 values.add(null);
                 continue;
             }
@@ -114,10 +94,6 @@ public final class RowSerializer {
         }
 
         return Row.of(values);
-    }
-
-    private static int bitmapSize(int numCols) {
-        return (numCols + 7) / 8;
     }
 
     private static int encodedSize(Object val, Column col) {

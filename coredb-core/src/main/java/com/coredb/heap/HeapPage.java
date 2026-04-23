@@ -18,8 +18,9 @@ public final class HeapPage {
         this.page = page;
     }
 
-    public RecordId insert(byte[] dataBytes, short natts) {
-        int tupleSize = HeapTupleHeader.HEADER_SIZE + dataBytes.length;
+    public RecordId insert(byte[] dataBytes, short natts, byte[] bitmap) {
+        int headerSize = HeapTupleHeader.computeHeaderSize(natts);
+        int tupleSize = headerSize + dataBytes.length;
         if (freeBytes() < tupleSize + ItemId.SIZE) {
             throw new StorageException("page " + page.pageId() + " has no room for " + tupleSize + " bytes");
         }
@@ -28,11 +29,11 @@ public final class HeapPage {
         int newUpper = pdUpper() - tupleSize;
 
         RecordId self = new RecordId(page.pageId(), slotNo);
-        new HeapTupleHeader(self, natts).writeTo(page.buffer(), newUpper);
+        new HeapTupleHeader(self, natts, bitmap).writeTo(page.buffer(), newUpper);
 
         ByteBuffer buf = page.buffer();
         for (int i = 0; i < dataBytes.length; i++) {
-            buf.put(newUpper + HeapTupleHeader.HEADER_SIZE + i, dataBytes[i]);
+            buf.put(newUpper + headerSize + i, dataBytes[i]);
         }
 
         page.writeItemId(slotNo, ItemId.pack(newUpper, ItemId.FLAGS_NORMAL, tupleSize));
@@ -40,6 +41,10 @@ public final class HeapPage {
         page.setPdUpper((short) newUpper);
 
         return self;
+    }
+
+    public RecordId insert(byte[] dataBytes, short natts) {
+        return insert(dataBytes, natts, new byte[(natts + 7) / 8]);
     }
 
     public byte[] get(int slotNo) {
@@ -51,14 +56,6 @@ public final class HeapPage {
         return readTupleBytes(raw);
     }
 
-    /**
-     * Marks a tuple as deleted. Two-step process:
-     * 1. Set t_xmax in the tuple header — records which transaction deleted it.
-     *    The tuple bytes remain on disk; only the header is modified.
-     * 2. Flip the ItemId flag to DEAD — the primary visibility gate.
-     *    get() and scan() skip slots with flags != NORMAL, making the tuple invisible.
-     * Space is not reclaimed; VACUUM (Phase 10) will reclaim it later.
-     */
     public void delete(int slotNo) {
         checkSlot(slotNo);
         int raw = page.readItemId(slotNo);
@@ -68,20 +65,13 @@ public final class HeapPage {
         int offset = ItemId.offset(raw);
         int length = ItemId.length(raw);
 
-        // Step 1: Update tuple header — set xmax to mark the deleting transaction.
+        // t_xmax records which transaction deleted the tuple; ItemId FLAGS_DEAD is the visibility gate.
         HeapTupleHeader header = HeapTupleHeader.readFrom(page.buffer(), offset);
         header.setXmax(Constants.BOOTSTRAP_XID);
         header.writeTo(page.buffer(), offset);
-
-        // Step 2: Flip ItemId flag to DEAD — this is the primary visibility gate.
         page.writeItemId(slotNo, ItemId.pack(offset, ItemId.FLAGS_DEAD, length));
     }
 
-    /**
-     * Returns RecordIds of all live tuples on this page.
-     * A tuple is live if its ItemId flag is NORMAL and its xmin matches
-     * the bootstrap transaction.
-     */
     public List<RecordId> scan() {
         List<RecordId> live = new ArrayList<>();
         int count = slotCount();

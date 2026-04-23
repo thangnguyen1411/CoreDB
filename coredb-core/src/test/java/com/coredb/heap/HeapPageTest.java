@@ -7,6 +7,8 @@ import com.coredb.util.StorageException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -23,7 +25,7 @@ class HeapPageTest {
 
     @Test
     void freshPage_hasFullFreeSpace() {
-        // 8192 - 16 (header) = 8176 bytes free
+        // 8192 - 16 (page header) = 8176 bytes free
         assertThat(heapPage.freeBytes()).isEqualTo(Constants.PAGE_SIZE - 16);
     }
 
@@ -34,8 +36,7 @@ class HeapPageTest {
 
     @Test
     void insert_returnsCorrectRecordId() {
-        byte[] data = new byte[]{1, 2, 3};
-        RecordId rid = heapPage.insert(data, (short) 0);
+        RecordId rid = heapPage.insert(new byte[]{1, 2, 3}, (short) 0);
 
         assertThat(rid.pageId()).isEqualTo(1);
         assertThat(rid.slotNo()).isEqualTo(0);
@@ -55,7 +56,18 @@ class HeapPageTest {
         int dataLen = 10;
         heapPage.insert(new byte[dataLen], (short) 0);
 
-        int expected = before - HeapTupleHeader.HEADER_SIZE - dataLen - 4; // 4 = ItemId
+        // natts=0 → headerSize=23; ItemId=4 bytes
+        int expected = before - HeapTupleHeader.computeHeaderSize(0) - dataLen - 4;
+        assertThat(heapPage.freeBytes()).isEqualTo(expected);
+    }
+
+    @Test
+    void insert_differentNatts_correctHeaderSize() {
+        int before = heapPage.freeBytes();
+        int dataLen = 5;
+        heapPage.insert(new byte[dataLen], (short) 9); // 9 cols → headerSize=25
+
+        int expected = before - HeapTupleHeader.computeHeaderSize(9) - dataLen - 4;
         assertThat(heapPage.freeBytes()).isEqualTo(expected);
     }
 
@@ -66,10 +78,27 @@ class HeapPageTest {
 
         byte[] raw = heapPage.get(rid.slotNo());
 
-        // raw includes the 20-byte header + data
-        assertThat(raw).hasSize(HeapTupleHeader.HEADER_SIZE + data.length);
+        // natts=0 → hsize=23
+        int hsize = HeapTupleHeader.computeHeaderSize(0);
+        assertThat(raw).hasSize(hsize + data.length);
         for (int i = 0; i < data.length; i++) {
-            assertThat(raw[HeapTupleHeader.HEADER_SIZE + i]).isEqualTo(data[i]);
+            assertThat(raw[hsize + i]).isEqualTo(data[i]);
+        }
+    }
+
+    @Test
+    void get_dataOffset_usesHoffFromHeader() {
+        byte[] data = new byte[]{10, 20, 30};
+        // 4 columns → hsize=24 (1 bitmap byte)
+        RecordId rid = heapPage.insert(data, (short) 4);
+
+        byte[] raw = heapPage.get(rid.slotNo());
+        ByteBuffer buf = ByteBuffer.wrap(raw).order(ByteOrder.BIG_ENDIAN);
+        HeapTupleHeader h = HeapTupleHeader.readFrom(buf, 0);
+
+        assertThat(h.hoff()).isEqualTo(HeapTupleHeader.computeHeaderSize(4));
+        for (int i = 0; i < data.length; i++) {
+            assertThat(raw[h.hoff() + i]).isEqualTo(data[i]);
         }
     }
 
@@ -80,7 +109,7 @@ class HeapPageTest {
 
         byte[] raw = heapPage.get(rid.slotNo());
         HeapTupleHeader h = HeapTupleHeader.readFrom(
-                java.nio.ByteBuffer.wrap(raw).order(java.nio.ByteOrder.BIG_ENDIAN), 0);
+                ByteBuffer.wrap(raw).order(ByteOrder.BIG_ENDIAN), 0);
 
         assertThat(h.xmin()).isEqualTo(Constants.BOOTSTRAP_XID);
         assertThat(h.xmax()).isEqualTo(Constants.INVALID_XID);
@@ -130,7 +159,6 @@ class HeapPageTest {
         RecordId rid = heapPage.insert(new byte[]{5}, (short) 0);
         heapPage.delete(rid.slotNo());
 
-        // Read the raw bytes directly from the page buffer to verify t_xmax was written
         int raw = heapPage.page().readItemId(rid.slotNo());
         int offset = com.coredb.page.ItemId.offset(raw);
         HeapTupleHeader h = HeapTupleHeader.readFrom(heapPage.page().buffer(), offset);
@@ -186,9 +214,28 @@ class HeapPageTest {
         assertThat(heapPage.scan()).isEmpty();
     }
 
+    @Test
+    void insert_withExplicitBitmap_nullBitsPreservedInHeader() {
+        // column 1 is null → bit 1 set → 0b00000010
+        byte[] bitmap = {(byte) 0b00000010};
+        RecordId rid = heapPage.insert(new byte[]{42}, (short) 4, bitmap);
+
+        byte[] raw = heapPage.get(rid.slotNo());
+        HeapTupleHeader h = HeapTupleHeader.readFrom(
+                ByteBuffer.wrap(raw).order(ByteOrder.BIG_ENDIAN), 0);
+
+        assertThat(h.isNull(0)).isFalse();
+        assertThat(h.isNull(1)).isTrue();
+        assertThat(h.isNull(2)).isFalse();
+        assertThat(h.isNull(3)).isFalse();
+    }
+
     private static byte[] dataOf(byte[] raw) {
-        byte[] data = new byte[raw.length - HeapTupleHeader.HEADER_SIZE];
-        System.arraycopy(raw, HeapTupleHeader.HEADER_SIZE, data, 0, data.length);
+        ByteBuffer buf = ByteBuffer.wrap(raw).order(ByteOrder.BIG_ENDIAN);
+        HeapTupleHeader h = HeapTupleHeader.readFrom(buf, 0);
+        int hoff = h.hoff();
+        byte[] data = new byte[raw.length - hoff];
+        System.arraycopy(raw, hoff, data, 0, data.length);
         return data;
     }
 }

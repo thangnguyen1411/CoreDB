@@ -19,8 +19,10 @@ class RowSerializerTest {
     );
 
     private static Row roundTrip(Row row, Schema schema) {
-        byte[] bytes = RowSerializer.serialize(row, schema);
-        return RowSerializer.deserialize(bytes, schema, (short) schema.columnCount());
+        byte[] bitmap = RowSerializer.nullBitmap(row, schema);
+        byte[] data = RowSerializer.serialize(row, schema);
+        HeapTupleHeader header = new HeapTupleHeader(new RecordId(0, 0), (short) schema.columnCount(), bitmap);
+        return RowSerializer.deserialize(data, schema, header);
     }
 
     @Test
@@ -107,11 +109,20 @@ class RowSerializerTest {
     }
 
     @Test
-    void serializedSize_noNulls_isMinimal() {
+    void serializedData_noNulls_containsOnlyValues() {
         Schema schema = Schema.of(Column.intCol("a"), Column.longCol("b"));
         Row row = Row.of(1, 2L);
-        // bitmap=1, INT=4, LONG=8 → 13 bytes
-        assertThat(RowSerializer.serialize(row, schema)).hasSize(13);
+        // No bitmap in data: INT=4, LONG=8 → 12 bytes
+        assertThat(RowSerializer.serialize(row, schema)).hasSize(12);
+    }
+
+    @Test
+    void nullBitmap_encodesNullPositionsCorrectly() {
+        Schema schema = Schema.of(Column.intCol("a"), Column.intCol("b"), Column.intCol("c"));
+        // columns 0 and 2 null → bits 0 and 2 set → 0b00000101
+        byte[] bitmap = RowSerializer.nullBitmap(Row.of(null, 1, null), schema);
+        assertThat(bitmap).hasSize(1);
+        assertThat(bitmap[0]).isEqualTo((byte) 0b00000101);
     }
 
     // --- Schema evolution: backward compatibility (old tuple, new schema) ---
@@ -122,8 +133,11 @@ class RowSerializerTest {
         Schema v2 = Schema.of(Column.intCol("id"), Column.stringCol("name"), Column.intCol("age"),
                 Column.stringCol("email"), Column.boolCol("active"));
 
-        byte[] bytes = RowSerializer.serialize(Row.of(1, "Alice", 30), v1);
-        Row result = RowSerializer.deserialize(bytes, v2, (short) v1.columnCount());
+        Row v1Row = Row.of(1, "Alice", 30);
+        byte[] bitmap = RowSerializer.nullBitmap(v1Row, v1);
+        byte[] data = RowSerializer.serialize(v1Row, v1);
+        HeapTupleHeader header = new HeapTupleHeader(new RecordId(0, 0), (short) v1.columnCount(), bitmap);
+        Row result = RowSerializer.deserialize(data, v2, header);
 
         assertThat(result.getInt(0)).isEqualTo(1);
         assertThat(result.getString(1)).isEqualTo("Alice");
@@ -138,8 +152,11 @@ class RowSerializerTest {
         Schema v2 = Schema.of(Column.intCol("id"), Column.stringCol("name"), Column.intCol("age"),
                 Column.stringCol("email"));
 
-        byte[] bytes = RowSerializer.serialize(Row.of(1, null, 30), v1);
-        Row result = RowSerializer.deserialize(bytes, v2, (short) v1.columnCount());
+        Row v1Row = Row.of(1, null, 30);
+        byte[] bitmap = RowSerializer.nullBitmap(v1Row, v1);
+        byte[] data = RowSerializer.serialize(v1Row, v1);
+        HeapTupleHeader header = new HeapTupleHeader(new RecordId(0, 0), (short) v1.columnCount(), bitmap);
+        Row result = RowSerializer.deserialize(data, v2, header);
 
         assertThat(result.getInt(0)).isEqualTo(1);
         assertThat(result.get(1)).isNull();
@@ -153,8 +170,11 @@ class RowSerializerTest {
         Schema v2 = Schema.of(Column.intCol("a"), Column.intCol("b"), Column.intCol("c"),
                 Column.intCol("d"), Column.intCol("e"));
 
-        byte[] bytes = RowSerializer.serialize(Row.of(null, null, null), v1);
-        Row result = RowSerializer.deserialize(bytes, v2, (short) v1.columnCount());
+        Row v1Row = Row.of(null, null, null);
+        byte[] bitmap = RowSerializer.nullBitmap(v1Row, v1);
+        byte[] data = RowSerializer.serialize(v1Row, v1);
+        HeapTupleHeader header = new HeapTupleHeader(new RecordId(0, 0), (short) v1.columnCount(), bitmap);
+        Row result = RowSerializer.deserialize(data, v2, header);
 
         for (int i = 0; i < 5; i++) {
             assertThat(result.get(i)).isNull();
@@ -175,9 +195,11 @@ class RowSerializerTest {
                 Column.intCol("c9"), Column.intCol("c10"), Column.intCol("c11")
         );
 
-        Row original = Row.of(null, 1, 2, 3, 4, 5, 6, 7, null);
-        byte[] bytes = RowSerializer.serialize(original, v1);
-        Row result = RowSerializer.deserialize(bytes, v2, (short) v1.columnCount());
+        Row v1Row = Row.of(null, 1, 2, 3, 4, 5, 6, 7, null);
+        byte[] bitmap = RowSerializer.nullBitmap(v1Row, v1);
+        byte[] data = RowSerializer.serialize(v1Row, v1);
+        HeapTupleHeader header = new HeapTupleHeader(new RecordId(0, 0), (short) v1.columnCount(), bitmap);
+        Row result = RowSerializer.deserialize(data, v2, header);
 
         assertThat(result.get(0)).isNull();
         assertThat(result.getInt(8)).isNull();
@@ -194,9 +216,12 @@ class RowSerializerTest {
         Schema v2 = Schema.of(Column.intCol("id"), Column.stringCol("name"), Column.intCol("age"),
                 Column.stringCol("email"), Column.boolCol("active"));
 
-        byte[] bytes = RowSerializer.serialize(Row.of(1, "Alice", 30, "a@b.com", true), v2);
+        Row v2Row = Row.of(1, "Alice", 30, "a@b.com", true);
+        byte[] bitmap = RowSerializer.nullBitmap(v2Row, v2);
+        byte[] data = RowSerializer.serialize(v2Row, v2);
+        HeapTupleHeader header = new HeapTupleHeader(new RecordId(0, 0), (short) v2.columnCount(), bitmap);
 
-        assertThatThrownBy(() -> RowSerializer.deserialize(bytes, v1, (short) v2.columnCount()))
+        assertThatThrownBy(() -> RowSerializer.deserialize(data, v1, header))
                 .isInstanceOf(StorageException.class)
                 .hasMessageContaining("5")
                 .hasMessageContaining("3");
