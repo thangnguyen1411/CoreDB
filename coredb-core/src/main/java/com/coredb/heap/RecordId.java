@@ -1,4 +1,4 @@
-package com.coredb.record;
+package com.coredb.heap;
 
 /**
  * Physical address of a tuple: which page it lives on and which slot within that page.

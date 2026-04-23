@@ -1,4 +1,4 @@
-package com.coredb.record;
+package com.coredb.heap;
 
 import com.coredb.page.Page;
 import com.coredb.page.PageType;

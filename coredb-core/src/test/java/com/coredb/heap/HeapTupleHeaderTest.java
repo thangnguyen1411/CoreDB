@@ -1,4 +1,4 @@
-package com.coredb.record;
+package com.coredb.heap;
 
 import com.coredb.util.Constants;
 import org.junit.jupiter.api.Test;
