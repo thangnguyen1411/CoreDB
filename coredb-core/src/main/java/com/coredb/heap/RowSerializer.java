@@ -48,17 +48,6 @@ public final class RowSerializer {
         return buf.array();
     }
 
-    public static byte[] nullBitmap(Row row, Schema schema) {
-        int numCols = schema.columnCount();
-        byte[] bitmap = new byte[(numCols + 7) / 8];
-        for (int i = 0; i < numCols; i++) {
-            if (row.get(i) == null) {
-                bitmap[i / 8] |= (byte) (1 << (i % 8));
-            }
-        }
-        return bitmap;
-    }
-
     public static Row deserialize(byte[] data, Schema schema, HeapTupleHeader header) {
         int tnatts = Short.toUnsignedInt(header.natts());
         int schemaCols = schema.columnCount();
