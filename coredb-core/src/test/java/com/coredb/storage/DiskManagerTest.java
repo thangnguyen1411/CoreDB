@@ -2,7 +2,7 @@ package com.coredb.storage;
 
 import com.coredb.api.CoreDBConfig;
 import com.coredb.page.PageHeader;
-import com.coredb.page.PageLayout;
+import com.coredb.page.Page;
 import com.coredb.page.PageType;
 import com.coredb.util.Constants;
 import org.junit.jupiter.api.Test;
@@ -48,8 +48,8 @@ class DiskManagerTest {
     void allocatePage_assignsSequentialIds() throws IOException {
         Path dbFile = tempDir.resolve("test.db");
         try (DiskManager dm = DiskManager.open(dbFile, defaultConfig())) {
-            PageLayout p1 = dm.allocatePage(PageType.HEAP);
-            PageLayout p2 = dm.allocatePage(PageType.HEAP);
+            Page p1 = dm.allocatePage(PageType.HEAP);
+            Page p2 = dm.allocatePage(PageType.HEAP);
             assertThat(p1.pageId()).isEqualTo(1);
             assertThat(p2.pageId()).isEqualTo(2);
         }
@@ -59,14 +59,14 @@ class DiskManagerTest {
     void writeThenRead_returnsIdenticalBytes() throws IOException {
         Path dbFile = tempDir.resolve("test.db");
         try (DiskManager dm = DiskManager.open(dbFile, defaultConfig())) {
-            PageLayout written = dm.allocatePage(PageType.HEAP);
+            Page written = dm.allocatePage(PageType.HEAP);
             byte[] payload = written.buffer().array();
             for (int i = PageHeader.SIZE; i < Constants.PAGE_SIZE; i++) {
                 payload[i] = (byte) (i % 256);
             }
             dm.writePage(written);
 
-            PageLayout read = dm.readPage(written.pageId());
+            Page read = dm.readPage(written.pageId());
             assertThat(read.buffer().array()).isEqualTo(written.buffer().array());
         }
     }
@@ -78,7 +78,7 @@ class DiskManagerTest {
 
         try (DiskManager dm = DiskManager.open(dbFile, defaultConfig())) {
             for (int i = 0; i < 100; i++) {
-                PageLayout p = dm.allocatePage(PageType.HEAP);
+                Page p = dm.allocatePage(PageType.HEAP);
                 byte[] arr = p.buffer().array();
                 for (int j = PageHeader.SIZE; j < arr.length; j++) {
                     arr[j] = (byte) ((i + j) % 256);
@@ -92,7 +92,7 @@ class DiskManagerTest {
         try (DiskManager dm = DiskManager.open(dbFile, defaultConfig())) {
             assertThat(dm.pageCount()).isEqualTo(101);
             for (int i = 0; i < 100; i++) {
-                PageLayout p = dm.readPage(i + 1);
+                Page p = dm.readPage(i + 1);
                 assertThat(p.buffer().array())
                         .as("page %d bytes mismatch after reopen", i + 1)
                         .isEqualTo(writtenSnapshots.get(i));
@@ -104,7 +104,7 @@ class DiskManagerTest {
     void metaPage_hasCorrectType() throws IOException {
         Path dbFile = tempDir.resolve("test.db");
         try (DiskManager dm = DiskManager.open(dbFile, defaultConfig())) {
-            PageLayout meta = dm.readPage(0);
+            Page meta = dm.readPage(0);
             assertThat(meta.pageType()).isEqualTo(PageType.META);
         }
     }
@@ -134,8 +134,8 @@ class DiskManagerTest {
     void allocatedPage_hasCorrectType() throws IOException {
         Path dbFile = tempDir.resolve("test.db");
         try (DiskManager dm = DiskManager.open(dbFile, defaultConfig())) {
-            PageLayout heap = dm.allocatePage(PageType.HEAP);
-            PageLayout leaf = dm.allocatePage(PageType.INDEX_LEAF);
+            Page heap = dm.allocatePage(PageType.HEAP);
+            Page leaf = dm.allocatePage(PageType.INDEX_LEAF);
             assertThat(heap.pageType()).isEqualTo(PageType.HEAP);
             assertThat(leaf.pageType()).isEqualTo(PageType.INDEX_LEAF);
         }
@@ -145,7 +145,7 @@ class DiskManagerTest {
     void newPage_hasCorrectPdLowerAndPdUpper() throws IOException {
         Path dbFile = tempDir.resolve("test.db");
         try (DiskManager dm = DiskManager.open(dbFile, defaultConfig())) {
-            PageLayout page = dm.allocatePage(PageType.HEAP);
+            Page page = dm.allocatePage(PageType.HEAP);
             assertThat(Short.toUnsignedInt(page.pdLower())).isEqualTo(PageHeader.SIZE);
             assertThat(Short.toUnsignedInt(page.pdUpper())).isEqualTo(Constants.PAGE_SIZE);
             assertThat(page.freeBytes()).isEqualTo(Constants.PAGE_SIZE - PageHeader.SIZE);

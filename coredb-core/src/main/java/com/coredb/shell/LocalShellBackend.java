@@ -1,7 +1,7 @@
 package com.coredb.shell;
 
 import com.coredb.api.CoreDB;
-import com.coredb.page.PageLayout;
+import com.coredb.page.Page;
 import com.coredb.storage.DiskManager;
 
 import java.io.IOException;
@@ -69,14 +69,14 @@ public final class LocalShellBackend implements ShellBackend {
         }
 
         try {
-            PageLayout page = db.diskManager().readPage(pageId);
+            Page page = db.diskManager().readPage(pageId);
             return renderPageDump(page);
         } catch (IOException e) {
             return "error: " + e.getMessage();
         }
     }
 
-    private static String renderPageDump(PageLayout page) {
+    private static String renderPageDump(Page page) {
         StringBuilder sb = new StringBuilder();
         sb.append(String.format("page=%-4d type=%-14s pd_lower=%-5d pd_upper=%-5d pd_special=%d%n",
                 page.pageId(), page.pageType(),

@@ -6,12 +6,12 @@ import com.coredb.util.Constants;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
-public final class PageLayout {
+public final class Page {
 
     private final int pageId;
     private final ByteBuffer buffer;
 
-    public PageLayout(int pageId, PageType type) {
+    public Page(int pageId, PageType type) {
         this.pageId = pageId;
         this.buffer = ByteBuffer.allocate(Constants.PAGE_SIZE).order(ByteOrder.BIG_ENDIAN);
         BinaryUtil.writeU64(buffer, PageHeader.OFFSET_LSN, 0L);
@@ -21,7 +21,7 @@ public final class PageLayout {
         BinaryUtil.writeU16(buffer, PageHeader.OFFSET_PD_FLAGS, (short) (type.code() << 8));
     }
 
-    public PageLayout(int pageId, ByteBuffer buffer) {
+    public Page(int pageId, ByteBuffer buffer) {
         this.pageId = pageId;
         this.buffer = buffer.order(ByteOrder.BIG_ENDIAN);
     }

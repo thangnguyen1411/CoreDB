@@ -3,7 +3,7 @@ package com.coredb.storage;
 import com.coredb.api.CoreDBConfig;
 import com.coredb.config.EngineType;
 import com.coredb.page.PageHeader;
-import com.coredb.page.PageLayout;
+import com.coredb.page.Page;
 import com.coredb.page.PageType;
 import com.coredb.util.BinaryUtil;
 import com.coredb.util.Constants;
@@ -33,9 +33,9 @@ public final class DiskManager implements AutoCloseable {
 
     private final Path path;
     private final FileChannel channel;
-    private final PageLayout metaPage;
+    private final Page metaPage;
 
-    private DiskManager(Path path, FileChannel channel, PageLayout metaPage) {
+    private DiskManager(Path path, FileChannel channel, Page metaPage) {
         this.path = path;
         this.channel = channel;
         this.metaPage = metaPage;
@@ -51,7 +51,7 @@ public final class DiskManager implements AutoCloseable {
         FileChannel channel = FileChannel.open(path,
                 StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE);
 
-        PageLayout metaPage;
+        Page metaPage;
         if (isNew) {
             metaPage = buildMetaPage(config);
             writePageToChannel(channel, metaPage);
@@ -65,7 +65,7 @@ public final class DiskManager implements AutoCloseable {
         return new DiskManager(path, channel, metaPage);
     }
 
-    public PageLayout readPage(int pageId) throws IOException {
+    public Page readPage(int pageId) throws IOException {
         int total = readNextPageId(metaPage);
         if (pageId < 0 || pageId >= total) {
             throw new StorageException("page " + pageId + " does not exist (allocated=" + total + ")");
@@ -76,13 +76,13 @@ public final class DiskManager implements AutoCloseable {
         return readPageFromChannel(channel, pageId);
     }
 
-    public void writePage(PageLayout page) throws IOException {
+    public void writePage(Page page) throws IOException {
         writePageToChannel(channel, page);
     }
 
-    public PageLayout allocatePage(PageType type) throws IOException {
+    public Page allocatePage(PageType type) throws IOException {
         int newId = readNextPageId(metaPage);
-        PageLayout newPage = new PageLayout(newId, type);
+        Page newPage = new Page(newId, type);
         writePageToChannel(channel, newPage);
 
         writeNextPageId(metaPage, newId + 1);
@@ -113,8 +113,8 @@ public final class DiskManager implements AutoCloseable {
 
     // --- Meta page construction and validation ---
 
-    private static PageLayout buildMetaPage(CoreDBConfig config) {
-        PageLayout p = new PageLayout(0, PageType.META);
+    private static Page buildMetaPage(CoreDBConfig config) {
+        Page p = new Page(0, PageType.META);
         ByteBuffer buf = p.buffer();
         BinaryUtil.writeU64(buf, META_MAGIC, Constants.FILE_MAGIC);
         BinaryUtil.writeU16(buf, META_VERSION, Constants.FORMAT_VERSION);
@@ -125,18 +125,18 @@ public final class DiskManager implements AutoCloseable {
         return p;
     }
 
-    private static void verifyMagic(PageLayout metaPage, Path path) throws IOException {
+    private static void verifyMagic(Page metaPage, Path path) throws IOException {
         long magic = BinaryUtil.readU64(metaPage.buffer(), META_MAGIC);
         if (magic != Constants.FILE_MAGIC) {
             throw new StorageException("not a CoreDB file or corrupted header: " + path);
         }
     }
 
-    private static int readNextPageId(PageLayout metaPage) {
+    private static int readNextPageId(Page metaPage) {
         return BinaryUtil.readU32(metaPage.buffer(), META_NEXT_PAGE);
     }
 
-    private static void writeNextPageId(PageLayout metaPage, int id) {
+    private static void writeNextPageId(Page metaPage, int id) {
         BinaryUtil.writeU32(metaPage.buffer(), META_NEXT_PAGE, id);
     }
 
@@ -149,7 +149,7 @@ public final class DiskManager implements AutoCloseable {
 
     // --- Low-level FileChannel I/O ---
 
-    private static void writePageToChannel(FileChannel channel, PageLayout page) throws IOException {
+    private static void writePageToChannel(FileChannel channel, Page page) throws IOException {
         ByteBuffer buf = page.buffer().duplicate();
         buf.clear();
         long pos = (long) page.pageId() * Constants.PAGE_SIZE;
@@ -158,7 +158,7 @@ public final class DiskManager implements AutoCloseable {
         }
     }
 
-    private static PageLayout readPageFromChannel(FileChannel channel, int pageId) throws IOException {
+    private static Page readPageFromChannel(FileChannel channel, int pageId) throws IOException {
         ByteBuffer buf = ByteBuffer.allocate(Constants.PAGE_SIZE).order(ByteOrder.BIG_ENDIAN);
         long pos = (long) pageId * Constants.PAGE_SIZE;
         while (buf.hasRemaining()) {
@@ -168,6 +168,6 @@ public final class DiskManager implements AutoCloseable {
             }
             pos += n;
         }
-        return new PageLayout(pageId, buf);
+        return new Page(pageId, buf);
     }
 }

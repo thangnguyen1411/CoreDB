@@ -2,6 +2,8 @@ package com.coredb.page;
 
 public final class ItemId {
 
+    public static final int SIZE = 4;
+
     public static final int FLAGS_UNUSED   = 0;
     public static final int FLAGS_NORMAL   = 1;
     public static final int FLAGS_REDIRECT = 2;
