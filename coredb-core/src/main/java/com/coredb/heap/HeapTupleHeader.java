@@ -22,7 +22,7 @@ import java.nio.ByteBuffer;
  * Layout on disk (23 bytes fixed + variable bitmap):
  *
  * Offset  Size  Field
- * 0       4     t_xmin      (BOOTSTRAP_XID = 1 for Phase 2 stub)
+ * 0       4     t_xmin      (BOOTSTRAP_XID = 1 for stub; will be modified later)
  * 4       4     t_xmax      (0 = not deleted, INVALID_XID)
  * 8       4     t_cid       (0)
  * 12      4     t_ctid.pageId

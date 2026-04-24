@@ -6,6 +6,7 @@ import com.coredb.api.Row;
 import com.coredb.api.Schema;
 import com.coredb.catalog.ColumnDefParser;
 import com.coredb.catalog.ControlFile;
+import com.coredb.heap.HeapFile;
 import com.coredb.heap.HeapPage;
 import com.coredb.heap.HeapTupleHeader;
 import com.coredb.heap.RecordId;
@@ -21,6 +22,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
+import java.nio.file.Path;
 
 public final class LocalShellBackend implements ShellBackend {
 
@@ -61,6 +63,8 @@ public final class LocalShellBackend implements ShellBackend {
             case "schema-parse"      -> handleSchemaParse(args);
             case "control-info"      -> handleControlInfo();
             case "control-alloc-oid" -> handleControlAllocOid();
+            case "heap-create"       -> handleHeapCreate(args);
+            case "heap-meta"         -> handleHeapMeta(args);
             case "help"              -> formatHelp();
             default                  -> "unknown command: " + command + "  (type 'help' for available commands)";
         };
@@ -156,6 +160,8 @@ public final class LocalShellBackend implements ShellBackend {
             schema-parse <def>                      parse column definition (id:long name:string pk:id)
             control-info                            show pg_control contents
             control-alloc-oid                       allocate next OID and persist
+            heap-create oid=N cols...               create per-table heap file (oid, columns)
+            heap-meta oid=N                         show meta page of per-table heap file
             help         list available commands
             quit         exit
             """;
@@ -367,6 +373,104 @@ public final class LocalShellBackend implements ShellBackend {
             ControlFile cf = db.controlFile();
             int oid = cf.allocateOid();
             return String.format("%d  (nextOid now %d)", oid, cf.nextOid());
+        } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    private String handleHeapCreate(String args) {
+        // Parse: oid=1000 id:long name:string
+        if (args.isBlank() || !args.contains("oid=")) {
+            return "usage: heap-create oid=N col:type ... (e.g., heap-create oid=1000 id:long name:string)";
+        }
+
+        int oid = -1;
+        String colDefs = "";
+
+        String[] parts = args.split("\\s+");
+        for (String part : parts) {
+            if (part.startsWith("oid=")) {
+                try {
+                    oid = Integer.parseInt(part.substring(4));
+                } catch (NumberFormatException e) {
+                    return "invalid OID: " + part.substring(4);
+                }
+            } else if (!part.isBlank() && colDefs.isEmpty()) {
+                // First non-oid arg starts the column definitions
+                colDefs = part;
+            } else if (!part.isBlank()) {
+                colDefs += " " + part;
+            }
+        }
+
+        if (oid < 0) {
+            return "usage: heap-create oid=N col:type ...";
+        }
+        if (colDefs.isBlank()) {
+            return "usage: heap-create oid=N col:type ... (at least one column required)";
+        }
+
+        try {
+            // Parse column definitions - synthesize PK from first column if user didn't provide one.
+            // This is temporary scaffolding; heap-create will removed later.
+            String colDefsToParse = colDefs;
+            if (!colDefs.contains("pk:")) {
+                String firstColName = colDefs.split("\\s+")[0].split(":")[0];
+                colDefsToParse = colDefs + " pk:" + firstColName;
+            }
+            ColumnDefParser.ParsedSchema parsed = ColumnDefParser.parse(colDefsToParse);
+            Schema schema = parsed.schema();
+
+            // Build path: dataDir/base/1/<oid>
+            Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
+
+            HeapFile hf = HeapFile.create(tablePath, oid, schema);
+            hf.close();
+
+            return String.format("created %s (meta page written, nextPageId=1)",
+                db.dataPath().relativize(tablePath));
+        } catch (IllegalArgumentException e) {
+            return "error: " + e.getMessage();
+        } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    private String handleHeapMeta(String args) {
+        if (!args.startsWith("oid=")) {
+            return "usage: heap-meta oid=N";
+        }
+
+        int oid;
+        try {
+            oid = Integer.parseInt(args.substring(4));
+        } catch (NumberFormatException e) {
+            return "invalid OID: " + args.substring(4);
+        }
+
+        // Build path: dataDir/base/1/<oid>
+        Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
+
+        if (!Files.exists(tablePath)) {
+            return "error: heap file not found: " + db.dataPath().relativize(tablePath);
+        }
+
+        try {
+            // We need a schema to open, but for meta page inspection we just need to validate
+            // Use a dummy schema - the meta page doesn't depend on it
+            Schema dummySchema = Schema.of(Column.longCol("dummy"));
+            HeapFile hf = HeapFile.open(tablePath, oid, dummySchema);
+
+            String path = db.dataPath().relativize(hf.tablePath()).toString();
+            StringBuilder sb = new StringBuilder();
+            sb.append("path=").append(path).append("\n");
+            sb.append(String.format("magic=0x%08X (\"HEAP\")%n", 0x48454150));
+            sb.append("formatVersion=1\n");
+            sb.append("oid=").append(oid).append("\n");
+            sb.append("nextPageId=").append(hf.nextPageId());
+
+            hf.close();
+            return sb.toString();
         } catch (IOException e) {
             return "error: " + e.getMessage();
         }
