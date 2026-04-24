@@ -139,17 +139,18 @@ public final class LocalShellBackend implements ShellBackend {
 
     private String formatHelp() {
         return """
-                  version      print version and config
-                  status       show DB file path and whether it exists
-                  page-stats   show page count and file size
-                  page-dump N  hex dump of page N
-                  allocate-page   create a new heap page for raw insert
-                  insert-raw page=N id=N name=XXX age=N  insert a row on specific page
-                  get-raw rid=page:slot                   get a row by RecordId
-                  scan-raw page=N                         scan all rows on a page
-                  delete-raw rid=page:slot                delete a row by RecordId
-                  help         list available commands
-                  quit         exit""";
+            version      print version and config
+            status       show DB file path and whether it exists
+            page-stats   show page count and file size
+            page-dump N  hex dump of page N
+            allocate-page   create a new heap page for raw insert
+            insert-raw page=N id=N name=XXX age=N  insert a row on specific page
+            get-raw rid=page:slot                   get a row by RecordId
+            scan-raw page=N                         scan all rows on a page
+            delete-raw rid=page:slot                delete a row by RecordId
+            help         list available commands
+            quit         exit
+            """;
     }
 
     private String handleAllocatePage() {
@@ -169,18 +170,22 @@ public final class LocalShellBackend implements ShellBackend {
         Integer age = null;
 
         for (String part : args.split("\\s+")) {
-            if (part.startsWith("page=")) {
-                pageId = Integer.parseInt(part.substring(5));
-            } else if (part.startsWith("id=")) {
-                id = Long.parseLong(part.substring(3));
-            } else if (part.startsWith("name=")) {
-                name = part.substring(5);
-            } else if (part.startsWith("age=")) {
-                age = Integer.parseInt(part.substring(4));
+            try {
+                if (part.startsWith("page=")) {
+                    pageId = Integer.parseInt(part.substring(5));
+                } else if (part.startsWith("id=")) {
+                    id = Long.parseLong(part.substring(3));
+                } else if (part.startsWith("name=")) {
+                    name = part.substring(5);
+                } else if (part.startsWith("age=")) {
+                    age = Integer.parseInt(part.substring(4));
+                }
+            } catch (NumberFormatException e) {
+                return "usage: insert-raw page=N id=N name=XXX age=N (invalid number: " + part + ")";
             }
         }
 
-        if (pageId < 0 || id == null || name == null || age == null) {
+        if (pageId < 1 || id == null || name == null || age == null) {
             return "usage: insert-raw page=N id=N name=XXX age=N";
         }
 
@@ -243,11 +248,9 @@ public final class LocalShellBackend implements ShellBackend {
             HeapTupleHeader header = HeapTupleHeader.readFrom(
                 ByteBuffer.wrap(raw).order(ByteOrder.BIG_ENDIAN), 0);
 
+            // Defensive: heapPage.get() already validated FLAGS_NORMAL, but double-check visibility
             if (header.xmin() != Constants.BOOTSTRAP_XID) {
                 return "error: tuple not visible (xmin != BOOTSTRAP_XID)";
-            }
-            if (header.xmax() != Constants.INVALID_XID) {
-                return "error: tuple is deleted (xmax = " + header.xmax() + ")";
             }
 
             int hoff = header.hoff();
