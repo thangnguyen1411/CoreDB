@@ -2,9 +2,6 @@ package com.coredb.config;
 
 import com.coredb.api.CoreDBConfig;
 import com.coredb.util.Constants;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -13,6 +10,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Loads CoreDB configuration from a YAML file (flat key: value format).
@@ -24,23 +23,25 @@ import java.util.Map;
  *   4. Built-in defaults                      — no file required
  *
  * Supported keys and defaults:
- *   data-path    : data/core.db
+ *   data-path    : data
  *   engine-type  : BTREE
  *   page-size    : 8192
  */
 public final class CoreDBConfigLoader {
 
-    private static final Logger log = LoggerFactory.getLogger(CoreDBConfigLoader.class);
+    private static final Logger log = LoggerFactory.getLogger(
+        CoreDBConfigLoader.class
+    );
 
     public static final String DEFAULT_FILE = "coredb.yaml";
 
-    private static final String KEY_DATA_PATH   = "data-path";
+    private static final String KEY_DATA_PATH = "data-path";
     private static final String KEY_ENGINE_TYPE = "engine-type";
-    private static final String KEY_PAGE_SIZE   = "page-size";
+    private static final String KEY_PAGE_SIZE = "page-size";
 
-    private static final String DEFAULT_DATA_PATH   = "data/core.db";
+    private static final String DEFAULT_DATA_PATH = "data";
     private static final String DEFAULT_ENGINE_TYPE = "BTREE";
-    private static final int    DEFAULT_PAGE_SIZE   = Constants.PAGE_SIZE;
+    private static final int DEFAULT_PAGE_SIZE = Constants.PAGE_SIZE;
 
     private CoreDBConfigLoader() {}
 
@@ -58,14 +59,21 @@ public final class CoreDBConfigLoader {
     public static LoadedConfig load(String yamlFile) {
         Map<String, String> values = readYaml(yamlFile);
 
-        String dataPath    = values.getOrDefault(KEY_DATA_PATH, DEFAULT_DATA_PATH);
-        EngineType engine  = parseEngineType(values.getOrDefault(KEY_ENGINE_TYPE, DEFAULT_ENGINE_TYPE));
-        int pageSize       = parsePageSize(values.getOrDefault(KEY_PAGE_SIZE, String.valueOf(DEFAULT_PAGE_SIZE)));
+        String dataPath = values.getOrDefault(KEY_DATA_PATH, DEFAULT_DATA_PATH);
+        EngineType engine = parseEngineType(
+            values.getOrDefault(KEY_ENGINE_TYPE, DEFAULT_ENGINE_TYPE)
+        );
+        int pageSize = parsePageSize(
+            values.getOrDefault(
+                KEY_PAGE_SIZE,
+                String.valueOf(DEFAULT_PAGE_SIZE)
+            )
+        );
 
         CoreDBConfig config = CoreDBConfig.builder()
-                .engineType(engine)
-                .pageSize(pageSize)
-                .build();
+            .engineType(engine)
+            .pageSize(pageSize)
+            .build();
 
         return new LoadedConfig(dataPath, config);
     }
@@ -86,21 +94,33 @@ public final class CoreDBConfigLoader {
         }
 
         // 2. Classpath — works whether running from IDE or packaged jar
-        try (InputStream in = CoreDBConfigLoader.class.getClassLoader().getResourceAsStream(file)) {
+        try (
+            InputStream in =
+                CoreDBConfigLoader.class.getClassLoader().getResourceAsStream(
+                    file
+                )
+        ) {
             if (in != null) {
                 Map<String, String> values = parseFlat(in);
                 log.info("Loaded config from classpath: {}", file);
                 return values;
             }
         } catch (IOException e) {
-            log.warn("Could not read classpath resource {}: {}", file, e.getMessage());
+            log.warn(
+                "Could not read classpath resource {}: {}",
+                file,
+                e.getMessage()
+            );
         }
 
         // 3. Built-in defaults
         if (file.equals(DEFAULT_FILE)) {
             log.info("No {} found — using built-in defaults", DEFAULT_FILE);
         } else {
-            log.warn("Config file '{}' not found — using built-in defaults", file);
+            log.warn(
+                "Config file '{}' not found — using built-in defaults",
+                file
+            );
         }
         return Map.of();
     }
@@ -110,9 +130,14 @@ public final class CoreDBConfigLoader {
      * Handles: "key: value", blank lines, and comment lines starting with '#'.
      * Does not handle nested blocks, lists, or multi-line values.
      */
-    private static Map<String, String> parseFlat(InputStream in) throws IOException {
+    private static Map<String, String> parseFlat(InputStream in)
+        throws IOException {
         Map<String, String> map = new HashMap<>();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(in))) {
+        try (
+            BufferedReader reader = new BufferedReader(
+                new InputStreamReader(in)
+            )
+        ) {
             String line;
             while ((line = reader.readLine()) != null) {
                 String trimmed = line.trim();
@@ -123,7 +148,7 @@ public final class CoreDBConfigLoader {
                 if (colon < 1) {
                     continue;
                 }
-                String key   = trimmed.substring(0, colon).trim();
+                String key = trimmed.substring(0, colon).trim();
                 String value = trimmed.substring(colon + 1).trim();
                 // Strip inline comment (e.g. "BTREE  # default engine")
                 int commentMark = value.indexOf('#');
@@ -153,7 +178,11 @@ public final class CoreDBConfigLoader {
         try {
             return Integer.parseInt(raw.trim());
         } catch (NumberFormatException e) {
-            log.warn("Invalid page-size '{}', falling back to {}", raw, DEFAULT_PAGE_SIZE);
+            log.warn(
+                "Invalid page-size '{}', falling back to {}",
+                raw,
+                DEFAULT_PAGE_SIZE
+            );
             return DEFAULT_PAGE_SIZE;
         }
     }
