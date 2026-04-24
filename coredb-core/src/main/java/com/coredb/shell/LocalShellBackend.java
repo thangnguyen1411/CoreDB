@@ -464,7 +464,7 @@ public final class LocalShellBackend implements ShellBackend {
             String path = db.dataPath().relativize(hf.tablePath()).toString();
             StringBuilder sb = new StringBuilder();
             sb.append("path=").append(path).append("\n");
-            sb.append(String.format("magic=0x%08X (\"HEAP\")%n", 0x48454150));
+            sb.append(String.format("magic=0x%08X (\"HEAP\")%n", Constants.HEAP_FILE_MAGIC));
             sb.append("formatVersion=1\n");
             sb.append("oid=").append(oid).append("\n");
             sb.append("nextPageId=").append(hf.nextPageId());
