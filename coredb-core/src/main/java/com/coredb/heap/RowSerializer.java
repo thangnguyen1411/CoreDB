@@ -13,9 +13,8 @@ import java.util.List;
 
 /**
  * Result of serializing a row: the data bytes and the null bitmap.
+ * @see SerializedRow
  */
-record SerializedRow(byte[] data, byte[] nullBitmap) {}
-
 public final class RowSerializer {
 
     private RowSerializer() {}
