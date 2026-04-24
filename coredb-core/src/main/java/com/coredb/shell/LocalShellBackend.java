@@ -4,6 +4,7 @@ import com.coredb.api.Column;
 import com.coredb.api.CoreDB;
 import com.coredb.api.Row;
 import com.coredb.api.Schema;
+import com.coredb.catalog.ColumnDefParser;
 import com.coredb.heap.HeapPage;
 import com.coredb.heap.HeapTupleHeader;
 import com.coredb.heap.RecordId;
@@ -56,6 +57,7 @@ public final class LocalShellBackend implements ShellBackend {
             case "get-raw"        -> handleGetRaw(args);
             case "scan-raw"       -> handleScanRaw(args);
             case "delete-raw"     -> handleDeleteRaw(args);
+            case "schema-parse"   -> handleSchemaParse(args);
             case "help"           -> formatHelp();
             default               -> "unknown command: " + command + "  (type 'help' for available commands)";
         };
@@ -148,6 +150,7 @@ public final class LocalShellBackend implements ShellBackend {
             get-raw rid=page:slot                   get a row by RecordId
             scan-raw page=N                         scan all rows on a page
             delete-raw rid=page:slot                delete a row by RecordId
+            schema-parse <def>                      parse column definition (id:long name:string pk:id)
             help         list available commands
             quit         exit
             """;
@@ -332,6 +335,19 @@ public final class LocalShellBackend implements ShellBackend {
 
             return "ok (t_xmax set)";
         } catch (Exception e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    private String handleSchemaParse(String args) {
+        if (args.isBlank()) {
+            return "usage: schema-parse id:long name:string age:int pk:id";
+        }
+
+        try {
+            ColumnDefParser.ParsedSchema parsed = ColumnDefParser.parse(args);
+            return ColumnDefParser.formatSchema(parsed.schema(), parsed.pkColumn());
+        } catch (IllegalArgumentException e) {
             return "error: " + e.getMessage();
         }
     }
