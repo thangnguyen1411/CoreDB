@@ -2,8 +2,8 @@ package com.coredb.storage;
 
 import com.coredb.api.CoreDBConfig;
 import com.coredb.config.EngineType;
-import com.coredb.page.PageHeader;
 import com.coredb.page.Page;
+import com.coredb.page.PageHeader;
 import com.coredb.page.PageType;
 import com.coredb.util.BinaryUtil;
 import com.coredb.util.Constants;
@@ -21,15 +21,17 @@ import java.nio.file.StandardOpenOption;
 
 public final class DiskManager implements AutoCloseable {
 
+    private static final String DB_FILE_NAME = "core.db";
+
     private static final Logger log = LoggerFactory.getLogger(DiskManager.class);
 
     // Offsets within page 0's payload (right after the 16-byte PageHeader)
-    private static final int META_MAGIC        = PageHeader.SIZE;
-    private static final int META_VERSION      = META_MAGIC + 8;
+    private static final int META_MAGIC = PageHeader.SIZE;
+    private static final int META_VERSION = META_MAGIC + 8;
     private static final int META_CATALOG_ROOT = META_VERSION + 2;
-    private static final int META_NEXT_PAGE    = META_CATALOG_ROOT + 4;
-    private static final int META_ENGINE_TYPE  = META_NEXT_PAGE + 4;
-    private static final int META_END          = META_ENGINE_TYPE + 1;
+    private static final int META_NEXT_PAGE = META_CATALOG_ROOT + 4;
+    private static final int META_ENGINE_TYPE = META_NEXT_PAGE + 4;
+    private static final int META_END = META_ENGINE_TYPE + 1;
 
     private final Path path;
     private final FileChannel channel;
@@ -41,28 +43,26 @@ public final class DiskManager implements AutoCloseable {
         this.metaPage = metaPage;
     }
 
-    public static DiskManager open(Path path, CoreDBConfig config) throws IOException {
-        Path parent = path.getParent();
-        if (parent != null) {
-            Files.createDirectories(parent);
-        }
+    public static DiskManager open(Path dataDir, CoreDBConfig config) throws IOException {
+        Files.createDirectories(dataDir);
 
-        boolean isNew = !Files.exists(path);
-        FileChannel channel = FileChannel.open(path,
+        Path dbFile = dataDir.resolve(DB_FILE_NAME);
+        boolean isNew = !Files.exists(dbFile);
+        FileChannel channel = FileChannel.open(dbFile,
                 StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE);
 
         Page metaPage;
         if (isNew) {
             metaPage = buildMetaPage(config);
             writePageToChannel(channel, metaPage);
-            log.info("Created database file: {}", path.toAbsolutePath());
+            log.info("Created database file: {}", dbFile.toAbsolutePath());
         } else {
             metaPage = readPageFromChannel(channel, 0);
-            verifyMagic(metaPage, path);
-            log.info("Opened database file: {}  pages={}", path.toAbsolutePath(), readNextPageId(metaPage));
+            verifyMagic(metaPage, dbFile);
+            log.info("Opened database file: {}  pages={}", dbFile.toAbsolutePath(), readNextPageId(metaPage));
         }
 
-        return new DiskManager(path, channel, metaPage);
+        return new DiskManager(dbFile, channel, metaPage);
     }
 
     public Page readPage(int pageId) throws IOException {

@@ -3,7 +3,7 @@
 # All fields are optional — built-in defaults apply for any missing key.
 
 # Path to the database file (created automatically if it does not exist)
-data-path: data/core.db
+data-path: data
 
 # Storage engine: BTREE or LSM (LSM is a future phase)
 engine-type: BTREE
