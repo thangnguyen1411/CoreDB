@@ -1,24 +1,23 @@
 package com.coredb.heap;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
 import com.coredb.api.Column;
 import com.coredb.api.CoreDBConfig;
 import com.coredb.api.Row;
 import com.coredb.api.Schema;
 import com.coredb.config.EngineType;
 import com.coredb.storage.DiskManager;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class HeapFileTest {
 
@@ -33,15 +32,15 @@ class HeapFileTest {
     void setUp() throws IOException {
         Path dbPath = tempDir.resolve("test.db");
         CoreDBConfig config = CoreDBConfig.builder()
-                .engineType(EngineType.BTREE)
-                .pageSize(8192)
-                .build();
+            .engineType(EngineType.BTREE)
+            .pageSize(8192)
+            .build();
         diskManager = DiskManager.open(dbPath, config);
 
         schema = Schema.of(
-                Column.longCol("id"),
-                Column.stringCol("name"),
-                Column.intCol("age")
+            Column.longCol("id"),
+            Column.stringCol("name"),
+            Column.intCol("age")
         );
         heapFile = new HeapFile(diskManager, schema);
     }
@@ -183,8 +182,8 @@ class HeapFileTest {
         RecordId rid = new RecordId(99, 0);
 
         assertThatThrownBy(() -> heapFile.delete(rid))
-                .isInstanceOf(com.coredb.util.StorageException.class)
-                .hasMessageContaining("page 99 does not exist");
+            .isInstanceOf(com.coredb.util.StorageException.class)
+            .hasMessageContaining("page 99 does not exist");
     }
 
     @Test
@@ -199,9 +198,9 @@ class HeapFileTest {
         diskManager.close();
 
         CoreDBConfig config = CoreDBConfig.builder()
-                .engineType(EngineType.BTREE)
-                .pageSize(8192)
-                .build();
+            .engineType(EngineType.BTREE)
+            .pageSize(8192)
+            .build();
         diskManager = DiskManager.open(tempDir.resolve("test.db"), config);
         heapFile = new HeapFile(diskManager, schema);
 
@@ -210,5 +209,50 @@ class HeapFileTest {
             assertThat(fetched).isPresent();
             assertThat(fetched.get().getLong(0)).isEqualTo((long) i);
         }
+    }
+
+    @Test
+    void persistence_10kRows_withDeletes_scanReturnsOnlyLiveRows()
+        throws IOException {
+        List<RecordId> rids = new ArrayList<>();
+        int count = 10_000;
+
+        for (int i = 0; i < count; i++) {
+            rids.add(heapFile.insert(Row.of((long) i, "User" + i, i % 100)));
+        }
+
+        // Delete every 5th row (20% of total)
+        for (int i = 0; i < count; i += 5) {
+            heapFile.delete(rids.get(i));
+        }
+
+        diskManager.close();
+
+        CoreDBConfig config = CoreDBConfig.builder()
+            .engineType(EngineType.BTREE)
+            .pageSize(8192)
+            .build();
+        diskManager = DiskManager.open(tempDir.resolve("test.db"), config);
+        heapFile = new HeapFile(diskManager, schema);
+
+        // Verify deleted rows are not accessible
+        for (int i = 0; i < count; i += 5) {
+            Optional<Row> fetched = heapFile.get(rids.get(i));
+            assertThat(fetched).isEmpty();
+        }
+
+        // Verify live rows are still accessible
+        for (int i = 1; i < count; i += 5) {
+            Optional<Row> fetched = heapFile.get(rids.get(i));
+            assertThat(fetched).isPresent();
+            assertThat(fetched.get().getLong(0)).isEqualTo((long) i);
+        }
+
+        // Scan should return only live rows
+        List<Row> scannedRows = new ArrayList<>();
+        heapFile.scan().forEachRemaining(scannedRows::add);
+
+        int expectedLive = count - (count / 5); // 8000 live rows
+        assertThat(scannedRows).hasSize(expectedLive);
     }
 }
