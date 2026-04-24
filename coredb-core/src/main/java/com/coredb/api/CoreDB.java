@@ -1,10 +1,12 @@
 package com.coredb.api;
 
+import com.coredb.catalog.ControlFile;
 import com.coredb.storage.DiskManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 
 public final class CoreDB implements AutoCloseable {
@@ -13,12 +15,14 @@ public final class CoreDB implements AutoCloseable {
 
     private final Path dataPath;
     private final CoreDBConfig config;
+    private final ControlFile controlFile;
     private final DiskManager diskManager;
     private volatile boolean closed = false;
 
-    private CoreDB(Path dataPath, CoreDBConfig config, DiskManager diskManager) {
+    private CoreDB(Path dataPath, CoreDBConfig config, ControlFile controlFile, DiskManager diskManager) {
         this.dataPath = dataPath;
         this.config = config;
+        this.controlFile = controlFile;
         this.diskManager = diskManager;
         log.debug("CoreDB opened: path={} engine={} pageSize={}", dataPath, config.engineType(), config.pageSize());
     }
@@ -36,8 +40,14 @@ public final class CoreDB implements AutoCloseable {
     }
 
     public static CoreDB open(Path dataPath, CoreDBConfig config) throws IOException {
+        ControlFile controlFile;
+        if (Files.exists(dataPath.resolve("global/pg_control"))) {
+            controlFile = ControlFile.load(dataPath);
+        } else {
+            controlFile = ControlFile.create(dataPath, config);
+        }
         DiskManager dm = DiskManager.open(dataPath, config);
-        return new CoreDB(dataPath, config, dm);
+        return new CoreDB(dataPath, config, controlFile, dm);
     }
 
     public Path dataPath() {
@@ -46,6 +56,10 @@ public final class CoreDB implements AutoCloseable {
 
     public CoreDBConfig config() {
         return config;
+    }
+
+    public ControlFile controlFile() {
+        return controlFile;
     }
 
     public DiskManager diskManager() {
@@ -60,7 +74,11 @@ public final class CoreDB implements AutoCloseable {
     public void close() throws IOException {
         if (!closed) {
             closed = true;
-            diskManager.close();
+            try {
+                diskManager.close();
+            } finally {
+                controlFile.close();
+            }
             log.debug("CoreDB closed: path={}", dataPath);
         }
     }
