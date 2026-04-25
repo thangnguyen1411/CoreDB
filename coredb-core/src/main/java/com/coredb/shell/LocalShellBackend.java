@@ -5,8 +5,10 @@ import com.coredb.api.CoreDB;
 import com.coredb.api.Row;
 import com.coredb.api.Schema;
 import com.coredb.catalog.BootstrapCatalog;
+import com.coredb.catalog.Catalog;
 import com.coredb.catalog.ColumnDefParser;
 import com.coredb.catalog.ControlFile;
+import com.coredb.catalog.TableMeta;
 import com.coredb.heap.HeapFile;
 import com.coredb.heap.HeapPage;
 import com.coredb.heap.HeapTupleHeader;
@@ -25,6 +27,7 @@ import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Optional;
 
 public final class LocalShellBackend implements ShellBackend {
@@ -37,9 +40,17 @@ public final class LocalShellBackend implements ShellBackend {
     );
 
     private final CoreDB db;
+    private Catalog catalog;
 
     public LocalShellBackend(CoreDB db) {
         this.db = db;
+    }
+
+    private Catalog getCatalog() throws IOException {
+        if (catalog == null) {
+            catalog = new Catalog(db.dataPath(), db.controlFile());
+        }
+        return catalog;
     }
 
     @Override
@@ -70,6 +81,10 @@ public final class LocalShellBackend implements ShellBackend {
             case "heap-create"       -> handleHeapCreate(args);
             case "heap-meta"         -> handleHeapMeta(args);
             case "bootstrap"         -> handleBootstrap();
+            case "create-table"      -> handleCreateTable(args);
+            case "list-tables"       -> handleListTables();
+            case "describe"          -> handleDescribe(args);
+            case "drop-table"        -> handleDropTable(args);
             case "help"              -> formatHelp();
             default                  -> "unknown command: " + command + "  (type 'help' for available commands)";
         };
@@ -158,21 +173,28 @@ public final class LocalShellBackend implements ShellBackend {
             page-stats   show page count and file size
             page-dump N  hex dump of page N
             allocate-page   create a new heap page for raw insert
-            insert-raw page=N id=N name=XXX age=N  insert a row on specific page
-            get-raw rid=page:slot                   get a row by RecordId
-            scan-raw page=N                         scan all rows on a page
-            delete-raw rid=page:slot                delete a row by RecordId
-            schema-parse <def>                      parse column definition (id:long name:string pk:id)
-            control-info                            show pg_control contents
-            control-alloc-oid                       allocate next OID and persist
-            heap-create oid=N cols...               create per-table heap file (oid, columns)
-            heap-meta oid=N                         show meta page of per-table heap file
-            heap-stats oid=N                        show file stats for per-table heap file
-            insert-raw oid=N id=N name=XXX ...      insert a row into per-table file
-            get-raw oid=N rid=page:slot             get a row by RecordId from per-table file
-            scan-raw oid=N                          scan all rows in per-table file
-            delete-raw oid=N rid=page:slot          delete a row by RecordId from per-table file
-            bootstrap                               initialize system catalogs (run once)
+
+            Catalog commands:
+            create-table <name> cols... pk:<col>   create a new table (e.g., create-table users id:long name:string pk:id)
+            list-tables                             list all tables
+            describe <name>                         show table schema
+            drop-table <name>                       drop a table (soft delete)
+
+            Raw heap commands:
+            insert-raw oid=N id=N name=XXX age=N   insert a row into per-table file
+            get-raw oid=N rid=page:slot            get a row by RecordId from per-table file
+            scan-raw oid=N                         scan all rows in per-table file
+            delete-raw oid=N rid=page:slot         delete a row by RecordId from per-table file
+            heap-stats oid=N                       show file stats for per-table heap file
+            heap-create oid=N cols...              create per-table heap file (oid, columns)
+            heap-meta oid=N                        show meta page of per-table heap file
+
+            Cluster commands:
+            schema-parse <def>                     parse column definition (id:long name:string pk:id)
+            control-info                           show pg_control contents
+            control-alloc-oid                    allocate next OID and persist
+            bootstrap                              show bootstrap status
+
             help         list available commands
             quit         exit
             """;
@@ -527,6 +549,98 @@ public final class LocalShellBackend implements ShellBackend {
             case BootstrapCatalog.CORE_ATTRIBUTE_OID  -> BootstrapCatalog.CORE_ATTRIBUTE_SCHEMA;
             default                                   -> RAW_SCHEMA;
         };
+    }
+
+    private String handleCreateTable(String args) {
+        if (args.isBlank()) {
+            return "usage: create-table <name> col:type ... pk:<col>\n" +
+                   "  e.g., create-table users id:long name:string age:int pk:id";
+        }
+
+        String[] parts = args.trim().split("\\s+", 2);
+        String tableName = parts[0];
+        String colDefs = parts.length > 1 ? parts[1] : "";
+
+        if (colDefs.isBlank()) {
+            return "usage: create-table <name> col:type ... pk:<col> (at least one column required)";
+        }
+
+        try {
+            ColumnDefParser.ParsedSchema parsed = ColumnDefParser.parse(colDefs);
+            Catalog cat = getCatalog();
+            cat.createTable(tableName, parsed.schema(), parsed.pkColumn());
+            return "ok";
+        } catch (IllegalArgumentException e) {
+            return "error: " + e.getMessage();
+        } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    private String handleListTables() {
+        try {
+            Catalog cat = getCatalog();
+            List<TableMeta> tables = cat.listTables();
+            if (tables.isEmpty()) {
+                return "(no tables)";
+            }
+            StringBuilder sb = new StringBuilder();
+            for (TableMeta meta : tables) {
+                sb.append(String.format("%-20s oid=%d  pk=%s  engine=%s%n",
+                    meta.name(), meta.oid(), meta.pkColumn(), meta.engineType()));
+            }
+            return sb.toString().stripTrailing();
+        } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    private String handleDescribe(String args) {
+        if (args.isBlank()) {
+            return "usage: describe <table-name>";
+        }
+        String tableName = args.trim().split("\\s+")[0];
+
+        try {
+            Catalog cat = getCatalog();
+            Optional<TableMeta> metaOpt = cat.openTable(tableName);
+            if (metaOpt.isEmpty()) {
+                return "error: unknown table: " + tableName;
+            }
+            TableMeta meta = metaOpt.get();
+            StringBuilder sb = new StringBuilder();
+            sb.append(String.format("table=%s  oid=%d  pk=%s  engine=%s%n",
+                meta.name(), meta.oid(), meta.pkColumn(), meta.engineType()));
+            sb.append(String.format("%-5s %-7s %s%n", "col", "type", "nullable"));
+            for (int i = 0; i < meta.schema().columnCount(); i++) {
+                Column col = meta.schema().column(i);
+                sb.append(String.format("%-5s %-7s %s%n",
+                    col.name(), col.type(), col.nullable() ? "true" : "false"));
+            }
+            return sb.toString().stripTrailing();
+        } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    private String handleDropTable(String args) {
+        if (args.isBlank()) {
+            return "usage: drop-table <table-name>";
+        }
+        String tableName = args.trim().split("\\s+")[0];
+
+        try {
+            Catalog cat = getCatalog();
+            cat.dropTable(tableName);
+            return "ok (soft delete)";
+        } catch (UnsupportedOperationException e) {
+            // dropTable is not fully implemented yet - soft delete requires RecordId tracking
+            return "error: dropTable not yet fully implemented (use list-tables to verify)";
+        } catch (IllegalArgumentException e) {
+            return "error: " + e.getMessage();
+        } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
     }
 
     private String handleBootstrap() {
