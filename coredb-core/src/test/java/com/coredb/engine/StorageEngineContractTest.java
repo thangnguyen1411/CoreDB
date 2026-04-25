@@ -43,6 +43,19 @@ public abstract class StorageEngineContractTest {
      */
     protected abstract StorageEngine createEngine(Path dataDir, TableMeta meta) throws IOException;
 
+    /**
+     * Hook for concrete subclasses to verify that a dead tuple version exists.
+     * The abstract default does nothing; BTreeStorageEngineTest must override
+     * this to scan the raw heap and assert two physical tuples exist after upsert.
+     *
+     * @param dataDir the data directory
+     * @param meta    table metadata
+     * @param pk      the primary key that was updated
+     */
+    protected void assertDeadVersionExists(Path dataDir, TableMeta meta, long pk) {
+        // Default: no assertion. Concrete subclass must override.
+    }
+
     private TableMeta createTestTableMeta() {
         Schema schema = Schema.of(
             com.coredb.api.Column.longCol("id").withNullable(false),
@@ -92,13 +105,8 @@ public abstract class StorageEngineContractTest {
             assertThat(result.get()).isEqualTo(updated);
         }
 
-        // NOTE: BTreeStorageEngineTest must additionally verify:
-        // A raw heap scan sees TWO physical tuples:
-        //   - one with t_xmax = 0 (the new, live version)
-        //   - one with t_xmax = current_xid (the old, dead version)
-        // This distinguishes MVCC upsert from in-place overwrite.
-        // The abstract class cannot assert this (no heap access), so the
-        // concrete subclass must override this test or add a post-condition.
+        // Verify that a dead version exists (MVCC upsert, not in-place overwrite)
+        assertDeadVersionExists(dataDir, meta, 1L);
     }
 
     @Test
