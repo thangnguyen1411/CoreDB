@@ -4,8 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.coredb.api.Column;
+import com.coredb.api.Row;
 import com.coredb.api.Schema;
-import com.coredb.page.Page;
 import com.coredb.util.Constants;
 import com.coredb.util.CorruptionException;
 import org.junit.jupiter.api.BeforeEach;
@@ -186,13 +186,11 @@ class HeapFilePerTableTest {
         hf.close();
     }
 
-    // ==================== Phase 3D: Per-table operations tests ====================
-
     @Test
     void insert_singleRow_returnsRecordId() throws IOException {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
 
-        com.coredb.api.Row row = com.coredb.api.Row.of(1L, "Alice", 30);
+        Row row = Row.of(1L, "Alice", 30);
         RecordId rid = hf.insert(row);
 
         assertThat(rid.pageId()).isGreaterThanOrEqualTo(1); // Page 0 is meta
@@ -205,7 +203,7 @@ class HeapFilePerTableTest {
     void insert_singleRow_fileSizeIsExactlyTwoPages() throws IOException {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
 
-        com.coredb.api.Row row = com.coredb.api.Row.of(1L, "Alice", 30);
+        Row row = Row.of(1L, "Alice", 30);
         hf.insert(row);
         hf.close();
 
@@ -220,7 +218,7 @@ class HeapFilePerTableTest {
 
         int count = 100;
         for (int i = 0; i < count; i++) {
-            hf.insert(com.coredb.api.Row.of((long) i, "User" + i, i));
+            hf.insert(Row.of((long) i, "User" + i, i));
         }
 
         // Get page count before closing
@@ -236,10 +234,10 @@ class HeapFilePerTableTest {
     void get_existingRow_returnsRow() throws IOException {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
 
-        com.coredb.api.Row original = com.coredb.api.Row.of(1L, "Alice", 30);
+        Row original = Row.of(1L, "Alice", 30);
         RecordId rid = hf.insert(original);
 
-        java.util.Optional<com.coredb.api.Row> fetched = hf.get(rid);
+        java.util.Optional<Row> fetched = hf.get(rid);
 
         assertThat(fetched).isPresent();
         assertThat(fetched.get()).isEqualTo(original);
@@ -252,7 +250,7 @@ class HeapFilePerTableTest {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
 
         RecordId rid = new RecordId(1, 99);
-        java.util.Optional<com.coredb.api.Row> fetched = hf.get(rid);
+        java.util.Optional<Row> fetched = hf.get(rid);
 
         assertThat(fetched).isEmpty();
 
@@ -267,12 +265,12 @@ class HeapFilePerTableTest {
         int count = 50;
 
         for (int i = 0; i < count; i++) {
-            com.coredb.api.Row row = com.coredb.api.Row.of((long) i, "User" + i, i % 100);
+            Row row = Row.of((long) i, "User" + i, i % 100);
             rids.add(hf.insert(row));
         }
 
         for (int i = 0; i < count; i++) {
-            java.util.Optional<com.coredb.api.Row> fetched = hf.get(rids.get(i));
+            java.util.Optional<Row> fetched = hf.get(rids.get(i));
             assertThat(fetched).isPresent();
             assertThat(fetched.get().getLong(0)).isEqualTo((long) i);
             assertThat(fetched.get().getString(1)).isEqualTo("User" + i);
@@ -283,32 +281,41 @@ class HeapFilePerTableTest {
     }
 
     @Test
-    void allocatePage_incrementsNextNewPageId() throws IOException {
+    void insert_incrementsNextPageId() throws IOException {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
 
-        assertThat(hf.nextPageId()).isEqualTo(1);
+        assertThat(hf.nextPageId()).isEqualTo(1); // Just meta page
 
-        Page newPage = hf.allocateNewPage();
-        assertThat(newPage.pageId()).isEqualTo(1);
+        // First insert allocates page 1
+        hf.insert(Row.of(1L, "Alice", 30));
         assertThat(hf.nextPageId()).isEqualTo(2);
 
-        Page anotherPage = hf.allocateNewPage();
-        assertThat(anotherPage.pageId()).isEqualTo(2);
-        assertThat(hf.nextPageId()).isEqualTo(3);
+        // Many more inserts to force another page allocation
+        for (int i = 0; i < 1000; i++) {
+            hf.insert(Row.of((long) i, "User" + i, i));
+        }
+        assertThat(hf.nextPageId()).isGreaterThan(2);
 
         hf.close();
     }
 
     @Test
-    void allocatePage_persistsNextPageIdToMetaNewPage() throws IOException {
+    void insert_persistsNextPageIdToMetaPage() throws IOException {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
-        hf.allocateNewPage();
-        hf.allocateNewPage();
+
+        // Insert enough rows to allocate multiple pages
+        for (int i = 0; i < 1000; i++) {
+            hf.insert(Row.of((long) i, "User" + i, i));
+        }
+
+        int pageCountBeforeClose = hf.nextPageId();
+        long fileSizeBeforeClose = hf.fileSize();
         hf.close();
 
-        // Reopen and verify nextPageId persisted
+        // Reopen and verify nextPageId and file size persisted
         HeapFile reopened = HeapFile.open(tablePath, 1000, schema);
-        assertThat(reopened.nextPageId()).isEqualTo(3);
+        assertThat(reopened.nextPageId()).isEqualTo(pageCountBeforeClose);
+        assertThat(reopened.fileSize()).isEqualTo(fileSizeBeforeClose);
         reopened.close();
     }
 
@@ -316,12 +323,12 @@ class HeapFilePerTableTest {
     void delete_existingRow_getReturnsEmpty() throws IOException {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
 
-        com.coredb.api.Row row = com.coredb.api.Row.of(1L, "Alice", 30);
+        Row row = Row.of(1L, "Alice", 30);
         RecordId rid = hf.insert(row);
 
         hf.delete(rid);
 
-        java.util.Optional<com.coredb.api.Row> fetched = hf.get(rid);
+        java.util.Optional<Row> fetched = hf.get(rid);
         assertThat(fetched).isEmpty();
 
         hf.close();
@@ -331,7 +338,7 @@ class HeapFilePerTableTest {
     void scan_emptyFile_returnsEmpty() throws IOException {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
 
-        java.util.List<com.coredb.api.Row> rows = new java.util.ArrayList<>();
+        java.util.List<Row> rows = new java.util.ArrayList<>();
         hf.scan().forEachRemaining(rows::add);
 
         assertThat(rows).isEmpty();
@@ -345,10 +352,10 @@ class HeapFilePerTableTest {
 
         int count = 50;
         for (int i = 0; i < count; i++) {
-            hf.insert(com.coredb.api.Row.of((long) i, "User" + i, i));
+            hf.insert(Row.of((long) i, "User" + i, i));
         }
 
-        java.util.List<com.coredb.api.Row> rows = new java.util.ArrayList<>();
+        java.util.List<Row> rows = new java.util.ArrayList<>();
         hf.scan().forEachRemaining(rows::add);
 
         assertThat(rows).hasSize(count);
@@ -364,14 +371,14 @@ class HeapFilePerTableTest {
         int count = 20;
 
         for (int i = 0; i < count; i++) {
-            rids.add(hf.insert(com.coredb.api.Row.of((long) i, "User" + i, i)));
+            rids.add(hf.insert(Row.of((long) i, "User" + i, i)));
         }
 
         for (int i = 0; i < count; i += 2) {
             hf.delete(rids.get(i));
         }
 
-        java.util.List<com.coredb.api.Row> rows = new java.util.ArrayList<>();
+        java.util.List<Row> rows = new java.util.ArrayList<>();
         hf.scan().forEachRemaining(rows::add);
 
         assertThat(rows).hasSize(count / 2);
@@ -387,14 +394,14 @@ class HeapFilePerTableTest {
         int count = 50;
 
         for (int i = 0; i < count; i++) {
-            rids.add(hf.insert(com.coredb.api.Row.of((long) i, "User" + i, i)));
+            rids.add(hf.insert(Row.of((long) i, "User" + i, i)));
         }
         hf.close();
 
         // Reopen and verify data
         HeapFile reopened = HeapFile.open(tablePath, 1000, schema);
         for (int i = 0; i < count; i++) {
-            java.util.Optional<com.coredb.api.Row> fetched = reopened.get(rids.get(i));
+            java.util.Optional<Row> fetched = reopened.get(rids.get(i));
             assertThat(fetched).isPresent();
             assertThat(fetched.get().getLong(0)).isEqualTo((long) i);
         }
@@ -407,12 +414,12 @@ class HeapFilePerTableTest {
 
         int count = 50;
         for (int i = 0; i < count; i++) {
-            hf.insert(com.coredb.api.Row.of((long) i, "User" + i, i));
+            hf.insert(Row.of((long) i, "User" + i, i));
         }
         hf.close();
 
         HeapFile reopened = HeapFile.open(tablePath, 1000, schema);
-        java.util.List<com.coredb.api.Row> rows = new java.util.ArrayList<>();
+        java.util.List<Row> rows = new java.util.ArrayList<>();
         reopened.scan().forEachRemaining(rows::add);
 
         assertThat(rows).hasSize(count);
@@ -428,12 +435,12 @@ class HeapFilePerTableTest {
         HeapFile hf1001 = HeapFile.create(path1001, 1001, schema);
 
         // Insert different amounts of data into each
-        hf1000.insert(com.coredb.api.Row.of(1L, "A", 1));
+        hf1000.insert(Row.of(1L, "A", 1));
 
         // Insert many rows into second file to force page allocation
         // Need enough rows to span multiple pages
         for (int i = 0; i < 1000; i++) {
-            hf1001.insert(com.coredb.api.Row.of((long) i, "User" + i, i));
+            hf1001.insert(Row.of((long) i, "User" + i, i));
         }
 
         int pages1000 = hf1000.nextPageId();
@@ -464,7 +471,7 @@ class HeapFilePerTableTest {
 
         assertThat(hf.pageCount()).isEqualTo(1); // Just meta page
 
-        hf.insert(com.coredb.api.Row.of(1L, "Alice", 30));
+        hf.insert(Row.of(1L, "Alice", 30));
         assertThat(hf.pageCount()).isGreaterThanOrEqualTo(2); // Meta + at least 1 data
 
         hf.close();
@@ -477,7 +484,7 @@ class HeapFilePerTableTest {
         long size1 = hf.fileSize();
         assertThat(size1).isEqualTo(Constants.PAGE_SIZE); // Just meta page
 
-        hf.insert(com.coredb.api.Row.of(1L, "Alice", 30));
+        hf.insert(Row.of(1L, "Alice", 30));
 
         long size2 = hf.fileSize();
         assertThat(size2).isGreaterThan(size1);
