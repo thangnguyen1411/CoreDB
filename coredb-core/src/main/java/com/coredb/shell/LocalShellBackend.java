@@ -114,7 +114,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
               scan-raw table=<name>|oid=<N>                         scan all rows
               delete-raw table=<name>|oid=<N> rid=page:slot         delete a row by RecordId
               heap-stats table=<name>|oid=<N>                       show file stats
-              heap-meta oid=<N>                                     show meta page of per-table heap file
+              heap-meta table=<name>|oid=<N>                        show meta page of per-table heap file
             """;
     }
 
@@ -343,15 +343,10 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
     }
 
     private String handleHeapMeta(String args) {
-        if (!args.startsWith("oid=")) {
-            return "usage: heap-meta oid=N";
-        }
-
-        int oid;
-        try {
-            oid = Integer.parseInt(args.substring(4));
-        } catch (NumberFormatException e) {
-            return "invalid OID: " + args.substring(4);
+        int oid = resolveOid(args);
+        String error = validateOidResolution(oid, args);
+        if (error != null) {
+            return error;
         }
 
         // Build path: dataDir/base/1/<oid>
@@ -391,6 +386,18 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
     }
 
     /**
+     * Extracts table name from args if present.
+     */
+    private Optional<String> extractTableName(String args) {
+        for (String part : args.split("\\s+")) {
+            if (part.startsWith("table=")) {
+                return Optional.of(part.substring(6));
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
      * Resolves either "oid=N" or "table=<name>" to an OID.
      * Returns -1 if neither is found or if resolution fails.
      */
@@ -422,14 +429,9 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
      */
     private String validateOidResolution(int oid, String args) {
         if (oid < 0) {
-            if (args.contains("table=")) {
-                String tableName = "";
-                for (String part : args.split("\\s+")) {
-                    if (part.startsWith("table=")) {
-                        tableName = part.substring(6);
-                        break;
-                    }
-                }
+            Optional<String> tableNameOpt = extractTableName(args);
+            if (tableNameOpt.isPresent()) {
+                String tableName = tableNameOpt.get();
                 try {
                     Catalog cat = getCatalog();
                     Optional<TableMeta> meta = cat.openTable(tableName);
