@@ -174,6 +174,8 @@ public final class HeapFile implements AutoCloseable {
             // Verify the page actually has enough space (FSM is a hint)
             Page page = readPage(pageId);
             if (page.pageType() != PageType.HEAP) {
+                // Zero out FSM entry so requestPage skips this non-HEAP page
+                fsm.updatePage(pageId, 0);
                 continue;
             }
             HeapPage heapPage = new HeapPage(page);
