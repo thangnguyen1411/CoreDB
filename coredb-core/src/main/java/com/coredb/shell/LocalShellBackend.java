@@ -4,6 +4,7 @@ import com.coredb.api.Column;
 import com.coredb.api.CoreDB;
 import com.coredb.api.Row;
 import com.coredb.api.Schema;
+import com.coredb.catalog.BootstrapCatalog;
 import com.coredb.catalog.ColumnDefParser;
 import com.coredb.catalog.ControlFile;
 import com.coredb.heap.HeapFile;
@@ -68,6 +69,7 @@ public final class LocalShellBackend implements ShellBackend {
             case "control-alloc-oid" -> handleControlAllocOid();
             case "heap-create"       -> handleHeapCreate(args);
             case "heap-meta"         -> handleHeapMeta(args);
+            case "bootstrap"         -> handleBootstrap();
             case "help"              -> formatHelp();
             default                  -> "unknown command: " + command + "  (type 'help' for available commands)";
         };
@@ -170,6 +172,7 @@ public final class LocalShellBackend implements ShellBackend {
             get-raw oid=N rid=page:slot             get a row by RecordId from per-table file
             scan-raw oid=N                          scan all rows in per-table file
             delete-raw oid=N rid=page:slot          delete a row by RecordId from per-table file
+            bootstrap                               initialize system catalogs (run once)
             help         list available commands
             quit         exit
             """;
@@ -513,6 +516,30 @@ public final class LocalShellBackend implements ShellBackend {
 
             hf.close();
             return sb.toString();
+        } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    private String handleBootstrap() {
+        // Check if already initialized
+        Path controlPath = db.dataPath().resolve("global/pg_control");
+        if (Files.exists(controlPath)) {
+            return "already initialized (pg_control exists)";
+        }
+
+        try {
+            BootstrapCatalog.initialize(db.dataPath(), db.config());
+
+            // Build the result message showing what was created
+            StringBuilder sb = new StringBuilder();
+            sb.append("created global/pg_control\n");
+            sb.append("created base/1/1000 (core_class)    2 rows\n");
+            sb.append("created base/1/1001 (core_attribute) 9 rows");
+
+            return sb.toString();
+        } catch (IllegalStateException e) {
+            return "error: " + e.getMessage();
         } catch (IOException e) {
             return "error: " + e.getMessage();
         }
