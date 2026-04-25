@@ -119,11 +119,11 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
     }
 
     private String handleInsertRaw(String args) {
-        int oid = resolveOid(args);
-        String error = validateOidResolution(oid, args);
-        if (error != null) {
-            return error;
+        OidResolution resolution = resolveOidFull(args);
+        if (!resolution.isSuccess()) {
+            return resolution.errorMessage();
         }
+        int oid = resolution.oid();
 
         Long id = null;
         String name = null;
@@ -164,11 +164,11 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
     }
 
     private String handleGetRaw(String args) {
-        int oid = resolveOid(args);
-        String error = validateOidResolution(oid, args);
-        if (error != null) {
-            return error;
+        OidResolution resolution = resolveOidFull(args);
+        if (!resolution.isSuccess()) {
+            return resolution.errorMessage();
         }
+        int oid = resolution.oid();
 
         RecordId rid = null;
         for (String part : args.split("\\s+")) {
@@ -205,11 +205,11 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
     }
 
     private String handleScanRaw(String args) {
-        int oid = resolveOid(args);
-        String error = validateOidResolution(oid, args);
-        if (error != null) {
-            return error;
+        OidResolution resolution = resolveOidFull(args);
+        if (!resolution.isSuccess()) {
+            return resolution.errorMessage();
         }
+        int oid = resolution.oid();
 
         // Build path: dataDir/base/1/<oid>
         Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
@@ -239,11 +239,11 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
     }
 
     private String handleDeleteRaw(String args) {
-        int oid = resolveOid(args);
-        String error = validateOidResolution(oid, args);
-        if (error != null) {
-            return error;
+        OidResolution resolution = resolveOidFull(args);
+        if (!resolution.isSuccess()) {
+            return resolution.errorMessage();
         }
+        int oid = resolution.oid();
 
         RecordId rid = null;
         for (String part : args.split("\\s+")) {
@@ -276,11 +276,11 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
     }
 
     private String handleHeapStats(String args) {
-        int oid = resolveOid(args);
-        String error = validateOidResolution(oid, args);
-        if (error != null) {
-            return error;
+        OidResolution resolution = resolveOidFull(args);
+        if (!resolution.isSuccess()) {
+            return resolution.errorMessage();
         }
+        int oid = resolution.oid();
 
         // Build path: dataDir/base/1/<oid>
         Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
@@ -343,11 +343,11 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
     }
 
     private String handleHeapMeta(String args) {
-        int oid = resolveOid(args);
-        String error = validateOidResolution(oid, args);
-        if (error != null) {
-            return error;
+        OidResolution resolution = resolveOidFull(args);
+        if (!resolution.isSuccess()) {
+            return resolution.errorMessage();
         }
+        int oid = resolution.oid();
 
         // Build path: dataDir/base/1/<oid>
         Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
@@ -360,18 +360,16 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             // We need a schema to open, but for meta page inspection we just need to validate
             // Use a dummy schema - the meta page doesn't depend on it
             Schema dummySchema = Schema.of(Column.longCol("dummy"));
-            HeapFile hf = HeapFile.open(tablePath, oid, dummySchema);
-
-            String path = db.dataPath().relativize(hf.tablePath()).toString();
-            StringBuilder sb = new StringBuilder();
-            sb.append("path=").append(path).append("\n");
-            sb.append(String.format("magic=0x%08X (\"HEAP\")%n", Constants.HEAP_FILE_MAGIC));
-            sb.append("formatVersion=1\n");
-            sb.append("oid=").append(oid).append("\n");
-            sb.append("nextPageId=").append(hf.nextPageId());
-
-            hf.close();
-            return sb.toString();
+            try (HeapFile hf = HeapFile.open(tablePath, oid, dummySchema)) {
+                String path = db.dataPath().relativize(hf.tablePath()).toString();
+                StringBuilder sb = new StringBuilder();
+                sb.append("path=").append(path).append("\n");
+                sb.append(String.format("magic=0x%08X (\"HEAP\")%n", Constants.HEAP_FILE_MAGIC));
+                sb.append("formatVersion=1\n");
+                sb.append("oid=").append(oid).append("\n");
+                sb.append("nextPageId=").append(hf.nextPageId());
+                return sb.toString();
+            }
         } catch (IOException e) {
             return "error: " + e.getMessage();
         }
@@ -386,65 +384,45 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
     }
 
     /**
-     * Extracts table name from args if present.
+     * Result of OID resolution: either success with OID, or failure with error message.
      */
-    private Optional<String> extractTableName(String args) {
-        for (String part : args.split("\\s+")) {
-            if (part.startsWith("table=")) {
-                return Optional.of(part.substring(6));
-            }
+    private record OidResolution(int oid, String errorMessage, boolean isSuccess) {
+        static OidResolution success(int oid) {
+            return new OidResolution(oid, null, true);
         }
-        return Optional.empty();
+        static OidResolution failure(String errorMessage) {
+            return new OidResolution(-1, errorMessage, false);
+        }
     }
 
     /**
      * Resolves either "oid=N" or "table=<name>" to an OID.
-     * Returns -1 if neither is found or if resolution fails.
+     * Returns an OidResolution with success status and appropriate error message on failure.
      */
-    private int resolveOid(String args) {
+    private OidResolution resolveOidFull(String args) {
         String[] parts = args.split("\\s+");
         for (String part : parts) {
             if (part.startsWith("oid=")) {
                 try {
-                    return Integer.parseInt(part.substring(4));
+                    return OidResolution.success(Integer.parseInt(part.substring(4)));
                 } catch (NumberFormatException e) {
-                    return -1;
+                    return OidResolution.failure("usage: specify oid=<N> or table=<name>");
                 }
             } else if (part.startsWith("table=")) {
                 String tableName = part.substring(6);
                 try {
                     Catalog cat = getCatalog();
                     Optional<TableMeta> meta = cat.openTable(tableName);
-                    return meta.map(TableMeta::oid).orElse(-1);
-                } catch (IOException e) {
-                    return -1;
-                }
-            }
-        }
-        return -1;
-    }
-
-    /**
-     * Returns an error message if the OID resolution failed, null otherwise.
-     */
-    private String validateOidResolution(int oid, String args) {
-        if (oid < 0) {
-            Optional<String> tableNameOpt = extractTableName(args);
-            if (tableNameOpt.isPresent()) {
-                String tableName = tableNameOpt.get();
-                try {
-                    Catalog cat = getCatalog();
-                    Optional<TableMeta> meta = cat.openTable(tableName);
                     if (meta.isEmpty()) {
-                        return "error: unknown table: " + tableName;
+                        return OidResolution.failure("error: unknown table: " + tableName);
                     }
+                    return OidResolution.success(meta.get().oid());
                 } catch (IOException e) {
-                    return "error: " + e.getMessage();
+                    return OidResolution.failure("error: " + e.getMessage());
                 }
             }
-            return "usage: specify oid=<N> or table=<name>";
         }
-        return null;
+        return OidResolution.failure("usage: specify oid=<N> or table=<name>");
     }
 
     private String handleCreateTable(String args) {
