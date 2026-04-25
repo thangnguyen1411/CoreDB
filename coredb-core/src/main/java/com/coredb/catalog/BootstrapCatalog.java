@@ -130,7 +130,7 @@ public final class BootstrapCatalog {
                 // Columns for core_class (OID 1000)
                 coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 1, "tableId", TYPE_LONG, false));
                 coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 2, "tableName", TYPE_STRING, false));
-                coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 3, "pkColumn", TYPE_STRING, false));
+                coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 3, "pkColumn", TYPE_STRING, true));
                 coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 4, "engineType", TYPE_INT, false));
                 coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 5, "rootPageId", TYPE_LONG, false));
 
