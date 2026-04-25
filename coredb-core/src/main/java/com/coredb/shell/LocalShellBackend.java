@@ -10,20 +10,13 @@ import com.coredb.catalog.ColumnDefParser;
 import com.coredb.catalog.ControlFile;
 import com.coredb.catalog.TableMeta;
 import com.coredb.heap.HeapFile;
-import com.coredb.heap.HeapPage;
-import com.coredb.heap.HeapTupleHeader;
 import com.coredb.heap.RecordId;
-import com.coredb.heap.RowSerializer;
-import com.coredb.heap.SerializedRow;
-import com.coredb.page.ItemId;
 import com.coredb.page.Page;
 import com.coredb.page.PageType;
 import com.coredb.storage.DiskManager;
 import com.coredb.util.Constants;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Iterator;
@@ -40,24 +33,18 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
     );
 
     private final CoreDB db;
-    private Catalog catalog;
 
     public LocalShellBackend(CoreDB db) {
         this.db = db;
     }
 
-    private Catalog getCatalog() throws IOException {
-        if (catalog == null) {
-            catalog = new Catalog(db.dataPath(), db.controlFile());
-        }
-        return catalog;
+    private Catalog getCatalog() {
+        return db.catalog();
     }
 
     @Override
     public void close() throws IOException {
-        if (catalog != null) {
-            catalog.close();
-        }
+        // Catalog is owned by CoreDB; CoreDB.close() handles cleanup
     }
 
     @Override
