@@ -101,6 +101,16 @@ class FreeSpaceMapTest {
         assertThat(FreeSpaceMap.categoryFor(-100)).isEqualTo(0);
     }
 
+    @Test
+    @DisplayName("updatePage with large freeBytes clamps category at 255")
+    void updatePageClampsAt255() {
+        FreeSpaceMap fsm = new FreeSpaceMap(5);
+
+        fsm.updatePage(2, 1_000_000);
+
+        assertThat(fsm.getCategory(2)).isEqualTo(255);
+    }
+
     // ========== requestPage (with updated categories) ==========
 
     @Test
