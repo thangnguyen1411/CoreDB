@@ -189,8 +189,9 @@ public final class HeapFile implements AutoCloseable {
 
             // FSM was stale (claimed more free space than actual)
             // Correct the FSM entry and retry
-            log.debug("FSM stale for page {}: claimed {} bytes, actual {} bytes",
-                      pageId, fsm.getCategory(pageId) * 32, actualFree);
+            int category = fsm.getCategory(pageId);
+            log.debug("FSM stale for page {}: category {} (promised >= {} bytes), actual {} bytes",
+                      pageId, category, category * 32, actualFree);
             fsm.updatePage(pageId, actualFree);
             // Continue to next retry iteration
         }
@@ -272,9 +273,7 @@ public final class HeapFile implements AutoCloseable {
     @Override
     public void close() throws IOException {
         // Close FSM first (it has its own file channel)
-        if (fsm != null) {
-            fsm.close();
-        }
+        fsm.close();
 
         if (channel != null) {
             updateMetaPage(); // Ensure meta page is up to date
