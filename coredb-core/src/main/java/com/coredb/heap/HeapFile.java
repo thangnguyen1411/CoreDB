@@ -39,6 +39,7 @@ public final class HeapFile implements AutoCloseable {
     private final Schema schema;
     private final FileChannel channel;
     private int nextPageId;
+    private final Page metaPage;
 
     /**
      * Private constructor for per-table file mode.
@@ -71,7 +72,7 @@ public final class HeapFile implements AutoCloseable {
                 StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
 
         // Write meta page (page 0)
-        Page metaPage = buildIntialMetaPage(oid);
+        Page metaPage = buildInitialMetaPage(oid);
         writePageToChannel(channel, metaPage);
 
         int nextPageId = 1; // Page 0 is meta, data pages start at 1
@@ -111,9 +112,6 @@ public final class HeapFile implements AutoCloseable {
      * Returns the table path (per-table mode only).
      */
     public Path tablePath() {
-        if (tablePath == null) {
-            throw new IllegalStateException("Not in per-table file mode");
-        }
         return tablePath;
     }
 
@@ -121,9 +119,6 @@ public final class HeapFile implements AutoCloseable {
      * Returns the table OID (per-table mode only).
      */
     public int oid() {
-        if (oid < 0) {
-            throw new IllegalStateException("Not in per-table file mode");
-        }
         return oid;
     }
 
@@ -131,9 +126,6 @@ public final class HeapFile implements AutoCloseable {
      * Returns the next page ID (per-table mode only).
      */
     public int nextPageId() {
-        if (nextPageId < 0) {
-            throw new IllegalStateException("Not in per-table file mode");
-        }
         return nextPageId;
     }
 
@@ -285,7 +277,7 @@ public final class HeapFile implements AutoCloseable {
      * @return a new HEAP page with the freshly allocated pageId
      * @throws IOException if allocation fails
      */
-    public Page allocateNewPage() throws IOException {
+    private Page allocateNewPage() throws IOException {
         int newPageId = nextPageId;
         Page newPage = new Page(newPageId, PageType.HEAP);
         writePageToChannel(channel, newPage);
@@ -306,16 +298,8 @@ public final class HeapFile implements AutoCloseable {
      * @throws IOException if read fails or page doesn't exist
      */
     public Page readPage(int pageId) throws IOException {
-        if (pageId < 0 || pageId >= nextPageId) {
+        if (pageId < 1 || pageId >= nextPageId) {
             throw new StorageException("page " + pageId + " does not exist (allocated=" + nextPageId + ")");
-        }
-        if (pageId == 0) {
-            // Return a copy of the meta page to avoid accidental modification
-            ByteBuffer buf = ByteBuffer.allocate(Constants.PAGE_SIZE).order(ByteOrder.BIG_ENDIAN);
-            metaPage.buffer().rewind();
-            buf.put(metaPage.buffer());
-            buf.flip();
-            return new Page(0, buf);
         }
         return readPageFromChannel(channel, pageId);
     }
@@ -350,13 +334,10 @@ public final class HeapFile implements AutoCloseable {
         channel.force(true);
     }
 
-    // Meta page loaded from disk
-    private Page metaPage;
-
     /**
      * Builds the meta page (page 0) for a per-table heap file.
      */
-    private static Page buildIntialMetaPage(int oid) {
+    private static Page buildInitialMetaPage(int oid) {
         Page page = new Page(0, PageType.META);
         ByteBuffer buf = page.buffer();
         BinaryUtil.writeU32(buf, META_OFFSET_MAGIC, Constants.HEAP_FILE_MAGIC);
