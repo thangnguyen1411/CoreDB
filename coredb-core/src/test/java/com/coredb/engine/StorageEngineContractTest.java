@@ -92,10 +92,13 @@ public abstract class StorageEngineContractTest {
             assertThat(result.get()).isEqualTo(updated);
         }
 
-        // Raw heap scan should see TWO physical tuples: one live, one dead
-        // This assertion pins down the upsert contract
-        // Note: This requires raw heap access; engines may provide a test hook
-        // or this can be verified via EngineType-specific subclass tests
+        // NOTE: BTreeStorageEngineTest must additionally verify:
+        // A raw heap scan sees TWO physical tuples:
+        //   - one with t_xmax = 0 (the new, live version)
+        //   - one with t_xmax = current_xid (the old, dead version)
+        // This distinguishes MVCC upsert from in-place overwrite.
+        // The abstract class cannot assert this (no heap access), so the
+        // concrete subclass must override this test or add a post-condition.
     }
 
     @Test
@@ -251,11 +254,11 @@ public abstract class StorageEngineContractTest {
 
             Optional<Row> alice = engine.get(1L);
             assertThat(alice).isPresent();
-            assertThat(alice.get().getString(1)).isEqualTo("Alice");
+            assertThat(alice.get()).isEqualTo(Row.of(1L, "Alice", 30));
 
             Optional<Row> bob = engine.get(2L);
             assertThat(bob).isPresent();
-            assertThat(bob.get().getString(1)).isEqualTo("Bob");
+            assertThat(bob.get()).isEqualTo(Row.of(2L, "Bob", 25));
         }
     }
 
