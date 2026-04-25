@@ -102,9 +102,9 @@ public final class Catalog implements AutoCloseable {
         int oid = controlFile.allocateOid();
         Path tablePath = dataDir.resolve("base").resolve("1").resolve(String.valueOf(oid));
 
-        try (HeapFile tableFile = HeapFile.create(tablePath, oid, schema)) {
-            log.debug("Created heap file for table {}: oid={}", name, oid);
-        }
+        // Create the heap file (side effect only, close immediately)
+        HeapFile.create(tablePath, oid, schema).close();
+        log.debug("Created heap file for table {}: oid={}", name, oid);
 
         // Insert into core_class: (tableId, tableName, pkColumn, engineType, rootPageId)
         Row classRow = Row.of((long) oid, name, pkColumn, EngineType.BTREE.ordinal(), 0L);
@@ -120,10 +120,11 @@ public final class Catalog implements AutoCloseable {
         }
         log.debug("Inserted {} columns into core_attribute for table {}", schema.columnCount(), name);
 
-        // Catalog files remain open for the lifetime of Catalog instance.
-        // They will be synced on Catalog.close().
-        // TODO: no explicit fsync here. If process crashes between insert
-        // and close(), catalog entries may not be persisted. WAL/fsync will come later.
+        // Note: Table heap file is created and closed above (fsynced via close).
+        // Catalog files (core_class, core_attribute) remain open for the lifetime
+        // of Catalog instance and are synced on Catalog.close().
+        // TODO: No immediate fsync of catalog files after insert. If process crashes
+        // before Catalog.close(), the catalog entries may not be persisted.
     }
 
     /**
