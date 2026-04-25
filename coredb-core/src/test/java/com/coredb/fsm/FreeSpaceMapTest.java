@@ -1,7 +1,13 @@
 package com.coredb.fsm;
 
+import com.coredb.util.CorruptionException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -304,5 +310,159 @@ class FreeSpaceMapTest {
 
         // Need 50 bytes: page 1 has 64 >= 50, so it's the first fit
         assertThat(fsm.requestPage(50)).isEqualTo(1);
+    }
+
+    // ========== File Persistence ==========
+
+    @Test
+    @DisplayName("create() a file with 5 pages → verify file size = 16 + 5 = 21 bytes")
+    void createFileHasCorrectSize(@TempDir Path tempDir) throws IOException {
+        Path fsmPath = tempDir.resolve("test.fsm");
+
+        FreeSpaceMap fsm = FreeSpaceMap.create(fsmPath, 5);
+        fsm.close();
+
+        long fileSize = Files.size(fsmPath);
+        assertThat(fileSize).isEqualTo(16 + 5); // header + 5 bytes
+    }
+
+    @Test
+    @DisplayName("updatePage(2, 256) → close() → open() → getCategory(2) == 8")
+    void persistAndReloadCategory(@TempDir Path tempDir) throws IOException {
+        Path fsmPath = tempDir.resolve("test.fsm");
+
+        // Create and populate FSM
+        FreeSpaceMap fsm = FreeSpaceMap.create(fsmPath, 5);
+        fsm.updatePage(2, 256); // category = 256/32 = 8
+        fsm.close();
+
+        // Reopen and verify
+        FreeSpaceMap reloaded = FreeSpaceMap.open(fsmPath);
+        assertThat(reloaded.getCategory(2)).isEqualTo(8);
+        reloaded.close();
+    }
+
+    @Test
+    @DisplayName("grow(10) → file size = 16 + 10 = 26, new entries are zero")
+    void growExtendsFile(@TempDir Path tempDir) throws IOException {
+        Path fsmPath = tempDir.resolve("test.fsm");
+
+        FreeSpaceMap fsm = FreeSpaceMap.create(fsmPath, 5);
+        fsm.updatePage(2, 256); // category = 8
+        fsm.grow(10);
+        fsm.close();
+
+        // Verify file size
+        long fileSize = Files.size(fsmPath);
+        assertThat(fileSize).isEqualTo(16 + 10);
+
+        // Verify content after reopen
+        FreeSpaceMap reloaded = FreeSpaceMap.open(fsmPath);
+        assertThat(reloaded.trackedDataPageCount()).isEqualTo(10);
+        assertThat(reloaded.getCategory(2)).isEqualTo(8); // preserved
+        assertThat(reloaded.getCategory(6)).isEqualTo(0); // new entries zero
+        assertThat(reloaded.getCategory(10)).isEqualTo(0); // new entries zero
+        reloaded.close();
+    }
+
+    @Test
+    @DisplayName("Corrupt magic bytes → open() throws CorruptionException")
+    void corruptMagicThrows(@TempDir Path tempDir) throws IOException {
+        Path fsmPath = tempDir.resolve("test.fsm");
+
+        FreeSpaceMap fsm = FreeSpaceMap.create(fsmPath, 5);
+        fsm.close();
+
+        // Corrupt the magic bytes (first 4 bytes)
+        byte[] fileBytes = Files.readAllBytes(fsmPath);
+        fileBytes[0] = (byte) 0xDE;
+        fileBytes[1] = (byte) 0xAD;
+        fileBytes[2] = (byte) 0xBE;
+        fileBytes[3] = (byte) 0xEF;
+        Files.write(fsmPath, fileBytes);
+
+        assertThatThrownBy(() -> FreeSpaceMap.open(fsmPath))
+            .isInstanceOf(CorruptionException.class)
+            .hasMessageContaining("magic");
+    }
+
+    @Test
+    @DisplayName("Mismatched version → open() throws CorruptionException")
+    void mismatchedVersionThrows(@TempDir Path tempDir) throws IOException {
+        Path fsmPath = tempDir.resolve("test.fsm");
+
+        FreeSpaceMap fsm = FreeSpaceMap.create(fsmPath, 5);
+        fsm.close();
+
+        // Corrupt the version (bytes 4-7)
+        byte[] fileBytes = Files.readAllBytes(fsmPath);
+        fileBytes[7] = (byte) 0xFF; // Set version to something invalid
+        Files.write(fsmPath, fileBytes);
+
+        assertThatThrownBy(() -> FreeSpaceMap.open(fsmPath))
+            .isInstanceOf(CorruptionException.class)
+            .hasMessageContaining("version");
+    }
+
+    @Test
+    @DisplayName("Multiple updates persist correctly after close/open cycle")
+    void multipleUpdatesPersist(@TempDir Path tempDir) throws IOException {
+        Path fsmPath = tempDir.resolve("test.fsm");
+
+        FreeSpaceMap fsm = FreeSpaceMap.create(fsmPath, 10);
+        fsm.updatePage(1, 320);  // category = 10
+        fsm.updatePage(3, 640);  // category = 20
+        fsm.updatePage(5, 960);  // category = 30
+        fsm.updatePage(7, 1280); // category = 40
+        fsm.updatePage(9, 1600); // category = 50
+        fsm.close();
+
+        // Reopen and verify all categories
+        FreeSpaceMap reloaded = FreeSpaceMap.open(fsmPath);
+        assertThat(reloaded.getCategory(1)).isEqualTo(10);
+        assertThat(reloaded.getCategory(2)).isEqualTo(0); // unchanged
+        assertThat(reloaded.getCategory(3)).isEqualTo(20);
+        assertThat(reloaded.getCategory(4)).isEqualTo(0); // unchanged
+        assertThat(reloaded.getCategory(5)).isEqualTo(30);
+        assertThat(reloaded.getCategory(6)).isEqualTo(0); // unchanged
+        assertThat(reloaded.getCategory(7)).isEqualTo(40);
+        assertThat(reloaded.getCategory(8)).isEqualTo(0); // unchanged
+        assertThat(reloaded.getCategory(9)).isEqualTo(50);
+        assertThat(reloaded.getCategory(10)).isEqualTo(0); // unchanged
+        reloaded.close();
+    }
+
+    @Test
+    @DisplayName("Create with 0 pages → file size = 16 bytes (header only)")
+    void createWithZeroPages(@TempDir Path tempDir) throws IOException {
+        Path fsmPath = tempDir.resolve("test.fsm");
+
+        FreeSpaceMap fsm = FreeSpaceMap.create(fsmPath, 0);
+        fsm.close();
+
+        long fileSize = Files.size(fsmPath);
+        assertThat(fileSize).isEqualTo(16); // header only
+
+        FreeSpaceMap reloaded = FreeSpaceMap.open(fsmPath);
+        assertThat(reloaded.trackedDataPageCount()).isEqualTo(0);
+        reloaded.close();
+    }
+
+    @Test
+    @DisplayName("requestPage works correctly after reopening persisted FSM")
+    void requestPageAfterReload(@TempDir Path tempDir) throws IOException {
+        Path fsmPath = tempDir.resolve("test.fsm");
+
+        FreeSpaceMap fsm = FreeSpaceMap.create(fsmPath, 5);
+        fsm.updatePage(2, 500);  // category = 15
+        fsm.updatePage(4, 1000); // category = 31
+        fsm.close();
+
+        FreeSpaceMap reloaded = FreeSpaceMap.open(fsmPath);
+        // Should find page 2 first (category 15 = 480 bytes)
+        assertThat(reloaded.requestPage(100)).isEqualTo(2);
+        // Should find page 4 (category 31 = 992 bytes)
+        assertThat(reloaded.requestPage(500)).isEqualTo(4);
+        reloaded.close();
     }
 }

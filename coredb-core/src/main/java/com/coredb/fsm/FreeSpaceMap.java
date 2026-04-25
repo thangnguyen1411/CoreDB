@@ -1,5 +1,16 @@
 package com.coredb.fsm;
 
+import com.coredb.util.BinaryUtil;
+import com.coredb.util.Constants;
+import com.coredb.util.CorruptionException;
+
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+
 /**
  * Free Space Map — tracks how much free space each heap page has.
  *
@@ -14,7 +25,13 @@ package com.coredb.fsm;
  */
 public final class FreeSpaceMap {
 
+    // FSM file format constants
+    private static final int FSM_HEADER_SIZE = 16;
+    private static final int FSM_VERSION = 1;
+
     private byte[] categories;
+    private FileChannel channel;
+    private Path fsmPath;
 
     /**
      * Constructs an empty FSM for a heap file with {@code pageCount} data pages.
@@ -99,8 +116,10 @@ public final class FreeSpaceMap {
      * use "buckets": divide free bytes by 32 to get a value 0-255. 255 × 32 = 8160,
      * which covers our usable page space (8176 bytes max on an empty page).</p>
      *
-     * <p><b>Why clamp to 255?</b> If freeBytes is huge (e.g., 100000), division
-     * gives 3125, which overflows a byte. We cap at 255 meaning "lots of space."</p>
+     * <p><b>Why clamp to 255?</b> For CoreDB's 8KB pages, an empty page has exactly
+     * 8176 free bytes (after header), so 8176/32 = 255 — the clamp never triggers.
+     * The clamp is defensive: it protects against future larger page sizes and
+     * guards against bugs that might pass incorrect (negative or huge) values.</p>
      *
      * <p>Category = {@code freeBytes / 32}, clamped to 255 (0xFF).</p>
      *
@@ -139,5 +158,218 @@ public final class FreeSpaceMap {
         System.arraycopy(categories, 0, newCategories, 0, categories.length);
         // remaining bytes are already zero (category 0)
         categories = newCategories;
+
+        // If we have a file channel, extend the file by writing a zero byte at new EOF.
+        // FileChannel.truncate() only shrinks, it doesn't grow. We write at the new
+        // end position to force file extension. The actual body bytes are written
+        // by close().
+        if (channel != null) {
+            try {
+                long newEof = FSM_HEADER_SIZE + newPageCount;
+                ByteBuffer zero = ByteBuffer.allocate(1);
+                channel.write(zero, newEof - 1); // Write zero at last byte of new size
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to grow FSM file: " + fsmPath, e);
+            }
+        }
+    }
+
+    // ========== File Persistence ==========
+
+    /**
+     * Creates a new FSM file at the specified path.
+     *
+     * <p>File format:
+     * <pre>
+     * Header (16 bytes):
+     *   bytes 0-3:   magic (0x46534D00 = "FSM\0")
+     *   bytes 4-7:   format version (1)
+     *   bytes 8-11:  page count (number of heap pages tracked)
+     *   bytes 12-15: reserved (zero)
+     * Body: raw byte array, one byte per heap page
+     * </pre></p>
+     *
+     * @param fsmPath the path for the FSM file
+     * @param initialPages initial number of heap pages to track
+     * @return a new FreeSpaceMap instance backed by the file
+     * @throws IOException if file creation fails
+     */
+    public static FreeSpaceMap create(Path fsmPath, int initialPages) throws IOException {
+        // Ensure parent directory exists
+        Files.createDirectories(fsmPath.getParent());
+
+        // Create file with header + zero-filled body
+        FileChannel ch = FileChannel.open(fsmPath,
+                StandardOpenOption.CREATE_NEW,
+                StandardOpenOption.READ,
+                StandardOpenOption.WRITE);
+
+        try {
+            ByteBuffer header = ByteBuffer.allocate(FSM_HEADER_SIZE);
+            BinaryUtil.writeU32(header, 0, Constants.FSM_FILE_MAGIC);
+            BinaryUtil.writeU32(header, 4, FSM_VERSION);
+            BinaryUtil.writeU32(header, 8, initialPages);
+            BinaryUtil.writeU32(header, 12, 0); // reserved
+            // Absolute put() doesn't advance position, so set it manually
+            header.position(FSM_HEADER_SIZE);
+            header.flip();
+            while (header.hasRemaining()) {
+                ch.write(header);
+            }
+
+            // Write zero-filled body
+            if (initialPages > 0) {
+                ByteBuffer zeros = ByteBuffer.allocate(initialPages);
+                while (zeros.hasRemaining()) {
+                    ch.write(zeros);
+                }
+            }
+
+            ch.force(true);
+
+            // Return instance directly without closing/reopening
+            byte[] categories = new byte[initialPages];
+            // Already zero-filled by default
+            FreeSpaceMap fsm = new FreeSpaceMap(categories, ch, fsmPath);
+            return fsm;
+
+        } catch (Exception e) {
+            ch.close();
+            throw e;
+        }
+    }
+
+    /**
+     * Opens an existing FSM file.
+     *
+     * @param fsmPath the path to the FSM file
+     * @return a FreeSpaceMap instance loaded from the file
+     * @throws IOException if file cannot be read
+     * @throws CorruptionException if magic or version is invalid
+     */
+    public static FreeSpaceMap open(Path fsmPath) throws IOException {
+        if (!Files.exists(fsmPath)) {
+            throw new IOException("FSM file does not exist: " + fsmPath);
+        }
+
+        FileChannel ch = FileChannel.open(fsmPath, StandardOpenOption.READ,
+                StandardOpenOption.WRITE);
+
+        try {
+            // Read and validate header
+            ByteBuffer header = ByteBuffer.allocate(FSM_HEADER_SIZE);
+            int headerRead = 0;
+            while (header.hasRemaining()) {
+                int r = ch.read(header, headerRead);
+                if (r < 0) {
+                    throw new CorruptionException("FSM file header incomplete: " + fsmPath);
+                }
+                headerRead += r;
+            }
+            header.flip();
+
+            int magic = BinaryUtil.readU32(header, 0);
+            if (magic != Constants.FSM_FILE_MAGIC) {
+                throw new CorruptionException(
+                    "FSM file magic mismatch: expected 0x" +
+                    Integer.toHexString(Constants.FSM_FILE_MAGIC) +
+                    " but found 0x" + Integer.toHexString(magic));
+            }
+
+            int version = BinaryUtil.readU32(header, 4);
+            if (version != FSM_VERSION) {
+                throw new CorruptionException(
+                    "FSM file version mismatch: expected " + FSM_VERSION +
+                    " but found " + version);
+            }
+
+            int pageCount = BinaryUtil.readU32(header, 8);
+
+            // Read body into byte array
+            byte[] categories = new byte[pageCount];
+            if (pageCount > 0) {
+                ByteBuffer body = ByteBuffer.wrap(categories);
+                long bodyOffset = FSM_HEADER_SIZE;
+                while (body.hasRemaining()) {
+                    int r = ch.read(body, bodyOffset);
+                    if (r < 0) {
+                        throw new CorruptionException(
+                            "FSM file body incomplete: expected " + pageCount +
+                            " bytes but read " + (pageCount - body.remaining()));
+                    }
+                    bodyOffset += r;
+                }
+            }
+
+            FreeSpaceMap fsm = new FreeSpaceMap(categories, ch, fsmPath);
+            return fsm;
+
+        } catch (Exception e) {
+            ch.close();
+            throw e;
+        }
+    }
+
+    /**
+     * Private constructor for file-backed FSM.
+     */
+    private FreeSpaceMap(byte[] categories, FileChannel channel, Path fsmPath) {
+        this.categories = categories;
+        this.channel = channel;
+        this.fsmPath = fsmPath;
+    }
+
+    /**
+     * Closes the FSM file, writing any pending changes to disk.
+     *
+     * @throws IOException if write fails
+     */
+    public void close() throws IOException {
+        if (channel == null) {
+            return; // In-memory only FSM
+        }
+
+        try {
+            // Write current categories back to file
+            if (categories.length > 0) {
+                ByteBuffer body = ByteBuffer.wrap(categories);
+                long written = 0;
+                while (body.hasRemaining()) {
+                    int w = channel.write(body, FSM_HEADER_SIZE + written);
+                    if (w == 0) {
+                        // FileChannel.write() on a local file never returns 0,
+                        // but if it did, continuing would cause an infinite loop.
+                        throw new IOException("FSM body write returned 0 bytes");
+                    }
+                    written += w;
+                }
+            }
+
+            // Update page count in header
+            ByteBuffer header = ByteBuffer.allocate(FSM_HEADER_SIZE);
+            BinaryUtil.writeU32(header, 0, Constants.FSM_FILE_MAGIC);
+            BinaryUtil.writeU32(header, 4, FSM_VERSION);
+            BinaryUtil.writeU32(header, 8, categories.length);
+            BinaryUtil.writeU32(header, 12, 0); // reserved
+            // Absolute put() doesn't advance position, so set it manually
+            header.position(FSM_HEADER_SIZE);
+            header.flip();
+            long headerWritten = 0;
+            while (header.hasRemaining()) {
+                int w = channel.write(header, headerWritten);
+                if (w == 0) {
+                    // FileChannel.write() on a local file never returns 0,
+                    // but if it did, continuing would cause an infinite loop.
+                    throw new IOException("FSM header write returned 0 bytes");
+                }
+                headerWritten += w;
+            }
+
+            channel.force(true);
+        } finally {
+            channel.close();
+            channel = null;
+            fsmPath = null;
+        }
     }
 }
