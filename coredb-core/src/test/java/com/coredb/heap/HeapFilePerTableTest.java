@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.coredb.api.Column;
 import com.coredb.api.Schema;
+import com.coredb.page.Page;
 import com.coredb.util.Constants;
 import com.coredb.util.CorruptionException;
 import org.junit.jupiter.api.BeforeEach;
@@ -78,7 +79,6 @@ class HeapFilePerTableTest {
         HeapFile opened = HeapFile.open(tablePath, 1000, schema);
 
         // Then
-        assertThat(opened.isPerTableMode()).isTrue();
         assertThat(opened.oid()).isEqualTo(1000);
         assertThat(opened.tablePath()).isEqualTo(tablePath);
 
@@ -166,17 +166,6 @@ class HeapFilePerTableTest {
     }
 
     @Test
-    void isPerTableMode_legacyConstructor_returnsFalse() throws IOException {
-        // Given: a legacy DiskManager-based heap file
-        // This would require DiskManager setup; we'll just test the new methods
-
-        // When/Then: a file created with create() returns true
-        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
-        assertThat(hf.isPerTableMode()).isTrue();
-        hf.close();
-    }
-
-    @Test
     void tablePath_perTableMode_returnsPath() throws IOException {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
         assertThat(hf.tablePath()).isEqualTo(tablePath);
@@ -194,6 +183,306 @@ class HeapFilePerTableTest {
     void nextPageId_perTableMode_returnsNextPageId() throws IOException {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
         assertThat(hf.nextPageId()).isEqualTo(1);
+        hf.close();
+    }
+
+    // ==================== Phase 3D: Per-table operations tests ====================
+
+    @Test
+    void insert_singleRow_returnsRecordId() throws IOException {
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        com.coredb.api.Row row = com.coredb.api.Row.of(1L, "Alice", 30);
+        RecordId rid = hf.insert(row);
+
+        assertThat(rid.pageId()).isGreaterThanOrEqualTo(1); // Page 0 is meta
+        assertThat(rid.slotNo()).isZero();
+
+        hf.close();
+    }
+
+    @Test
+    void insert_singleRow_fileSizeIsExactlyTwoPages() throws IOException {
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        com.coredb.api.Row row = com.coredb.api.Row.of(1L, "Alice", 30);
+        hf.insert(row);
+        hf.close();
+
+        // File should be: 1 meta page + 1 data page = 2 pages
+        long expectedSize = 2L * Constants.PAGE_SIZE;
+        assertThat(Files.size(tablePath)).isEqualTo(expectedSize);
+    }
+
+    @Test
+    void insert_100Rows_fileSizeIsCorrect() throws IOException {
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        int count = 100;
+        for (int i = 0; i < count; i++) {
+            hf.insert(com.coredb.api.Row.of((long) i, "User" + i, i));
+        }
+
+        // Get page count before closing
+        int pageCount = hf.pageCount();
+        hf.close();
+
+        // Verify exact file size: pageCount * PAGE_SIZE (includes meta page + all data pages)
+        long expectedSize = (long) pageCount * Constants.PAGE_SIZE;
+        assertThat(Files.size(tablePath)).isEqualTo(expectedSize);
+    }
+
+    @Test
+    void get_existingRow_returnsRow() throws IOException {
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        com.coredb.api.Row original = com.coredb.api.Row.of(1L, "Alice", 30);
+        RecordId rid = hf.insert(original);
+
+        java.util.Optional<com.coredb.api.Row> fetched = hf.get(rid);
+
+        assertThat(fetched).isPresent();
+        assertThat(fetched.get()).isEqualTo(original);
+
+        hf.close();
+    }
+
+    @Test
+    void get_nonExistentSlot_returnsEmpty() throws IOException {
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        RecordId rid = new RecordId(1, 99);
+        java.util.Optional<com.coredb.api.Row> fetched = hf.get(rid);
+
+        assertThat(fetched).isEmpty();
+
+        hf.close();
+    }
+
+    @Test
+    void insert_multipleRows_eachRetrievable() throws IOException {
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        java.util.List<RecordId> rids = new java.util.ArrayList<>();
+        int count = 50;
+
+        for (int i = 0; i < count; i++) {
+            com.coredb.api.Row row = com.coredb.api.Row.of((long) i, "User" + i, i % 100);
+            rids.add(hf.insert(row));
+        }
+
+        for (int i = 0; i < count; i++) {
+            java.util.Optional<com.coredb.api.Row> fetched = hf.get(rids.get(i));
+            assertThat(fetched).isPresent();
+            assertThat(fetched.get().getLong(0)).isEqualTo((long) i);
+            assertThat(fetched.get().getString(1)).isEqualTo("User" + i);
+            assertThat(fetched.get().getInt(2)).isEqualTo(i % 100);
+        }
+
+        hf.close();
+    }
+
+    @Test
+    void allocatePage_incrementsNextNewPageId() throws IOException {
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        assertThat(hf.nextPageId()).isEqualTo(1);
+
+        Page newPage = hf.allocateNewPage();
+        assertThat(newPage.pageId()).isEqualTo(1);
+        assertThat(hf.nextPageId()).isEqualTo(2);
+
+        Page anotherPage = hf.allocateNewPage();
+        assertThat(anotherPage.pageId()).isEqualTo(2);
+        assertThat(hf.nextPageId()).isEqualTo(3);
+
+        hf.close();
+    }
+
+    @Test
+    void allocatePage_persistsNextPageIdToMetaNewPage() throws IOException {
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+        hf.allocateNewPage();
+        hf.allocateNewPage();
+        hf.close();
+
+        // Reopen and verify nextPageId persisted
+        HeapFile reopened = HeapFile.open(tablePath, 1000, schema);
+        assertThat(reopened.nextPageId()).isEqualTo(3);
+        reopened.close();
+    }
+
+    @Test
+    void delete_existingRow_getReturnsEmpty() throws IOException {
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        com.coredb.api.Row row = com.coredb.api.Row.of(1L, "Alice", 30);
+        RecordId rid = hf.insert(row);
+
+        hf.delete(rid);
+
+        java.util.Optional<com.coredb.api.Row> fetched = hf.get(rid);
+        assertThat(fetched).isEmpty();
+
+        hf.close();
+    }
+
+    @Test
+    void scan_emptyFile_returnsEmpty() throws IOException {
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        java.util.List<com.coredb.api.Row> rows = new java.util.ArrayList<>();
+        hf.scan().forEachRemaining(rows::add);
+
+        assertThat(rows).isEmpty();
+
+        hf.close();
+    }
+
+    @Test
+    void scan_afterInserts_returnsAllRows() throws IOException {
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        int count = 50;
+        for (int i = 0; i < count; i++) {
+            hf.insert(com.coredb.api.Row.of((long) i, "User" + i, i));
+        }
+
+        java.util.List<com.coredb.api.Row> rows = new java.util.ArrayList<>();
+        hf.scan().forEachRemaining(rows::add);
+
+        assertThat(rows).hasSize(count);
+
+        hf.close();
+    }
+
+    @Test
+    void scan_afterSomeDeletes_returnsOnlyLiveRows() throws IOException {
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        java.util.List<RecordId> rids = new java.util.ArrayList<>();
+        int count = 20;
+
+        for (int i = 0; i < count; i++) {
+            rids.add(hf.insert(com.coredb.api.Row.of((long) i, "User" + i, i)));
+        }
+
+        for (int i = 0; i < count; i += 2) {
+            hf.delete(rids.get(i));
+        }
+
+        java.util.List<com.coredb.api.Row> rows = new java.util.ArrayList<>();
+        hf.scan().forEachRemaining(rows::add);
+
+        assertThat(rows).hasSize(count / 2);
+
+        hf.close();
+    }
+
+    @Test
+    void persistence_closeAndReopen_dataSurvives() throws IOException {
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        java.util.List<RecordId> rids = new java.util.ArrayList<>();
+        int count = 50;
+
+        for (int i = 0; i < count; i++) {
+            rids.add(hf.insert(com.coredb.api.Row.of((long) i, "User" + i, i)));
+        }
+        hf.close();
+
+        // Reopen and verify data
+        HeapFile reopened = HeapFile.open(tablePath, 1000, schema);
+        for (int i = 0; i < count; i++) {
+            java.util.Optional<com.coredb.api.Row> fetched = reopened.get(rids.get(i));
+            assertThat(fetched).isPresent();
+            assertThat(fetched.get().getLong(0)).isEqualTo((long) i);
+        }
+        reopened.close();
+    }
+
+    @Test
+    void persistence_scanAfterReopen_returnsAllRows() throws IOException {
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        int count = 50;
+        for (int i = 0; i < count; i++) {
+            hf.insert(com.coredb.api.Row.of((long) i, "User" + i, i));
+        }
+        hf.close();
+
+        HeapFile reopened = HeapFile.open(tablePath, 1000, schema);
+        java.util.List<com.coredb.api.Row> rows = new java.util.ArrayList<>();
+        reopened.scan().forEachRemaining(rows::add);
+
+        assertThat(rows).hasSize(count);
+        reopened.close();
+    }
+
+    @Test
+    void twoSeparateFiles_allocateIndependently() throws IOException {
+        Path path1000 = tempDir.resolve("base").resolve("1").resolve("1000");
+        Path path1001 = tempDir.resolve("base").resolve("1").resolve("1001");
+
+        HeapFile hf1000 = HeapFile.create(path1000, 1000, schema);
+        HeapFile hf1001 = HeapFile.create(path1001, 1001, schema);
+
+        // Insert different amounts of data into each
+        hf1000.insert(com.coredb.api.Row.of(1L, "A", 1));
+
+        // Insert many rows into second file to force page allocation
+        // Need enough rows to span multiple pages
+        for (int i = 0; i < 1000; i++) {
+            hf1001.insert(com.coredb.api.Row.of((long) i, "User" + i, i));
+        }
+
+        int pages1000 = hf1000.nextPageId();
+        int pages1001 = hf1001.nextPageId();
+
+        hf1000.close();
+        hf1001.close();
+
+        // Verify files have independent page counts (1001 should have more pages)
+        assertThat(pages1001).isGreaterThan(pages1000);
+
+        // Verify each file can be reopened independently with correct OID
+        HeapFile reopened1000 = HeapFile.open(path1000, 1000, schema);
+        HeapFile reopened1001 = HeapFile.open(path1001, 1001, schema);
+
+        assertThat(reopened1000.oid()).isEqualTo(1000);
+        assertThat(reopened1001.oid()).isEqualTo(1001);
+        assertThat(reopened1000.nextPageId()).isEqualTo(pages1000);
+        assertThat(reopened1001.nextPageId()).isEqualTo(pages1001);
+
+        reopened1000.close();
+        reopened1001.close();
+    }
+
+    @Test
+    void pageCount_returnsNextPageId() throws IOException {
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        assertThat(hf.pageCount()).isEqualTo(1); // Just meta page
+
+        hf.insert(com.coredb.api.Row.of(1L, "Alice", 30));
+        assertThat(hf.pageCount()).isGreaterThanOrEqualTo(2); // Meta + at least 1 data
+
+        hf.close();
+    }
+
+    @Test
+    void fileSize_returnsActualFileSize() throws IOException {
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        long size1 = hf.fileSize();
+        assertThat(size1).isEqualTo(Constants.PAGE_SIZE); // Just meta page
+
+        hf.insert(com.coredb.api.Row.of(1L, "Alice", 30));
+
+        long size2 = hf.fileSize();
+        assertThat(size2).isGreaterThan(size1);
+        assertThat(size2 % Constants.PAGE_SIZE).isZero();
+
         hf.close();
     }
 }
