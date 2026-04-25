@@ -2,6 +2,7 @@ package com.coredb.heap;
 
 import com.coredb.api.Row;
 import com.coredb.api.Schema;
+import com.coredb.fsm.FreeSpaceMap;
 import com.coredb.page.ItemId;
 import com.coredb.page.Page;
 import com.coredb.page.PageType;
@@ -40,17 +41,19 @@ public final class HeapFile implements AutoCloseable {
     private final FileChannel channel;
     private int nextPageId;
     private final Page metaPage;
+    private final FreeSpaceMap fsm;
 
     /**
      * Private constructor for per-table file mode.
      */
-    private HeapFile(Path tablePath, int oid, Schema schema, FileChannel channel, int nextPageId, Page metaPage) {
+    private HeapFile(Path tablePath, int oid, Schema schema, FileChannel channel, int nextPageId, Page metaPage, FreeSpaceMap fsm) {
         this.schema = schema;
         this.tablePath = tablePath;
         this.oid = oid;
         this.channel = channel;
         this.nextPageId = nextPageId;
         this.metaPage = metaPage;
+        this.fsm = fsm;
     }
 
     /**
@@ -77,8 +80,12 @@ public final class HeapFile implements AutoCloseable {
 
         int nextPageId = 1; // Page 0 is meta, data pages start at 1
 
+        // Create FSM file alongside heap file (initially 0 pages tracked)
+        Path fsmPath = tablePath.getParent().resolve(tablePath.getFileName() + "_fsm");
+        FreeSpaceMap fsm = FreeSpaceMap.create(fsmPath, 0);
+
         log.info("Created heap file: {} (oid={})", tablePath.toAbsolutePath(), oid);
-        return new HeapFile(tablePath, oid, schema, channel, nextPageId, metaPage);
+        return new HeapFile(tablePath, oid, schema, channel, nextPageId, metaPage, fsm);
     }
 
     /**
@@ -103,8 +110,20 @@ public final class HeapFile implements AutoCloseable {
         Page metaPage = readPageFromChannel(channel, 0);
         int nextPageId = validateMetaPage(metaPage, tablePath, oid);
 
+        // Open or create FSM file
+        Path fsmPath = tablePath.getParent().resolve(tablePath.getFileName() + "_fsm");
+        FreeSpaceMap fsm;
+        if (Files.exists(fsmPath)) {
+            fsm = FreeSpaceMap.open(fsmPath);
+        } else {
+            // FSM missing (e.g., deleted manually) — create fresh one
+            log.warn("FSM file missing for oid={}, creating fresh: {}", oid, fsmPath);
+            int dataPageCount = Math.max(0, nextPageId - 1); // Exclude meta page
+            fsm = FreeSpaceMap.create(fsmPath, dataPageCount);
+        }
+
         log.info("Opened heap file: {} (oid={}, pages={})", tablePath.toAbsolutePath(), oid, nextPageId);
-        return new HeapFile(tablePath, oid, schema, channel, nextPageId, metaPage);
+        return new HeapFile(tablePath, oid, schema, channel, nextPageId, metaPage, fsm);
     }
 
 
@@ -141,28 +160,48 @@ public final class HeapFile implements AutoCloseable {
         int tupleSize = tupleHeaderSize + dataBytes.length;
         int spaceNeeded = tupleSize + ItemId.SIZE;
 
-        // 3. FIND PAGE: Linear scan for first page with enough space
-        int pageCount = pageCount();
+        // 3. FIND PAGE: Use FSM to find a page with enough space
+        // FSM is a hint — it may be stale. We retry with correction if it lies.
+        final int MAX_RETRIES = 3;
+        for (int retry = 0; retry < MAX_RETRIES; retry++) {
+            int pageId = fsm.requestPage(spaceNeeded);
 
-        // Page 0 is the meta page; data pages are 1..pageCount-1.
-        for (int pageId = 1; pageId < pageCount; pageId++) {
+            if (pageId == -1) {
+                // No page with enough space according to FSM
+                break;
+            }
+
+            // Verify the page actually has enough space (FSM is a hint)
             Page page = readPage(pageId);
             if (page.pageType() != PageType.HEAP) {
                 continue;
             }
             HeapPage heapPage = new HeapPage(page);
-            if (heapPage.freeBytes() >= spaceNeeded) {
+            int actualFree = heapPage.freeBytes();
+
+            if (actualFree >= spaceNeeded) {
+                // FSM was correct — insert and update FSM
                 RecordId rid = heapPage.insert(dataBytes, natts, nullBitmap);
                 writePage(page);
+                fsm.updatePage(pageId, heapPage.freeBytes());
                 return rid;
             }
+
+            // FSM was stale (claimed more free space than actual)
+            // Correct the FSM entry and retry
+            log.debug("FSM stale for page {}: claimed {} bytes, actual {} bytes",
+                      pageId, fsm.getCategory(pageId) * 32, actualFree);
+            fsm.updatePage(pageId, actualFree);
+            // Continue to next retry iteration
         }
 
-        // 4. ALLOCATE NEW PAGE: No existing page has room
+        // 4. ALLOCATE NEW PAGE: No existing page has room (or FSM kept lying)
         Page newPage = allocateNewPage();
         HeapPage heapPage = new HeapPage(newPage);
         RecordId rid = heapPage.insert(dataBytes, natts, nullBitmap);
         writePage(newPage);
+        // FSM will be grown by allocateNewPage if needed, and updated here
+        fsm.updatePage(newPage.pageId(), heapPage.freeBytes());
         return rid;
     }
 
@@ -216,6 +255,9 @@ public final class HeapFile implements AutoCloseable {
         HeapPage heapPage = new HeapPage(page);
         heapPage.delete(rid.slotNo());
         writePage(page);
+
+        // Update FSM to reflect freed space
+        fsm.updatePage(rid.pageId(), heapPage.freeBytes());
     }
 
     public Iterator<Row> scan() throws IOException {
@@ -229,6 +271,11 @@ public final class HeapFile implements AutoCloseable {
 
     @Override
     public void close() throws IOException {
+        // Close FSM first (it has its own file channel)
+        if (fsm != null) {
+            fsm.close();
+        }
+
         if (channel != null) {
             updateMetaPage(); // Ensure meta page is up to date
             channel.force(true);
@@ -272,6 +319,7 @@ public final class HeapFile implements AutoCloseable {
     /**
      * Allocates a new page at the end of the file.
      * Updates the meta page to persist the new nextPageId.
+     * Grows the FSM to track the new page if needed.
      *
      * @return a new HEAP page with the freshly allocated pageId
      * @throws IOException if allocation fails
@@ -284,6 +332,13 @@ public final class HeapFile implements AutoCloseable {
         // Update and persist nextPageId in meta page
         nextPageId = newPageId + 1;
         updateMetaPage();
+
+        // Grow FSM if needed to track the new page
+        // nextPageId - 1 = number of data pages (since page 0 is meta)
+        int dataPageCount = nextPageId - 1;
+        if (dataPageCount > fsm.trackedDataPageCount()) {
+            fsm.grow(dataPageCount);
+        }
 
         log.debug("Allocated page id={} in heap file oid={}", newPageId, oid);
         return newPage;
