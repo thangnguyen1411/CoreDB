@@ -145,8 +145,9 @@ public final class FreeSpaceMap {
      * @param newPageCount the new total number of pages to track
      * @throws IllegalArgumentException if {@code newPageCount} is less than
      *                                  the current page count
+     * @throws IOException if the file cannot be extended
      */
-    public void grow(int newPageCount) {
+    public void grow(int newPageCount) throws IOException {
         if (newPageCount < categories.length) {
             throw new IllegalArgumentException(
                 "newPageCount " + newPageCount + " < current " + categories.length);
@@ -164,13 +165,9 @@ public final class FreeSpaceMap {
         // end position to force file extension. The actual body bytes are written
         // by close().
         if (channel != null) {
-            try {
-                long newEof = FSM_HEADER_SIZE + newPageCount;
-                ByteBuffer zero = ByteBuffer.allocate(1);
-                channel.write(zero, newEof - 1); // Write zero at last byte of new size
-            } catch (IOException e) {
-                throw new RuntimeException("Failed to grow FSM file: " + fsmPath, e);
-            }
+            long newEof = FSM_HEADER_SIZE + newPageCount;
+            ByteBuffer zero = ByteBuffer.allocate(1);
+            channel.write(zero, newEof - 1); // Write zero at last byte of new size
         }
     }
 
@@ -199,8 +196,10 @@ public final class FreeSpaceMap {
         Files.createDirectories(fsmPath.getParent());
 
         // Create file with header + zero-filled body
+        // Use CREATE + TRUNCATE_EXISTING to match HeapFile.create() behavior
         FileChannel ch = FileChannel.open(fsmPath,
-                StandardOpenOption.CREATE_NEW,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING,
                 StandardOpenOption.READ,
                 StandardOpenOption.WRITE);
 

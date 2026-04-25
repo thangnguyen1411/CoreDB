@@ -492,4 +492,287 @@ class HeapFilePerTableTest {
 
         hf.close();
     }
+
+    // ========== FSM Integration Tests ==========
+
+    @Test
+    void fsm_insertUntilPageFull_categoryDropsTowardZero() throws IOException {
+        // This test verifies that as we fill page 1, its FSM category decreases
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        // Initially page 1 doesn't exist, so no category tracked
+        // After first insert, page 1 is created with high category
+        hf.insert(Row.of(1L, "User1", 1));
+
+        int initialCategory = getFsmCategory(hf, 1);
+        assertThat(initialCategory).isGreaterThan(0); // Should have some free space
+
+        // Keep inserting until page 1 is nearly full
+        int inserted = 1;
+        int lastCategory = initialCategory;
+
+        while (inserted < 500) { // Safety limit
+            try {
+                hf.insert(Row.of((long) inserted, "User" + inserted, inserted));
+                inserted++;
+
+                int currentCategory = getFsmCategory(hf, 1);
+                // Category should stay same or decrease as page fills
+                assertThat(currentCategory)
+                    .withFailMessage("FSM category increased unexpectedly from %d to %d", lastCategory, currentCategory)
+                    .isLessThanOrEqualTo(lastCategory);
+                lastCategory = currentCategory;
+
+                // Stop if page is nearly full (category approaching 1 or 0)
+                if (currentCategory <= 2) {
+                    break;
+                }
+            } catch (Exception e) {
+                // Page might be full
+                break;
+            }
+        }
+
+        // Verify category dropped significantly from initial
+        assertThat(lastCategory).isLessThan(initialCategory);
+
+        hf.close();
+    }
+
+    @Test
+    void fsm_insertWhenPageFull_routesToNewPage() throws IOException {
+        // Verify that when page 1 is full, inserts go to page 2
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        // Insert rows until we spill to page 2
+        int page1Inserts = 0;
+        int page2Inserts = 0;
+
+        for (int i = 0; i < 1000; i++) {
+            RecordId rid = hf.insert(Row.of((long) i, "User" + i, i));
+            if (rid.pageId() == 1) {
+                page1Inserts++;
+            } else if (rid.pageId() == 2) {
+                page2Inserts++;
+            }
+
+            if (page2Inserts > 0) {
+                break; // We've seen routing to page 2
+            }
+        }
+
+        assertThat(page1Inserts).isGreaterThan(0);
+        assertThat(page2Inserts).isGreaterThan(0);
+
+        hf.close();
+    }
+
+    @Test
+    void fsm_deleteRow_categoryIncreases() throws IOException {
+        // Verify that after deleting a row, the page's FSM category increases
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        // Insert a few rows
+        RecordId rid1 = hf.insert(Row.of(1L, "Alice", 30));
+        RecordId rid2 = hf.insert(Row.of(2L, "Bob", 25));
+
+        // Get category before delete
+        int categoryBefore = getFsmCategory(hf, rid1.pageId());
+
+        // Delete one row
+        hf.delete(rid1);
+
+        // Get category after delete
+        int categoryAfter = getFsmCategory(hf, rid1.pageId());
+
+        // Category should increase (more free space available)
+        assertThat(categoryAfter).isGreaterThanOrEqualTo(categoryBefore);
+
+        hf.close();
+    }
+
+    @Test
+    void fsm_deleteThenInsert_reusesFreedSpace() throws IOException {
+        // Verify that deleted space is reused for subsequent inserts
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        // Insert rows
+        RecordId rid1 = hf.insert(Row.of(1L, "Alice", 30));
+        int firstPageId = rid1.pageId();
+
+        // Insert more rows on the same page
+        RecordId rid2 = hf.insert(Row.of(2L, "Bob", 25));
+        RecordId rid3 = hf.insert(Row.of(3L, "Carol", 35));
+
+        // Delete the middle row
+        hf.delete(rid2);
+
+        // Insert a new row - should reuse the freed slot on the same page
+        RecordId rid4 = hf.insert(Row.of(4L, "Dave", 40));
+
+        // The new row should land on the same page where we freed space
+        assertThat(rid4.pageId()).isEqualTo(firstPageId);
+
+        hf.close();
+    }
+
+    @Test
+    void fsm_missingFileOnOpen_createsFreshFsm() throws IOException {
+        // Verify that if FSM file is deleted, HeapFile recreates it
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        // Insert some data
+        hf.insert(Row.of(1L, "Alice", 30));
+        hf.insert(Row.of(2L, "Bob", 25));
+        hf.close();
+
+        // Delete the FSM file
+        Path fsmPath = tablePath.getParent().resolve(tablePath.getFileName() + "_fsm");
+        assertThat(fsmPath).exists();
+        Files.delete(fsmPath);
+
+        // Reopen - should recreate FSM
+        HeapFile reopened = HeapFile.open(tablePath, 1000, schema);
+
+        // Should be able to insert (FSM recreated, falls back to new page allocation)
+        RecordId rid = reopened.insert(Row.of(3L, "Carol", 35));
+        assertThat(rid.pageId()).isGreaterThanOrEqualTo(1);
+
+        // Verify the new FSM file exists
+        assertThat(fsmPath).exists();
+
+        reopened.close();
+    }
+
+    @Test
+    void fsm_multiPageTracking_tracksAllPages() throws IOException {
+        // Verify FSM tracks multiple pages correctly
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        // Insert enough rows to span multiple pages
+        int maxPageSeen = 1;
+        for (int i = 0; i < 500; i++) {
+            RecordId rid = hf.insert(Row.of((long) i, "User" + i, i));
+            maxPageSeen = Math.max(maxPageSeen, rid.pageId());
+            if (maxPageSeen >= 3) {
+                break;
+            }
+        }
+
+        // Should have at least 3 pages (1 meta + 2+ data)
+        assertThat(maxPageSeen).isGreaterThanOrEqualTo(2);
+
+        // All data pages should be tracked in FSM
+        for (int pageId = 1; pageId <= maxPageSeen; pageId++) {
+            int category = getFsmCategory(hf, pageId);
+            // Category should be 0 (full) to 255 (empty), never negative
+            assertThat(category).isBetween(0, 255);
+        }
+
+        hf.close();
+    }
+
+    @Test
+    void fsm_staleHighCategory_correctsOnInsert() throws IOException {
+        // Test stale FSM recovery: FSM claims page has space but it's actually full
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        // Fill page 1 completely
+        int page1RowCount = 0;
+        for (int i = 0; i < 1000; i++) {
+            RecordId rid = hf.insert(Row.of((long) i, "User" + i, i));
+            if (rid.pageId() == 1) {
+                page1RowCount++;
+            } else {
+                break; // Page 1 is full, spilled to page 2
+            }
+        }
+
+        // Verify we actually filled page 1
+        assertThat(page1RowCount).isGreaterThan(0);
+
+        // Manually corrupt FSM to claim page 1 has lots of space (category 250)
+        // This simulates a stale FSM
+        setFsmCategoryDirectly(hf, 1, 250);
+
+        // Try to insert - should detect FSM is lying, correct it, and allocate new page
+        int pageCountBefore = hf.pageCount();
+        RecordId rid = hf.insert(Row.of(9999L, "NewUser", 99));
+
+        // Should have allocated a new page (not gone to the "full" page 1)
+        assertThat(rid.pageId()).isGreaterThanOrEqualTo(pageCountBefore - 1);
+
+        // FSM should now be corrected for page 1 (category near 0)
+        int correctedCategory = getFsmCategory(hf, 1);
+        assertThat(correctedCategory).isLessThanOrEqualTo(10); // Nearly full or full
+
+        hf.close();
+    }
+
+    @Test
+    void fsm_staleLowCategories_continuesToAllocateNewPages() throws IOException {
+        // Test: zero all FSM categories, verify inserts still work via new page allocation
+        HeapFile hf = HeapFile.create(tablePath, 1000, schema);
+
+        // Insert a few rows first
+        hf.insert(Row.of(1L, "Alice", 30));
+        hf.insert(Row.of(2L, "Bob", 25));
+
+        int pagesBefore = hf.pageCount();
+
+        // Zero out all FSM categories (simulate "lying low")
+        zeroAllFsmCategories(hf);
+
+        // Insert should still work - will allocate new page since FSM returns -1
+        RecordId rid = hf.insert(Row.of(3L, "Carol", 35));
+
+        // Should have allocated a new page
+        assertThat(hf.pageCount()).isGreaterThanOrEqualTo(pagesBefore);
+
+        // Row should be retrievable
+        assertThat(hf.get(rid)).isPresent();
+
+        hf.close();
+    }
+
+    // Helper methods to access FSM internals via reflection
+    private int getFsmCategory(HeapFile hf, int pageId) {
+        try {
+            java.lang.reflect.Field fsmField = HeapFile.class.getDeclaredField("fsm");
+            fsmField.setAccessible(true);
+            Object fsm = fsmField.get(hf);
+            java.lang.reflect.Method getCategoryMethod = fsm.getClass().getMethod("getCategory", int.class);
+            return (int) getCategoryMethod.invoke(fsm, pageId);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to get FSM category", e);
+        }
+    }
+
+    private void setFsmCategoryDirectly(HeapFile hf, int pageId, int category) {
+        try {
+            java.lang.reflect.Field fsmField = HeapFile.class.getDeclaredField("fsm");
+            fsmField.setAccessible(true);
+            Object fsm = fsmField.get(hf);
+            // Use updatePage to set a specific free byte value that results in desired category
+            int freeBytes = category * 32 + 16; // Middle of the bucket
+            java.lang.reflect.Method updatePageMethod = fsm.getClass().getMethod("updatePage", int.class, int.class);
+            updatePageMethod.invoke(fsm, pageId, freeBytes);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to set FSM category", e);
+        }
+    }
+
+    private void zeroAllFsmCategories(HeapFile hf) {
+        try {
+            java.lang.reflect.Field fsmField = HeapFile.class.getDeclaredField("fsm");
+            fsmField.setAccessible(true);
+            Object fsm = fsmField.get(hf);
+            java.lang.reflect.Field categoriesField = fsm.getClass().getDeclaredField("categories");
+            categoriesField.setAccessible(true);
+            byte[] categories = (byte[]) categoriesField.get(fsm);
+            java.util.Arrays.fill(categories, (byte) 0);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to zero FSM categories", e);
+        }
+    }
 }

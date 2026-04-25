@@ -226,7 +226,7 @@ class FreeSpaceMapTest {
 
     @Test
     @DisplayName("grow extends the array with zero-filled entries")
-    void growExtendsArray() {
+    void growExtendsArray() throws IOException {
         FreeSpaceMap fsm = new FreeSpaceMap(5);
         fsm.updatePage(3, 100);
 
@@ -242,7 +242,7 @@ class FreeSpaceMapTest {
 
     @Test
     @DisplayName("grow with same size is a no-op")
-    void growSameSizeNoOp() {
+    void growSameSizeNoOp() throws IOException {
         FreeSpaceMap fsm = new FreeSpaceMap(5);
         fsm.updatePage(3, 100);
 
