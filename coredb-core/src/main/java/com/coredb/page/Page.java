@@ -2,7 +2,6 @@ package com.coredb.page;
 
 import com.coredb.util.BinaryUtil;
 import com.coredb.util.Constants;
-
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
@@ -11,7 +10,7 @@ public final class Page {
     private final int pageId;
     private final ByteBuffer buffer;
 
-    public Page(int pageId, PageType type) {
+    private Page(int pageId, PageType type) {
         this.pageId = pageId;
         this.buffer = ByteBuffer.allocate(Constants.PAGE_SIZE).order(ByteOrder.BIG_ENDIAN);
         BinaryUtil.writeU64(buffer, PageHeader.OFFSET_LSN, 0L);
@@ -21,9 +20,41 @@ public final class Page {
         BinaryUtil.writeU16(buffer, PageHeader.OFFSET_PD_FLAGS, (short) (type.code() << 8));
     }
 
-    public Page(int pageId, ByteBuffer buffer) {
+    /**
+     * Creates a page with an uninitialized buffer.
+     * The caller is responsible for writing the page header or custom layout.
+     */
+    private Page(int pageId) {
+        this.pageId = pageId;
+        this.buffer = ByteBuffer.allocate(Constants.PAGE_SIZE).order(
+            ByteOrder.BIG_ENDIAN
+        );
+    }
+
+    private Page(int pageId, ByteBuffer buffer) {
         this.pageId = pageId;
         this.buffer = buffer.order(ByteOrder.BIG_ENDIAN);
+    }
+
+    public static final class Factory {
+
+        private Factory() {}
+
+        public static Page allocateMetadataPage() {
+            return new Page(0);
+        }
+
+        public static Page allocateHeapPage(int pageId) {
+            return new Page(pageId, PageType.HEAP);
+        }
+
+        public static Page allocate(int pageId, PageType type) {
+            return new Page(pageId, type);
+        }
+
+        public static Page wrap(int pageId, ByteBuffer buffer) {
+            return new Page(pageId, buffer);
+        }
     }
 
     public int pageId() {
@@ -47,28 +78,12 @@ public final class Page {
         return BinaryUtil.readU16(buffer, PageHeader.OFFSET_PD_SPECIAL);
     }
 
-    public short pdFlags() {
-        return BinaryUtil.readU16(buffer, PageHeader.OFFSET_PD_FLAGS);
-    }
-
-    public long lsn() {
-        return BinaryUtil.readU64(buffer, PageHeader.OFFSET_LSN);
-    }
-
     public void setPdLower(short lower) {
         BinaryUtil.writeU16(buffer, PageHeader.OFFSET_PD_LOWER, lower);
     }
 
     public void setPdUpper(short upper) {
         BinaryUtil.writeU16(buffer, PageHeader.OFFSET_PD_UPPER, upper);
-    }
-
-    public void setPdSpecial(short special) {
-        BinaryUtil.writeU16(buffer, PageHeader.OFFSET_PD_SPECIAL, special);
-    }
-
-    public void setLsn(long lsn) {
-        BinaryUtil.writeU64(buffer, PageHeader.OFFSET_LSN, lsn);
     }
 
     public int freeBytes() {
@@ -81,10 +96,6 @@ public final class Page {
 
     public void writeItemId(int slot, int itemId) {
         BinaryUtil.writeU32(buffer, PageHeader.SIZE + slot * 4, itemId);
-    }
-
-    public PageHeader header() {
-        return new PageHeader(lsn(), pdLower(), pdUpper(), pdSpecial(), pdFlags());
     }
 
     public ByteBuffer buffer() {
