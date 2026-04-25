@@ -593,8 +593,9 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             }
             StringBuilder sb = new StringBuilder();
             for (TableMeta meta : tables) {
+                String pk = meta.pkColumn() != null ? meta.pkColumn() : "(none)";
                 sb.append(String.format("%-20s oid=%d  pk=%s  engine=%s%n",
-                    meta.name(), meta.oid(), meta.pkColumn(), meta.engineType()));
+                    meta.name(), meta.oid(), pk, meta.engineType()));
             }
             return sb.toString().stripTrailing();
         } catch (IOException e) {
@@ -616,8 +617,9 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             }
             TableMeta meta = metaOpt.get();
             StringBuilder sb = new StringBuilder();
+            String pk = meta.pkColumn() != null ? meta.pkColumn() : "(none)";
             sb.append(String.format("table=%s  oid=%d  pk=%s  engine=%s%n",
-                meta.name(), meta.oid(), meta.pkColumn(), meta.engineType()));
+                meta.name(), meta.oid(), pk, meta.engineType()));
             sb.append(String.format("%-5s %-7s %s%n", "col", "type", "nullable"));
             for (int i = 0; i < meta.schema().columnCount(); i++) {
                 Column col = meta.schema().column(i);

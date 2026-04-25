@@ -155,6 +155,29 @@ class CatalogTest {
     }
 
     @Test
+    void createTableWithoutPk() throws IOException {
+        BootstrapCatalog.initialize(tempDir, CoreDBConfig.defaults());
+        ControlFile cf = ControlFile.load(tempDir);
+
+        try (Catalog catalog = new Catalog(tempDir, cf)) {
+            // Create a table without PK
+            ColumnDefParser.ParsedSchema parsed = parse("level:string message:string");
+            catalog.createTable("logs", parsed.schema(), parsed.pkColumn());
+
+            // Verify table exists with null PK
+            var metaOpt = catalog.openTable("logs");
+            assertThat(metaOpt).isPresent();
+            assertThat(metaOpt.get().pkColumn()).isNull();
+            assertThat(metaOpt.get().schema().columnCount()).isEqualTo(2);
+
+            // Verify it appears in list
+            var tables = catalog.listTables();
+            assertThat(tables).hasSize(1);
+            assertThat(tables.get(0).pkColumn()).isNull();
+        }
+    }
+
+    @Test
     void dropNonExistentTableThrows() throws IOException {
         BootstrapCatalog.initialize(tempDir, CoreDBConfig.defaults());
         ControlFile cf = ControlFile.load(tempDir);

@@ -36,10 +36,14 @@ class ColumnDefParserTest {
     }
 
     @Test
-    void parse_missingPkDeclaration_throws() {
-        assertThatThrownBy(() -> ColumnDefParser.parse("id:long name:string"))
-            .isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining("Missing pk");
+    void parse_missingPkDeclaration_returnsNullPk() {
+        ColumnDefParser.ParsedSchema parsed = ColumnDefParser.parse("id:long name:string");
+
+        assertThat(parsed.pkColumn()).isNull();
+        assertThat(parsed.schema().columnCount()).isEqualTo(2);
+        // All columns remain nullable when no PK specified
+        assertThat(parsed.schema().column(0).nullable()).isTrue();
+        assertThat(parsed.schema().column(1).nullable()).isTrue();
     }
 
     @Test
@@ -87,5 +91,17 @@ class ColumnDefParserTest {
         assertThat(formatted).contains("name");
         assertThat(formatted).contains("STRING");
         assertThat(formatted).contains("nullable");
+    }
+
+    @Test
+    void formatSchema_nullPk_outputsNone() {
+        Schema schema = Schema.of(
+            Column.longCol("id"),
+            Column.stringCol("name")
+        );
+
+        String formatted = ColumnDefParser.formatSchema(schema, null);
+
+        assertThat(formatted).contains("pk=(none)");
     }
 }

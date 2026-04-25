@@ -71,7 +71,7 @@ public final class Catalog implements AutoCloseable {
     }
 
     /**
-     * Creates a new table with the given name, schema, and primary key column.
+     * Creates a new table with the given name, schema, and optional primary key column.
      *
      * <p>Steps:
      * <ol>
@@ -83,13 +83,13 @@ public final class Catalog implements AutoCloseable {
      *
      * @param name the table name
      * @param schema the table schema
-     * @param pkColumn the name of the primary key column
-     * @throws IllegalArgumentException if a table with this name already exists
+     * @param pkColumn the name of the primary key column, or null if no PK
+     * @throws IllegalArgumentException if a table with this name already exists, or if pkColumn is provided but not found
      * @throws IOException if file operations fail
      */
     public void createTable(String name, Schema schema, String pkColumn) throws IOException {
-        // Validate PK column exists
-        if (schema.column(pkColumn) == null) {
+        // Validate PK column exists (only if provided)
+        if (pkColumn != null && schema.column(pkColumn) == null) {
             throw new IllegalArgumentException("PK column '" + pkColumn + "' not found in schema");
         }
 
