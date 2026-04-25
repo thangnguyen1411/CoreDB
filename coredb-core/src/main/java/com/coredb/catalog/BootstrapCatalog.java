@@ -42,11 +42,11 @@ public final class BootstrapCatalog {
     public static final int CORE_CLASS_OID = 1000;
     public static final int CORE_ATTRIBUTE_OID = 1001;
 
-    // Schema for core_class: (tableId LONG, tableName STRING, pkColumn STRING, engineType INT, rootPageId LONG)
+    // Schema for core_class: (tableId LONG, tableName STRING, pkColumn STRING?, engineType INT, rootPageId LONG)
     public static final Schema CORE_CLASS_SCHEMA = Schema.of(
         Column.longCol("tableId").withNullable(false),
         Column.stringCol("tableName").withNullable(false),
-        Column.stringCol("pkColumn").withNullable(false),
+        Column.stringCol("pkColumn").withNullable(true),  // nullable = no PK
         Column.intCol("engineType").withNullable(false),
         Column.longCol("rootPageId").withNullable(false)
     );

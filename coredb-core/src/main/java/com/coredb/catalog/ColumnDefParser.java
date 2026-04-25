@@ -27,29 +27,28 @@ public final class ColumnDefParser {
             columns.add(column);
         }
 
-        if (pkColumn == null) {
-            throw new IllegalArgumentException("Missing pk:<column> declaration");
-        }
-
         Schema schema = Schema.of(columns);
 
-        Column pkCol = schema.column(pkColumn);
-        if (pkCol == null) {
-            throw new IllegalArgumentException("PK column '" + pkColumn + "' not found in column list");
-        }
-
-        // Rebuild columns with PK having nullable=false
-        List<Column> columnsWithPkNotNull = new ArrayList<>();
-        for (Column col : columns) {
-            if (col.name().equals(pkColumn)) {
-                columnsWithPkNotNull.add(new Column(col.name(), col.type(), false));
-            } else {
-                columnsWithPkNotNull.add(col);
+        // Validate and mark PK column as non-null (if PK is specified)
+        if (pkColumn != null) {
+            Column pkCol = schema.column(pkColumn);
+            if (pkCol == null) {
+                throw new IllegalArgumentException("PK column '" + pkColumn + "' not found in column list");
             }
-        }
-        Schema schemaWithPkNotNull = Schema.of(columnsWithPkNotNull);
 
-        return new ParsedSchema(schemaWithPkNotNull, pkColumn);
+            // Rebuild columns with PK having nullable=false
+            List<Column> columnsWithPkNotNull = new ArrayList<>();
+            for (Column col : columns) {
+                if (col.name().equals(pkColumn)) {
+                    columnsWithPkNotNull.add(new Column(col.name(), col.type(), false));
+                } else {
+                    columnsWithPkNotNull.add(col);
+                }
+            }
+            schema = Schema.of(columnsWithPkNotNull);
+        }
+
+        return new ParsedSchema(schema, pkColumn);
     }
 
     private static Column parseColumn(String def) {
@@ -74,7 +73,7 @@ public final class ColumnDefParser {
 
     public static String formatSchema(Schema schema, String pkColumn) {
         StringBuilder sb = new StringBuilder();
-        sb.append("pk=").append(pkColumn).append("\n");
+        sb.append("pk=").append(pkColumn != null ? pkColumn : "(none)").append("\n");
 
         for (int i = 0; i < schema.columnCount(); i++) {
             Column col = schema.column(i);
