@@ -78,28 +78,12 @@ public final class Page {
         return BinaryUtil.readU16(buffer, PageHeader.OFFSET_PD_SPECIAL);
     }
 
-    public short pdFlags() {
-        return BinaryUtil.readU16(buffer, PageHeader.OFFSET_PD_FLAGS);
-    }
-
-    public long lsn() {
-        return BinaryUtil.readU64(buffer, PageHeader.OFFSET_LSN);
-    }
-
     public void setPdLower(short lower) {
         BinaryUtil.writeU16(buffer, PageHeader.OFFSET_PD_LOWER, lower);
     }
 
     public void setPdUpper(short upper) {
         BinaryUtil.writeU16(buffer, PageHeader.OFFSET_PD_UPPER, upper);
-    }
-
-    public void setPdSpecial(short special) {
-        BinaryUtil.writeU16(buffer, PageHeader.OFFSET_PD_SPECIAL, special);
-    }
-
-    public void setLsn(long lsn) {
-        BinaryUtil.writeU64(buffer, PageHeader.OFFSET_LSN, lsn);
     }
 
     public int freeBytes() {
