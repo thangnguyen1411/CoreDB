@@ -17,7 +17,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.*;
 
 /**
- * Tests for the bootstrap procedure (Phase 3E).
+ * Tests for the bootstrap procedure.
  *
  * <p>Bootstrap creates the system catalogs (core_class, core_attribute) without
  * using the Catalog API — solving the chicken-and-egg problem.

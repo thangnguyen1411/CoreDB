@@ -4,7 +4,6 @@ import com.coredb.api.Column;
 import com.coredb.api.CoreDB;
 import com.coredb.api.Row;
 import com.coredb.api.Schema;
-import com.coredb.catalog.BootstrapCatalog;
 import com.coredb.catalog.ColumnDefParser;
 import com.coredb.catalog.ControlFile;
 import com.coredb.heap.HeapFile;
@@ -522,26 +521,13 @@ public final class LocalShellBackend implements ShellBackend {
     }
 
     private String handleBootstrap() {
-        // Check if already initialized
+        // CoreDB.open() already bootstraps on first run.
+        // This command is now a status probe only.
         Path controlPath = db.dataPath().resolve("global/pg_control");
         if (Files.exists(controlPath)) {
             return "already initialized (pg_control exists)";
         }
-
-        try {
-            BootstrapCatalog.initialize(db.dataPath(), db.config());
-
-            // Build the result message showing what was created
-            StringBuilder sb = new StringBuilder();
-            sb.append("created global/pg_control\n");
-            sb.append("created base/1/1000 (core_class)    2 rows\n");
-            sb.append("created base/1/1001 (core_attribute) 10 rows");
-
-            return sb.toString();
-        } catch (IllegalStateException e) {
-            return "error: " + e.getMessage();
-        } catch (IOException e) {
-            return "error: " + e.getMessage();
-        }
+        // This should never happen - CoreDB.open() would have initialized
+        return "error: pg_control missing (should have been created by CoreDB.open())";
     }
 }

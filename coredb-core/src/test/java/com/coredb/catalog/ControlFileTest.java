@@ -112,7 +112,7 @@ class ControlFileTest {
         ControlFile cf = ControlFile.create(tempDir, config);
         cf.close();
 
-        // Corrupt the CRC field itself (byte 28) per phase-3.md spec
+        // Corrupt the CRC field itself (byte 28)
         Path controlPath = tempDir.resolve("global/pg_control");
         byte[] data = Files.readAllBytes(controlPath);
         data[28] = (byte) 0xFF; // CRC field starts at byte 28
@@ -156,7 +156,7 @@ class ControlFileTest {
 
     @Test
     void allocateOneHundredOids() throws Exception {
-        // Per phase-3.md spec: "100 allocateOid() calls → OIDs 1002, 1003, ..., 1101"
+        // "100 allocateOid() calls → OIDs 1002, 1003, ..., 1101"
         CoreDBConfig config = CoreDBConfig.defaults();
         ControlFile cf = ControlFile.create(tempDir, config);
 
