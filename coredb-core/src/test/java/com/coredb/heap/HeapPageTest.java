@@ -1,18 +1,16 @@
 package com.coredb.heap;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
 import com.coredb.page.Page;
-import com.coredb.page.PageType;
 import com.coredb.util.Constants;
 import com.coredb.util.StorageException;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.List;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 class HeapPageTest {
 
@@ -20,7 +18,7 @@ class HeapPageTest {
 
     @BeforeEach
     void setUp() {
-        heapPage = new HeapPage(new Page(1, PageType.HEAP));
+        heapPage = new HeapPage(Page.Factory.allocateHeapPage(1));
     }
 
     @Test

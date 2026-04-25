@@ -82,7 +82,7 @@ public final class DiskManager implements AutoCloseable {
 
     public Page allocatePage(PageType type) throws IOException {
         int newId = readNextPageId(metaPage);
-        Page newPage = new Page(newId, type);
+        Page newPage = Page.Factory.allocate(newId, type);
         writePageToChannel(channel, newPage);
 
         writeNextPageId(metaPage, newId + 1);
@@ -114,7 +114,7 @@ public final class DiskManager implements AutoCloseable {
     // --- Meta page construction and validation ---
 
     private static Page buildMetaPage(CoreDBConfig config) {
-        Page p = new Page(0, PageType.META);
+        Page p = Page.Factory.allocateMetadataPage();
         ByteBuffer buf = p.buffer();
         BinaryUtil.writeU64(buf, META_MAGIC, Constants.FILE_MAGIC);
         BinaryUtil.writeU16(buf, META_VERSION, Constants.FORMAT_VERSION);
@@ -168,6 +168,6 @@ public final class DiskManager implements AutoCloseable {
             }
             pos += n;
         }
-        return new Page(pageId, buf);
+        return Page.Factory.wrap(pageId, buf);
     }
 }

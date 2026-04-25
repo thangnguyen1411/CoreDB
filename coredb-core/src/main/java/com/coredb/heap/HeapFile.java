@@ -278,7 +278,7 @@ public final class HeapFile implements AutoCloseable {
      */
     private Page allocateNewPage() throws IOException {
         int newPageId = nextPageId;
-        Page newPage = new Page(newPageId, PageType.HEAP);
+        Page newPage = Page.Factory.allocateHeapPage(newPageId);
         writePageToChannel(channel, newPage);
 
         // Update and persist nextPageId in meta page
@@ -337,7 +337,7 @@ public final class HeapFile implements AutoCloseable {
      * Builds the meta page (page 0) for a per-table heap file.
      */
     private static Page buildInitialMetaPage(int oid) {
-        Page page = new Page(0);
+        Page page = Page.Factory.allocateMetadataPage();
         ByteBuffer buf = page.buffer();
         BinaryUtil.writeU32(buf, META_OFFSET_MAGIC, Constants.HEAP_FILE_MAGIC);
         BinaryUtil.writeU32(buf, META_OFFSET_VERSION, META_FORMAT_VERSION);
@@ -371,7 +371,7 @@ public final class HeapFile implements AutoCloseable {
             }
             pos += n;
         }
-        return new Page(pageId, buf);
+        return Page.Factory.wrap(pageId, buf);
     }
 
     // Iterates pages sequentially, yielding live rows without materializing all into memory

@@ -10,7 +10,7 @@ public final class Page {
     private final int pageId;
     private final ByteBuffer buffer;
 
-    public Page(int pageId, PageType type) {
+    private Page(int pageId, PageType type) {
         this.pageId = pageId;
         this.buffer = ByteBuffer.allocate(Constants.PAGE_SIZE).order(ByteOrder.BIG_ENDIAN);
         BinaryUtil.writeU64(buffer, PageHeader.OFFSET_LSN, 0L);
@@ -24,16 +24,37 @@ public final class Page {
      * Creates a page with an uninitialized buffer.
      * The caller is responsible for writing the page header or custom layout.
      */
-    public Page(int pageId) {
+    private Page(int pageId) {
         this.pageId = pageId;
         this.buffer = ByteBuffer.allocate(Constants.PAGE_SIZE).order(
             ByteOrder.BIG_ENDIAN
         );
     }
 
-    public Page(int pageId, ByteBuffer buffer) {
+    private Page(int pageId, ByteBuffer buffer) {
         this.pageId = pageId;
         this.buffer = buffer.order(ByteOrder.BIG_ENDIAN);
+    }
+
+    public static final class Factory {
+
+        private Factory() {}
+
+        public static Page allocateMetadataPage() {
+            return new Page(0);
+        }
+
+        public static Page allocateHeapPage(int pageId) {
+            return new Page(pageId, PageType.HEAP);
+        }
+
+        public static Page allocate(int pageId, PageType type) {
+            return new Page(pageId, type);
+        }
+
+        public static Page wrap(int pageId, ByteBuffer buffer) {
+            return new Page(pageId, buffer);
+        }
     }
 
     public int pageId() {
