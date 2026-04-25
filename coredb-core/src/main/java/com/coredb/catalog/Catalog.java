@@ -120,8 +120,10 @@ public final class Catalog implements AutoCloseable {
         }
         log.debug("Inserted {} columns into core_attribute for table {}", schema.columnCount(), name);
 
-        // Catalog files remain open for the lifetime of Catalog instance
-        // They will be synced on Catalog.close()
+        // Catalog files remain open for the lifetime of Catalog instance.
+        // They will be synced on Catalog.close().
+        // TODO: no explicit fsync here. If process crashes between insert
+        // and close(), catalog entries may not be persisted. WAL/fsync will come later.
     }
 
     /**
@@ -205,6 +207,14 @@ public final class Catalog implements AutoCloseable {
 
     // ==================== Private Helper Methods ====================
 
+    /**
+     * Finds the RecordId for a table by name.
+     *
+     * <p>Note: This uses HeapPage.scan() + HeapFile.get() rather than HeapFile.scan()
+     * because we need the RecordId for deletion. HeapFile.scan() returns an iterator
+     * over rows but doesn't expose the RecordIds. Deleted rows are correctly filtered
+     * out since HeapFile.get() returns Optional.empty() for deleted slots.
+     */
     private RecordId findTableRecordId(String name) throws IOException {
         for (int pageId = 1; pageId < coreClassFile.pageCount(); pageId++) {
             Page page = coreClassFile.readPage(pageId);
@@ -230,6 +240,8 @@ public final class Catalog implements AutoCloseable {
         EngineType engineType = EngineType.values()[engineTypeCode];
 
         // Look up columns from core_attribute - collect in a map first, then sort by attnum
+        // TODO: This is O(n) over all attribute rows per table lookup. For v1 this is fine,
+        // but we should add an index (e.g., btree on tableId) or cache for production use.
         record ColInfo(String name, ColumnType type, boolean nullable, int attnum) {}
         List<ColInfo> colInfos = new ArrayList<>();
 
