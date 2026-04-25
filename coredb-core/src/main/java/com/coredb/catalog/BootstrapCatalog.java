@@ -42,9 +42,6 @@ public final class BootstrapCatalog {
     public static final int CORE_CLASS_OID = 1000;
     public static final int CORE_ATTRIBUTE_OID = 1001;
 
-    // First user table OID (assigned by ControlFile, starts at 1002)
-    public static final int FIRST_USER_OID = 1002;
-
     // Schema for core_class: (tableId LONG, tableName STRING, pkColumn STRING, engineType INT, rootPageId LONG)
     public static final Schema CORE_CLASS_SCHEMA = Schema.of(
         Column.longCol("tableId").withNullable(false),
@@ -103,58 +100,52 @@ public final class BootstrapCatalog {
         Files.createDirectories(baseDir);
         log.debug("Created directories: {}/, {}/", globalDir, baseDir);
 
-        // Step 2: Create control file
-        ControlFile controlFile = ControlFile.create(dataDir, config);
-        log.debug("Created pg_control: nextOid={}, nextXid={}",
-            controlFile.nextOid(), controlFile.nextXid());
+        // Step 2: Create control file (will be closed after creating heap files)
+        try (ControlFile controlFile = ControlFile.create(dataDir, config)) {
+            log.debug("Created pg_control: nextOid={}, nextXid={}",
+                controlFile.nextOid(), controlFile.nextXid());
 
-        // Step 3: Create empty heap files for system catalogs
-        Path coreClassPath = baseDir.resolve(String.valueOf(CORE_CLASS_OID));
-        Path coreAttributePath = baseDir.resolve(String.valueOf(CORE_ATTRIBUTE_OID));
+            // Step 3 & 4: Create heap files and insert bootstrap rows
+            Path coreClassPath = baseDir.resolve(String.valueOf(CORE_CLASS_OID));
+            Path coreAttributePath = baseDir.resolve(String.valueOf(CORE_ATTRIBUTE_OID));
 
-        HeapFile coreClassFile = HeapFile.create(coreClassPath, CORE_CLASS_OID, CORE_CLASS_SCHEMA);
-        HeapFile coreAttributeFile = HeapFile.create(coreAttributePath, CORE_ATTRIBUTE_OID, CORE_ATTRIBUTE_SCHEMA);
+            try (HeapFile coreClassFile = HeapFile.create(coreClassPath, CORE_CLASS_OID, CORE_CLASS_SCHEMA);
+                 HeapFile coreAttributeFile = HeapFile.create(coreAttributePath, CORE_ATTRIBUTE_OID, CORE_ATTRIBUTE_SCHEMA)) {
 
-        log.debug("Created heap files: {} (oid={}), {} (oid={})",
-            coreClassPath, CORE_CLASS_OID, coreAttributePath, CORE_ATTRIBUTE_OID);
+                log.debug("Created heap files: {} (oid={}), {} (oid={})",
+                    coreClassPath, CORE_CLASS_OID, coreAttributePath, CORE_ATTRIBUTE_OID);
 
-        // Step 4: Insert self-describing bootstrap rows (2 into core_class, 10 into core_attribute)
-        // All rows use BOOTSTRAP_XID (1) as xmin, making them permanently visible
+                // Insert into core_class: rows describing core_class and core_attribute themselves
+                RecordId rid1 = coreClassFile.insert(Row.of(
+                    (long) CORE_CLASS_OID, "core_class", "tableId", EngineType.BTREE.ordinal(), 0L));
+                log.info("Inserted core_class row: {}", rid1);
 
-        // Insert into core_class: rows describing core_class and core_attribute themselves
-        RecordId rid1 = coreClassFile.insert(Row.of(
-            (long) CORE_CLASS_OID, "core_class", "tableId", EngineType.BTREE.ordinal(), 0L));
-        log.info("Inserted core_class row: {}", rid1);
+                RecordId rid2 = coreClassFile.insert(Row.of(
+                    (long) CORE_ATTRIBUTE_OID, "core_attribute", "tableId", EngineType.BTREE.ordinal(), 0L));
+                log.info("Inserted core_attribute row: {}", rid2);
 
-        RecordId rid2 = coreClassFile.insert(Row.of(
-            (long) CORE_ATTRIBUTE_OID, "core_attribute", "tableId", EngineType.BTREE.ordinal(), 0L));
-        log.info("Inserted core_attribute row: {}", rid2);
+                // Insert into core_attribute: 5 columns for core_class + 5 for core_attribute = 10 rows
+                final int TYPE_INT = 1, TYPE_LONG = 2, TYPE_STRING = 3, TYPE_BOOL = 4;
 
-        // Insert into core_attribute: 5 columns for core_class + 5 columns for core_attribute = 10 rows
-        // Column type encoding: 1=INT, 2=LONG, 3=STRING, 4=BOOL
-        final int TYPE_INT = 1, TYPE_LONG = 2, TYPE_STRING = 3, TYPE_BOOL = 4;
+                // Columns for core_class (OID 1000)
+                coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 1, "tableId", TYPE_LONG, false));
+                coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 2, "tableName", TYPE_STRING, false));
+                coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 3, "pkColumn", TYPE_STRING, false));
+                coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 4, "engineType", TYPE_INT, false));
+                coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 5, "rootPageId", TYPE_LONG, false));
 
-        // Columns for core_class (OID 1000)
-        coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 1, "tableId", TYPE_LONG, false));
-        coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 2, "tableName", TYPE_STRING, false));
-        coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 3, "pkColumn", TYPE_STRING, false));
-        coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 4, "engineType", TYPE_INT, false));
-        coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 5, "rootPageId", TYPE_LONG, false));
+                // Columns for core_attribute (OID 1001)
+                coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 1, "tableId", TYPE_LONG, false));
+                coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 2, "attnum", TYPE_INT, false));
+                coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 3, "attname", TYPE_STRING, false));
+                coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 4, "atttype", TYPE_INT, false));
+                coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 5, "attnull", TYPE_BOOL, false));
 
-        // Columns for core_attribute (OID 1001)
-        coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 1, "tableId", TYPE_LONG, false));
-        coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 2, "attnum", TYPE_INT, false));
-        coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 3, "attname", TYPE_STRING, false));
-        coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 4, "atttype", TYPE_INT, false));
-        coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 5, "attnull", TYPE_BOOL, false));
+                log.info("Inserted bootstrap rows: 2 rows into core_class, 10 rows into core_attribute");
+            } // HeapFiles auto-close here (fsync on close)
 
-        log.info("Inserted bootstrap rows: 2 rows into core_class, 10 rows into core_attribute");
-
-        // Step 5: Sync to disk
-        coreClassFile.close();
-        coreAttributeFile.close();
-
-        log.info("Bootstrap complete: 12 rows total");
+            log.info("Bootstrap complete: 12 rows total");
+        } // ControlFile auto-closes here
     }
 
 }

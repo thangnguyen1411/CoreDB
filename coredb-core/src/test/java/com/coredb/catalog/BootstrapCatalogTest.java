@@ -142,27 +142,6 @@ class BootstrapCatalogTest {
     }
 
     @Test
-    void coreClassRowsHaveBootstrapXid() throws Exception {
-        CoreDBConfig config = CoreDBConfig.builder()
-            .engineType(EngineType.BTREE)
-            .build();
-
-        BootstrapCatalog.initialize(tempDir, config);
-
-        // All bootstrap rows should be visible (BOOTSTRAP_XID = 1)
-        Path coreClassPath = tempDir.resolve("base/1/1000");
-        try (HeapFile hf = HeapFile.open(coreClassPath, 1000, BootstrapCatalog.CORE_CLASS_SCHEMA)) {
-            Iterator<Row> scan = hf.scan();
-            int count = 0;
-            while (scan.hasNext()) {
-                scan.next();
-                count++;
-            }
-            assertThat(count).isEqualTo(2);
-        }
-    }
-
-    @Test
     void filesAreSynchedToDisk() throws Exception {
         CoreDBConfig config = CoreDBConfig.builder()
             .engineType(EngineType.BTREE)

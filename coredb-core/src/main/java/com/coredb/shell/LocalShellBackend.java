@@ -527,7 +527,6 @@ public final class LocalShellBackend implements ShellBackend {
         if (Files.exists(controlPath)) {
             return "already initialized (pg_control exists)";
         }
-        // This should never happen - CoreDB.open() would have initialized
-        return "error: pg_control missing (should have been created by CoreDB.open())";
+        throw new IllegalStateException("pg_control missing — CoreDB.open() should have initialized");
     }
 }
