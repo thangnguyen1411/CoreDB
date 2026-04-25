@@ -66,7 +66,6 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             case "schema-parse"      -> handleSchemaParse(args);
             case "control-info"      -> handleControlInfo();
             case "control-alloc-oid" -> handleControlAllocOid();
-            case "heap-create"       -> handleHeapCreate(args);
             case "heap-meta"         -> handleHeapMeta(args);
             case "bootstrap"         -> handleBootstrap();
             case "create-table"      -> handleCreateTable(args);
@@ -91,45 +90,48 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
 
     private String formatHelp() {
         return """
-            version      print version and config
-            status       show DB file path and whether it exists
-            Catalog commands:
-            create-table <name> cols... pk:<col>   create a new table (e.g., create-table users id:long name:string pk:id)
-            list-tables                             list all tables
-            describe <name>                         show table schema
-            drop-table <name>                       drop a table (soft delete)
-
-            Raw heap commands:
-            insert-raw oid=N id=N name=XXX age=N   insert a row into per-table file
-            get-raw oid=N rid=page:slot            get a row by RecordId from per-table file
-            scan-raw oid=N                         scan all rows in per-table file
-            delete-raw oid=N rid=page:slot         delete a row by RecordId from per-table file
-            heap-stats oid=N                       show file stats for per-table heap file
-            heap-create oid=N cols...              create per-table heap file (oid, columns)
-            heap-meta oid=N                        show meta page of per-table heap file
-
             Cluster commands:
-            schema-parse <def>                     parse column definition (id:long name:string pk:id)
-            control-info                           show pg_control contents
-            control-alloc-oid                    allocate next OID and persist
-            bootstrap                              show bootstrap status
+              control-info               show pg_control contents
+              control-alloc-oid          allocate next OID and persist
+              bootstrap                  show bootstrap status
 
-            help         list available commands
-            quit         exit
+            Catalog commands:
+              create-table <name> cols... pk:<col>   create a new table
+              list-tables                              list all tables
+              describe <name>                          show table schema
+              drop-table <name>                        drop a table (soft delete)
+              schema-parse <def>                       parse column definition
+
+            Diagnostics:
+              version                    print version and config
+              status                     show DB file path and whether it exists
+              help                       list available commands
+              quit                       exit
+
+            Debug: (raw heap commands bypass Catalog and access heap files directly)
+              insert-raw table=<name>|oid=<N> id=N name=XXX age=N   insert a row
+              get-raw table=<name>|oid=<N> rid=page:slot            get a row by RecordId
+              scan-raw table=<name>|oid=<N>                         scan all rows
+              delete-raw table=<name>|oid=<N> rid=page:slot         delete a row by RecordId
+              heap-stats table=<name>|oid=<N>                       show file stats
+              heap-meta table=<name>|oid=<N>                        show meta page of per-table heap file
             """;
     }
 
     private String handleInsertRaw(String args) {
-        int oid = -1;
+        OidResolution resolution = resolveOidFull(args);
+        if (!resolution.isSuccess()) {
+            return resolution.errorMessage();
+        }
+        int oid = resolution.oid();
+
         Long id = null;
         String name = null;
         Integer age = null;
 
         for (String part : args.split("\\s+")) {
             try {
-                if (part.startsWith("oid=")) {
-                    oid = Integer.parseInt(part.substring(4));
-                } else if (part.startsWith("id=")) {
+                if (part.startsWith("id=")) {
                     id = Long.parseLong(part.substring(3));
                 } else if (part.startsWith("name=")) {
                     name = part.substring(5);
@@ -137,12 +139,12 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
                     age = Integer.parseInt(part.substring(4));
                 }
             } catch (NumberFormatException e) {
-                return "usage: insert-raw oid=N id=N name=XXX age=N (invalid number: " + part + ")";
+                return "usage: insert-raw table=<name>|oid=<N> id=N name=XXX age=N (invalid number: " + part + ")";
             }
         }
 
-        if (oid < 0 || id == null || name == null || age == null) {
-            return "usage: insert-raw oid=N id=N name=XXX age=N";
+        if (id == null || name == null || age == null) {
+            return "usage: insert-raw table=<name>|oid=<N> id=N name=XXX age=N";
         }
 
         // Build path: dataDir/base/1/<oid>
@@ -162,17 +164,15 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
     }
 
     private String handleGetRaw(String args) {
-        int oid = -1;
-        RecordId rid = null;
+        OidResolution resolution = resolveOidFull(args);
+        if (!resolution.isSuccess()) {
+            return resolution.errorMessage();
+        }
+        int oid = resolution.oid();
 
+        RecordId rid = null;
         for (String part : args.split("\\s+")) {
-            if (part.startsWith("oid=")) {
-                try {
-                    oid = Integer.parseInt(part.substring(4));
-                } catch (NumberFormatException e) {
-                    return "invalid OID: " + part.substring(4);
-                }
-            } else if (part.startsWith("rid=")) {
+            if (part.startsWith("rid=")) {
                 try {
                     rid = RecordId.parse(part.substring(4));
                 } catch (IllegalArgumentException e) {
@@ -181,8 +181,8 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             }
         }
 
-        if (oid < 0 || rid == null) {
-            return "usage: get-raw oid=N rid=page:slot";
+        if (rid == null) {
+            return "usage: get-raw table=<name>|oid=<N> rid=page:slot";
         }
 
         // Build path: dataDir/base/1/<oid>
@@ -205,16 +205,11 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
     }
 
     private String handleScanRaw(String args) {
-        if (!args.startsWith("oid=")) {
-            return "usage: scan-raw oid=N";
+        OidResolution resolution = resolveOidFull(args);
+        if (!resolution.isSuccess()) {
+            return resolution.errorMessage();
         }
-
-        int oid;
-        try {
-            oid = Integer.parseInt(args.substring(4));
-        } catch (NumberFormatException e) {
-            return "invalid OID: " + args.substring(4);
-        }
+        int oid = resolution.oid();
 
         // Build path: dataDir/base/1/<oid>
         Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
@@ -244,17 +239,15 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
     }
 
     private String handleDeleteRaw(String args) {
-        int oid = -1;
-        RecordId rid = null;
+        OidResolution resolution = resolveOidFull(args);
+        if (!resolution.isSuccess()) {
+            return resolution.errorMessage();
+        }
+        int oid = resolution.oid();
 
+        RecordId rid = null;
         for (String part : args.split("\\s+")) {
-            if (part.startsWith("oid=")) {
-                try {
-                    oid = Integer.parseInt(part.substring(4));
-                } catch (NumberFormatException e) {
-                    return "invalid OID: " + part.substring(4);
-                }
-            } else if (part.startsWith("rid=")) {
+            if (part.startsWith("rid=")) {
                 try {
                     rid = RecordId.parse(part.substring(4));
                 } catch (IllegalArgumentException e) {
@@ -263,8 +256,8 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             }
         }
 
-        if (oid < 0 || rid == null) {
-            return "usage: delete-raw oid=N rid=page:slot";
+        if (rid == null) {
+            return "usage: delete-raw table=<name>|oid=<N> rid=page:slot";
         }
 
         // Build path: dataDir/base/1/<oid>
@@ -283,16 +276,11 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
     }
 
     private String handleHeapStats(String args) {
-        if (!args.startsWith("oid=")) {
-            return "usage: heap-stats oid=N";
+        OidResolution resolution = resolveOidFull(args);
+        if (!resolution.isSuccess()) {
+            return resolution.errorMessage();
         }
-
-        int oid;
-        try {
-            oid = Integer.parseInt(args.substring(4));
-        } catch (NumberFormatException e) {
-            return "invalid OID: " + args.substring(4);
-        }
+        int oid = resolution.oid();
 
         // Build path: dataDir/base/1/<oid>
         Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
@@ -354,75 +342,12 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         }
     }
 
-    private String handleHeapCreate(String args) {
-        // Parse: oid=1000 id:long name:string
-        if (args.isBlank() || !args.contains("oid=")) {
-            return "usage: heap-create oid=N col:type ... (e.g., heap-create oid=1000 id:long name:string)";
-        }
-
-        int oid = -1;
-        String colDefs = "";
-
-        String[] parts = args.split("\\s+");
-        for (String part : parts) {
-            if (part.startsWith("oid=")) {
-                try {
-                    oid = Integer.parseInt(part.substring(4));
-                } catch (NumberFormatException e) {
-                    return "invalid OID: " + part.substring(4);
-                }
-            } else if (!part.isBlank() && colDefs.isEmpty()) {
-                // First non-oid arg starts the column definitions
-                colDefs = part;
-            } else if (!part.isBlank()) {
-                colDefs += " " + part;
-            }
-        }
-
-        if (oid < 0) {
-            return "usage: heap-create oid=N col:type ...";
-        }
-        if (colDefs.isBlank()) {
-            return "usage: heap-create oid=N col:type ... (at least one column required)";
-        }
-
-        try {
-            // Parse column definitions - synthesize PK from first column if user didn't provide one.
-            // This is temporary scaffolding; heap-create will removed later.
-            String colDefsToParse = colDefs;
-            if (!colDefs.contains("pk:")) {
-                String firstColName = colDefs.split("\\s+")[0].split(":")[0];
-                colDefsToParse = colDefs + " pk:" + firstColName;
-            }
-            ColumnDefParser.ParsedSchema parsed = ColumnDefParser.parse(colDefsToParse);
-            Schema schema = parsed.schema();
-
-            // Build path: dataDir/base/1/<oid>
-            Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
-
-            HeapFile hf = HeapFile.create(tablePath, oid, schema);
-            hf.close();
-
-            return String.format("created %s (meta page written, nextPageId=1)",
-                db.dataPath().relativize(tablePath));
-        } catch (IllegalArgumentException e) {
-            return "error: " + e.getMessage();
-        } catch (IOException e) {
-            return "error: " + e.getMessage();
-        }
-    }
-
     private String handleHeapMeta(String args) {
-        if (!args.startsWith("oid=")) {
-            return "usage: heap-meta oid=N";
+        OidResolution resolution = resolveOidFull(args);
+        if (!resolution.isSuccess()) {
+            return resolution.errorMessage();
         }
-
-        int oid;
-        try {
-            oid = Integer.parseInt(args.substring(4));
-        } catch (NumberFormatException e) {
-            return "invalid OID: " + args.substring(4);
-        }
+        int oid = resolution.oid();
 
         // Build path: dataDir/base/1/<oid>
         Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
@@ -435,18 +360,16 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             // We need a schema to open, but for meta page inspection we just need to validate
             // Use a dummy schema - the meta page doesn't depend on it
             Schema dummySchema = Schema.of(Column.longCol("dummy"));
-            HeapFile hf = HeapFile.open(tablePath, oid, dummySchema);
-
-            String path = db.dataPath().relativize(hf.tablePath()).toString();
-            StringBuilder sb = new StringBuilder();
-            sb.append("path=").append(path).append("\n");
-            sb.append(String.format("magic=0x%08X (\"HEAP\")%n", Constants.HEAP_FILE_MAGIC));
-            sb.append("formatVersion=1\n");
-            sb.append("oid=").append(oid).append("\n");
-            sb.append("nextPageId=").append(hf.nextPageId());
-
-            hf.close();
-            return sb.toString();
+            try (HeapFile hf = HeapFile.open(tablePath, oid, dummySchema)) {
+                String path = db.dataPath().relativize(hf.tablePath()).toString();
+                StringBuilder sb = new StringBuilder();
+                sb.append("path=").append(path).append("\n");
+                sb.append(String.format("magic=0x%08X (\"HEAP\")%n", Constants.HEAP_FILE_MAGIC));
+                sb.append("formatVersion=1\n");
+                sb.append("oid=").append(oid).append("\n");
+                sb.append("nextPageId=").append(hf.nextPageId());
+                return sb.toString();
+            }
         } catch (IOException e) {
             return "error: " + e.getMessage();
         }
@@ -458,6 +381,48 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             case BootstrapCatalog.CORE_ATTRIBUTE_OID  -> BootstrapCatalog.CORE_ATTRIBUTE_SCHEMA;
             default                                   -> RAW_SCHEMA;
         };
+    }
+
+    /**
+     * Result of OID resolution: either success with OID, or failure with error message.
+     */
+    private record OidResolution(int oid, String errorMessage, boolean isSuccess) {
+        static OidResolution success(int oid) {
+            return new OidResolution(oid, null, true);
+        }
+        static OidResolution failure(String errorMessage) {
+            return new OidResolution(-1, errorMessage, false);
+        }
+    }
+
+    /**
+     * Resolves either "oid=N" or "table=<name>" to an OID.
+     * Returns an OidResolution with success status and appropriate error message on failure.
+     */
+    private OidResolution resolveOidFull(String args) {
+        String[] parts = args.split("\\s+");
+        for (String part : parts) {
+            if (part.startsWith("oid=")) {
+                try {
+                    return OidResolution.success(Integer.parseInt(part.substring(4)));
+                } catch (NumberFormatException e) {
+                    return OidResolution.failure("usage: specify oid=<N> or table=<name>");
+                }
+            } else if (part.startsWith("table=")) {
+                String tableName = part.substring(6);
+                try {
+                    Catalog cat = getCatalog();
+                    Optional<TableMeta> meta = cat.openTable(tableName);
+                    if (meta.isEmpty()) {
+                        return OidResolution.failure("error: unknown table: " + tableName);
+                    }
+                    return OidResolution.success(meta.get().oid());
+                } catch (IOException e) {
+                    return OidResolution.failure("error: " + e.getMessage());
+                }
+            }
+        }
+        return OidResolution.failure("usage: specify oid=<N> or table=<name>");
     }
 
     private String handleCreateTable(String args) {
