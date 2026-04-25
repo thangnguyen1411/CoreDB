@@ -23,6 +23,8 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Iterator;
+import java.util.Optional;
 
 public final class LocalShellBackend implements ShellBackend {
 
@@ -60,6 +62,7 @@ public final class LocalShellBackend implements ShellBackend {
             case "get-raw"        -> handleGetRaw(args);
             case "scan-raw"       -> handleScanRaw(args);
             case "delete-raw"     -> handleDeleteRaw(args);
+            case "heap-stats"     -> handleHeapStats(args);
             case "schema-parse"      -> handleSchemaParse(args);
             case "control-info"      -> handleControlInfo();
             case "control-alloc-oid" -> handleControlAllocOid();
@@ -162,6 +165,11 @@ public final class LocalShellBackend implements ShellBackend {
             control-alloc-oid                       allocate next OID and persist
             heap-create oid=N cols...               create per-table heap file (oid, columns)
             heap-meta oid=N                         show meta page of per-table heap file
+            heap-stats oid=N                        show file stats for per-table heap file
+            insert-raw oid=N id=N name=XXX ...      insert a row into per-table file
+            get-raw oid=N rid=page:slot             get a row by RecordId from per-table file
+            scan-raw oid=N                          scan all rows in per-table file
+            delete-raw oid=N rid=page:slot          delete a row by RecordId from per-table file
             help         list available commands
             quit         exit
             """;
@@ -178,15 +186,15 @@ public final class LocalShellBackend implements ShellBackend {
     }
 
     private String handleInsertRaw(String args) {
-        int pageId = -1;
+        int oid = -1;
         Long id = null;
         String name = null;
         Integer age = null;
 
         for (String part : args.split("\\s+")) {
             try {
-                if (part.startsWith("page=")) {
-                    pageId = Integer.parseInt(part.substring(5));
+                if (part.startsWith("oid=")) {
+                    oid = Integer.parseInt(part.substring(4));
                 } else if (part.startsWith("id=")) {
                     id = Long.parseLong(part.substring(3));
                 } else if (part.startsWith("name=")) {
@@ -195,43 +203,24 @@ public final class LocalShellBackend implements ShellBackend {
                     age = Integer.parseInt(part.substring(4));
                 }
             } catch (NumberFormatException e) {
-                return "usage: insert-raw page=N id=N name=XXX age=N (invalid number: " + part + ")";
+                return "usage: insert-raw oid=N id=N name=XXX age=N (invalid number: " + part + ")";
             }
         }
 
-        if (pageId < 1 || id == null || name == null || age == null) {
-            return "usage: insert-raw page=N id=N name=XXX age=N";
+        if (oid < 0 || id == null || name == null || age == null) {
+            return "usage: insert-raw oid=N id=N name=XXX age=N";
         }
 
-        try {
-            DiskManager dm = db.diskManager();
+        // Build path: dataDir/base/1/<oid>
+        Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
 
-            if (pageId >= dm.pageCount()) {
-                return "error: page " + pageId + " does not exist";
-            }
+        if (!Files.exists(tablePath)) {
+            return "error: heap file not found: " + db.dataPath().relativize(tablePath);
+        }
 
-            Page page = dm.readPage(pageId);
-            if (page.pageType() != PageType.HEAP) {
-                return "error: page " + pageId + " is not a heap page";
-            }
-
+        try (HeapFile hf = HeapFile.open(tablePath, oid, RAW_SCHEMA)) {
             Row row = Row.of(id, name, age);
-            SerializedRow serialized = RowSerializer.serialize(row, RAW_SCHEMA);
-            byte[] dataBytes = serialized.data();
-            byte[] nullBitmap = serialized.nullBitmap();
-            short natts = (short) RAW_SCHEMA.columnCount();
-
-            int tupleHeaderSize = HeapTupleHeader.computeHeaderSize(natts);
-            int tupleSize = tupleHeaderSize + dataBytes.length;
-
-            HeapPage heapPage = new HeapPage(page);
-            if (heapPage.freeBytes() < tupleSize + ItemId.SIZE) {
-                return "error: page " + pageId + " has insufficient space";
-            }
-
-            RecordId rid = heapPage.insert(dataBytes, natts, nullBitmap);
-            dm.writePage(page);
-
+            RecordId rid = hf.insert(row);
             return String.format("rid=%s  (xmin=%d xmax=%d)", rid, Constants.BOOTSTRAP_XID, Constants.INVALID_XID);
         } catch (Exception e) {
             return "error: " + e.getMessage();
@@ -239,112 +228,165 @@ public final class LocalShellBackend implements ShellBackend {
     }
 
     private String handleGetRaw(String args) {
-        if (!args.startsWith("rid=")) {
-            return "usage: get-raw rid=page:slot";
+        int oid = -1;
+        RecordId rid = null;
+
+        for (String part : args.split("\\s+")) {
+            if (part.startsWith("oid=")) {
+                try {
+                    oid = Integer.parseInt(part.substring(4));
+                } catch (NumberFormatException e) {
+                    return "invalid OID: " + part.substring(4);
+                }
+            } else if (part.startsWith("rid=")) {
+                try {
+                    rid = RecordId.parse(part.substring(4));
+                } catch (IllegalArgumentException e) {
+                    return "invalid rid format: " + part.substring(4);
+                }
+            }
         }
 
-        try {
-            RecordId rid = RecordId.parse(args.substring(4));
-            DiskManager dm = db.diskManager();
+        if (oid < 0 || rid == null) {
+            return "usage: get-raw oid=N rid=page:slot";
+        }
 
-            if (rid.pageId() < 1 || rid.pageId() >= dm.pageCount()) {
-                return "error: page " + rid.pageId() + " does not exist";
+        // Build path: dataDir/base/1/<oid>
+        Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
+
+        if (!Files.exists(tablePath)) {
+            return "error: heap file not found: " + db.dataPath().relativize(tablePath);
+        }
+
+        try (HeapFile hf = HeapFile.open(tablePath, oid, RAW_SCHEMA)) {
+            Optional<Row> row = hf.get(rid);
+            if (row.isPresent()) {
+                return row.get().values().toString();
+            } else {
+                return "(not found or not visible)";
             }
-
-            Page page = dm.readPage(rid.pageId());
-            if (page.pageType() != PageType.HEAP) {
-                return "error: page " + rid.pageId() + " is not a heap page";
-            }
-
-            HeapPage heapPage = new HeapPage(page);
-            byte[] raw = heapPage.get(rid.slotNo());
-
-            HeapTupleHeader header = HeapTupleHeader.readFrom(
-                ByteBuffer.wrap(raw).order(ByteOrder.BIG_ENDIAN), 0);
-
-            // Defensive: heapPage.get() already validated FLAGS_NORMAL, but double-check visibility
-            if (header.xmin() != Constants.BOOTSTRAP_XID) {
-                return "error: tuple not visible (xmin != BOOTSTRAP_XID)";
-            }
-
-            int hoff = header.hoff();
-            byte[] data = new byte[raw.length - hoff];
-            System.arraycopy(raw, hoff, data, 0, data.length);
-
-            Row row = RowSerializer.deserialize(data, RAW_SCHEMA, header);
-            return row.values().toString();
         } catch (Exception e) {
             return "error: " + e.getMessage();
         }
     }
 
     private String handleScanRaw(String args) {
-        if (!args.startsWith("page=")) {
-            return "usage: scan-raw page=N";
+        if (!args.startsWith("oid=")) {
+            return "usage: scan-raw oid=N";
         }
 
+        int oid;
         try {
-            int pageId = Integer.parseInt(args.substring(5));
-            DiskManager dm = db.diskManager();
+            oid = Integer.parseInt(args.substring(4));
+        } catch (NumberFormatException e) {
+            return "invalid OID: " + args.substring(4);
+        }
 
-            if (pageId < 1 || pageId >= dm.pageCount()) {
-                return "error: page " + pageId + " does not exist";
-            }
+        // Build path: dataDir/base/1/<oid>
+        Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
 
-            Page page = dm.readPage(pageId);
-            if (page.pageType() != PageType.HEAP) {
-                return "error: page " + pageId + " is not a heap page";
-            }
+        if (!Files.exists(tablePath)) {
+            return "error: heap file not found: " + db.dataPath().relativize(tablePath);
+        }
 
-            HeapPage heapPage = new HeapPage(page);
+        try (HeapFile hf = HeapFile.open(tablePath, oid, RAW_SCHEMA)) {
             StringBuilder sb = new StringBuilder();
+            int count = 0;
 
-            for (RecordId rid : heapPage.scan()) {
-                try {
-                    byte[] raw = heapPage.get(rid.slotNo());
-                    HeapTupleHeader header = HeapTupleHeader.readFrom(
-                        ByteBuffer.wrap(raw).order(ByteOrder.BIG_ENDIAN), 0);
-
-                    int hoff = header.hoff();
-                    byte[] data = new byte[raw.length - hoff];
-                    System.arraycopy(raw, hoff, data, 0, data.length);
-
-                    Row row = RowSerializer.deserialize(data, RAW_SCHEMA, header);
-                    sb.append(String.format("rid=%s  %s%n", rid, row.values()));
-                } catch (Exception e) {
-                    sb.append(String.format("rid=%s  error: %s%n", rid, e.getMessage()));
-                }
+            Iterator<Row> it = hf.scan();
+            while (it.hasNext()) {
+                Row row = it.next();
+                sb.append(row.values().toString()).append("\n");
+                count++;
             }
 
-            return sb.length() > 0 ? sb.toString().stripTrailing() : "(no live tuples)";
+            if (count == 0) {
+                return "(no live tuples)";
+            }
+            return String.format("(%d rows)%n", count) + sb.toString().stripTrailing();
         } catch (Exception e) {
             return "error: " + e.getMessage();
         }
     }
 
     private String handleDeleteRaw(String args) {
-        if (!args.startsWith("rid=")) {
-            return "usage: delete-raw rid=page:slot";
+        int oid = -1;
+        RecordId rid = null;
+
+        for (String part : args.split("\\s+")) {
+            if (part.startsWith("oid=")) {
+                try {
+                    oid = Integer.parseInt(part.substring(4));
+                } catch (NumberFormatException e) {
+                    return "invalid OID: " + part.substring(4);
+                }
+            } else if (part.startsWith("rid=")) {
+                try {
+                    rid = RecordId.parse(part.substring(4));
+                } catch (IllegalArgumentException e) {
+                    return "invalid rid format: " + part.substring(4);
+                }
+            }
         }
 
-        try {
-            RecordId rid = RecordId.parse(args.substring(4));
-            DiskManager dm = db.diskManager();
+        if (oid < 0 || rid == null) {
+            return "usage: delete-raw oid=N rid=page:slot";
+        }
 
-            if (rid.pageId() < 1 || rid.pageId() >= dm.pageCount()) {
-                return "error: page " + rid.pageId() + " does not exist";
-            }
+        // Build path: dataDir/base/1/<oid>
+        Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
 
-            Page page = dm.readPage(rid.pageId());
-            if (page.pageType() != PageType.HEAP) {
-                return "error: page " + rid.pageId() + " is not a heap page";
-            }
+        if (!Files.exists(tablePath)) {
+            return "error: heap file not found: " + db.dataPath().relativize(tablePath);
+        }
 
-            HeapPage heapPage = new HeapPage(page);
-            heapPage.delete(rid.slotNo());
-            dm.writePage(page);
-
+        try (HeapFile hf = HeapFile.open(tablePath, oid, RAW_SCHEMA)) {
+            hf.delete(rid);
             return "ok (t_xmax set)";
+        } catch (Exception e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    private String handleHeapStats(String args) {
+        if (!args.startsWith("oid=")) {
+            return "usage: heap-stats oid=N";
+        }
+
+        int oid;
+        try {
+            oid = Integer.parseInt(args.substring(4));
+        } catch (NumberFormatException e) {
+            return "invalid OID: " + args.substring(4);
+        }
+
+        // Build path: dataDir/base/1/<oid>
+        Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
+
+        if (!Files.exists(tablePath)) {
+            return "error: heap file not found: " + db.dataPath().relativize(tablePath);
+        }
+
+        try (HeapFile hf = HeapFile.open(tablePath, oid, RAW_SCHEMA)) {
+            long fileSize = hf.fileSize();
+            int nextPageId = hf.nextPageId();
+            int dataPages = nextPageId - 1; // Page 0 is meta
+
+            // Count live rows by scanning
+            int liveRows = 0;
+            Iterator<Row> it = hf.scan();
+            while (it.hasNext()) {
+                it.next();
+                liveRows++;
+            }
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("path=").append(db.dataPath().relativize(tablePath)).append("\n");
+            sb.append(String.format("fileSize=%d bytes (%d pages)%n", fileSize, fileSize / Constants.PAGE_SIZE));
+            sb.append("nextPageId=").append(nextPageId).append("\n");
+            sb.append("livePages=").append(dataPages).append("  liveRows=").append(liveRows);
+
+            return sb.toString();
         } catch (Exception e) {
             return "error: " + e.getMessage();
         }
