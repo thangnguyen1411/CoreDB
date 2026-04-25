@@ -1,5 +1,6 @@
 package com.coredb.api;
 
+import com.coredb.catalog.BootstrapCatalog;
 import com.coredb.catalog.ControlFile;
 import com.coredb.storage.DiskManager;
 import org.slf4j.Logger;
@@ -40,11 +41,20 @@ public final class CoreDB implements AutoCloseable {
     }
 
     public static CoreDB open(Path dataPath, CoreDBConfig config) throws IOException {
+        // Ensure data directory exists
+        Files.createDirectories(dataPath);
+
         ControlFile controlFile;
         if (Files.exists(dataPath.resolve("global/pg_control"))) {
+            // Existing database: load control file and validate
             controlFile = ControlFile.load(dataPath);
+            log.info("Opened existing database: {}", dataPath);
         } else {
-            controlFile = ControlFile.create(dataPath, config);
+            // Fresh database: run bootstrap to create system catalogs
+            log.info("Initializing new database: {}", dataPath);
+            BootstrapCatalog.initialize(dataPath, config);
+            controlFile = ControlFile.load(dataPath);
+            log.info("Database bootstrap complete");
         }
         DiskManager dm = DiskManager.open(dataPath, config);
         return new CoreDB(dataPath, config, controlFile, dm);

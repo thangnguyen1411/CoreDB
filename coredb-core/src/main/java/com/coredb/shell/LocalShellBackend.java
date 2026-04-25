@@ -535,7 +535,7 @@ public final class LocalShellBackend implements ShellBackend {
             StringBuilder sb = new StringBuilder();
             sb.append("created global/pg_control\n");
             sb.append("created base/1/1000 (core_class)    2 rows\n");
-            sb.append("created base/1/1001 (core_attribute) 9 rows");
+            sb.append("created base/1/1001 (core_attribute) 10 rows");
 
             return sb.toString();
         } catch (IllegalStateException e) {
