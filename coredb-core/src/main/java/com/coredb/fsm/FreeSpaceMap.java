@@ -196,8 +196,10 @@ public final class FreeSpaceMap {
         Files.createDirectories(fsmPath.getParent());
 
         // Create file with header + zero-filled body
+        // Use CREATE + TRUNCATE_EXISTING to match HeapFile.create() behavior
         FileChannel ch = FileChannel.open(fsmPath,
-                StandardOpenOption.CREATE_NEW,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING,
                 StandardOpenOption.READ,
                 StandardOpenOption.WRITE);
 
