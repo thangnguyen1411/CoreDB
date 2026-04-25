@@ -103,4 +103,66 @@ class CatalogTest {
             assertThat(metaOpt.get().schema().columnCount()).isEqualTo(2);
         }
     }
+
+    @Test
+    void dropTableHidesFromList() throws IOException {
+        BootstrapCatalog.initialize(tempDir, CoreDBConfig.defaults());
+        ControlFile cf = ControlFile.load(tempDir);
+
+        try (Catalog catalog = new Catalog(tempDir, cf)) {
+            // Create and drop a table
+            ColumnDefParser.ParsedSchema parsed = parse("id:long name:string pk:id");
+            catalog.createTable("temp", parsed.schema(), parsed.pkColumn());
+
+            List<TableMeta> tables = catalog.listTables();
+            assertThat(tables).hasSize(1);
+
+            catalog.dropTable("temp");
+
+            // Should be hidden from listTables
+            tables = catalog.listTables();
+            assertThat(tables).isEmpty();
+
+            // openTable should also not find it
+            Optional<TableMeta> metaOpt = catalog.openTable("temp");
+            assertThat(metaOpt).isEmpty();
+        }
+    }
+
+    @Test
+    void recreateAfterDropGetsNewOid() throws IOException {
+        BootstrapCatalog.initialize(tempDir, CoreDBConfig.defaults());
+        ControlFile cf = ControlFile.load(tempDir);
+
+        try (Catalog catalog = new Catalog(tempDir, cf)) {
+            // Create a table
+            ColumnDefParser.ParsedSchema parsed = parse("id:long name:string pk:id");
+            catalog.createTable("reusable", parsed.schema(), parsed.pkColumn());
+
+            int firstOid = catalog.openTable("reusable").get().oid();
+
+            // Drop it
+            catalog.dropTable("reusable");
+
+            // Create a new table with the same name
+            catalog.createTable("reusable", parsed.schema(), parsed.pkColumn());
+
+            int secondOid = catalog.openTable("reusable").get().oid();
+
+            // Should get a new OID, not reuse the old one
+            assertThat(secondOid).isGreaterThan(firstOid);
+        }
+    }
+
+    @Test
+    void dropNonExistentTableThrows() throws IOException {
+        BootstrapCatalog.initialize(tempDir, CoreDBConfig.defaults());
+        ControlFile cf = ControlFile.load(tempDir);
+
+        try (Catalog catalog = new Catalog(tempDir, cf)) {
+            assertThatThrownBy(() -> catalog.dropTable("nonexistent"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Table not found");
+        }
+    }
 }

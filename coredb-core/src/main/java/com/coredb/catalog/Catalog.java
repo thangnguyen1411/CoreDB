@@ -6,7 +6,10 @@ import com.coredb.api.Row;
 import com.coredb.api.Schema;
 import com.coredb.config.EngineType;
 import com.coredb.heap.HeapFile;
+import com.coredb.heap.HeapPage;
 import com.coredb.heap.RecordId;
+import com.coredb.page.Page;
+import com.coredb.page.PageType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -145,7 +148,7 @@ public final class Catalog implements AutoCloseable {
 
     /**
      * Lists all non-deleted user tables in the catalog.
-     * System catalogs (core_class, core_attribute) are filtered out.
+     * System catalogs (oid <= CORE_ATTRIBUTE_OID) are filtered out.
      *
      * @return list of TableMeta for all live user tables
      * @throws IOException if scan fails
@@ -156,8 +159,8 @@ public final class Catalog implements AutoCloseable {
         while (it.hasNext()) {
             Row row = it.next();
             int oid = row.getLong(0).intValue();
-            // Filter out system catalogs (OIDs 1000 and 1001)
-            if (oid >= BootstrapCatalog.CORE_CLASS_OID && oid <= BootstrapCatalog.CORE_ATTRIBUTE_OID) {
+            // Filter out system catalogs (oid 1000, 1001)
+            if (oid <= BootstrapCatalog.CORE_ATTRIBUTE_OID) {
                 continue;
             }
             tables.add(buildTableMeta(row));
@@ -174,19 +177,6 @@ public final class Catalog implements AutoCloseable {
      * @throws IOException if delete fails
      */
     public void dropTable(String name) throws IOException {
-        // Find the row in core_class
-        // We need to scan all pages and find the specific RecordId
-        // Since HeapFile doesn't expose RecordId during scan, we need a different approach
-        // For now, let's scan by page
-
-        for (int pageId = 1; pageId < coreClassFile.pageCount(); pageId++) {
-            // We need to access HeapPage directly to get RecordIds
-            // This is a bit low-level but necessary for drop
-            // Actually, let's add a method to HeapFile to find a row by predicate
-        }
-
-        // For now, we'll do a simpler approach: scan and find the row, then delete by rebuilding
-        // Actually, let's use a different strategy: store the RID when we find it
         RecordId targetRid = findTableRecordId(name);
         if (targetRid == null) {
             throw new IllegalArgumentException("Table not found: " + name);
@@ -208,34 +198,28 @@ public final class Catalog implements AutoCloseable {
 
     @Override
     public void close() throws IOException {
-        if (coreClassFile != null) {
-            coreClassFile.close();
-        }
-        if (coreAttributeFile != null) {
-            coreAttributeFile.close();
-        }
+        coreClassFile.close();
+        coreAttributeFile.close();
         log.debug("Catalog closed");
     }
 
     // ==================== Private Helper Methods ====================
 
     private RecordId findTableRecordId(String name) throws IOException {
-        // We need to iterate pages directly to get RecordIds
-        // For now, this is a simplified version that scans all pages
         for (int pageId = 1; pageId < coreClassFile.pageCount(); pageId++) {
-            // We'd need to access HeapPage directly here
-            // Since we don't have that API exposed, let's use a workaround:
-            // We'll scan rows and track which page they're on
+            Page page = coreClassFile.readPage(pageId);
+            if (page.pageType() != PageType.HEAP) {
+                continue;
+            }
+            HeapPage hp = new HeapPage(page);
+            for (RecordId rid : hp.scan()) {
+                Optional<Row> row = coreClassFile.get(rid);
+                if (row.isPresent() && name.equals(row.get().getString(1))) {
+                    return rid;
+                }
+            }
         }
-
-        // Alternative: For now, let's use a simpler approach
-        // We'll scan all rows and remember the last RID we saw for each table
-        // This requires tracking state during scan
-
-        // Since this is complex, let's use the simplest approach for v1:
-        // We won't actually delete in 3F - we'll implement full delete in a later phase
-        // For now, just log and throw
-        throw new UnsupportedOperationException("dropTable requires RecordId tracking - implement in 3G/3H");
+        return null;
     }
 
     private TableMeta buildTableMeta(Row classRow) throws IOException {

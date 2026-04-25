@@ -30,7 +30,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 
-public final class LocalShellBackend implements ShellBackend {
+public final class LocalShellBackend implements ShellBackend, AutoCloseable {
 
     // Hard-coded schema for raw demo: id (LONG), name (STRING), age (INT)
     private static final Schema RAW_SCHEMA = Schema.of(
@@ -51,6 +51,13 @@ public final class LocalShellBackend implements ShellBackend {
             catalog = new Catalog(db.dataPath(), db.controlFile());
         }
         return catalog;
+    }
+
+    @Override
+    public void close() throws IOException {
+        if (catalog != null) {
+            catalog.close();
+        }
     }
 
     @Override
@@ -633,9 +640,6 @@ public final class LocalShellBackend implements ShellBackend {
             Catalog cat = getCatalog();
             cat.dropTable(tableName);
             return "ok (soft delete)";
-        } catch (UnsupportedOperationException e) {
-            // dropTable is not fully implemented yet - soft delete requires RecordId tracking
-            return "error: dropTable not yet fully implemented (use list-tables to verify)";
         } catch (IllegalArgumentException e) {
             return "error: " + e.getMessage();
         } catch (IOException e) {
