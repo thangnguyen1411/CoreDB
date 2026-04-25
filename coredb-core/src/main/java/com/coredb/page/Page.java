@@ -2,7 +2,6 @@ package com.coredb.page;
 
 import com.coredb.util.BinaryUtil;
 import com.coredb.util.Constants;
-
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
@@ -19,6 +18,17 @@ public final class Page {
         BinaryUtil.writeU16(buffer, PageHeader.OFFSET_PD_UPPER, (short) Constants.PAGE_SIZE);
         BinaryUtil.writeU16(buffer, PageHeader.OFFSET_PD_SPECIAL, (short) Constants.PAGE_SIZE);
         BinaryUtil.writeU16(buffer, PageHeader.OFFSET_PD_FLAGS, (short) (type.code() << 8));
+    }
+
+    /**
+     * Creates a page with an uninitialized buffer.
+     * The caller is responsible for writing the page header or custom layout.
+     */
+    public Page(int pageId) {
+        this.pageId = pageId;
+        this.buffer = ByteBuffer.allocate(Constants.PAGE_SIZE).order(
+            ByteOrder.BIG_ENDIAN
+        );
     }
 
     public Page(int pageId, ByteBuffer buffer) {
@@ -81,10 +91,6 @@ public final class Page {
 
     public void writeItemId(int slot, int itemId) {
         BinaryUtil.writeU32(buffer, PageHeader.SIZE + slot * 4, itemId);
-    }
-
-    public PageHeader header() {
-        return new PageHeader(lsn(), pdLower(), pdUpper(), pdSpecial(), pdFlags());
     }
 
     public ByteBuffer buffer() {
