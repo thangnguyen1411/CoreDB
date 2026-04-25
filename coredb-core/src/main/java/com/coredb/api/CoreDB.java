@@ -1,6 +1,7 @@
 package com.coredb.api;
 
 import com.coredb.catalog.BootstrapCatalog;
+import com.coredb.catalog.Catalog;
 import com.coredb.catalog.ControlFile;
 import com.coredb.storage.DiskManager;
 import org.slf4j.Logger;
@@ -18,13 +19,15 @@ public final class CoreDB implements AutoCloseable {
     private final CoreDBConfig config;
     private final ControlFile controlFile;
     private final DiskManager diskManager;
+    private final Catalog catalog;
     private volatile boolean closed = false;
 
-    private CoreDB(Path dataPath, CoreDBConfig config, ControlFile controlFile, DiskManager diskManager) {
+    private CoreDB(Path dataPath, CoreDBConfig config, ControlFile controlFile, DiskManager diskManager, Catalog catalog) {
         this.dataPath = dataPath;
         this.config = config;
         this.controlFile = controlFile;
         this.diskManager = diskManager;
+        this.catalog = catalog;
         log.debug("CoreDB opened: path={} engine={} pageSize={}", dataPath, config.engineType(), config.pageSize());
     }
 
@@ -56,8 +59,12 @@ public final class CoreDB implements AutoCloseable {
             controlFile = ControlFile.load(dataPath);
             log.info("Database bootstrap complete");
         }
+
+        // Create Catalog (opens core_class and core_attribute heap files)
+        Catalog catalog = new Catalog(dataPath, controlFile);
+
         DiskManager dm = DiskManager.open(dataPath, config);
-        return new CoreDB(dataPath, config, controlFile, dm);
+        return new CoreDB(dataPath, config, controlFile, dm, catalog);
     }
 
     public Path dataPath() {
@@ -76,6 +83,10 @@ public final class CoreDB implements AutoCloseable {
         return diskManager;
     }
 
+    public Catalog catalog() {
+        return catalog;
+    }
+
     public boolean isClosed() {
         return closed;
     }
@@ -85,9 +96,14 @@ public final class CoreDB implements AutoCloseable {
         if (!closed) {
             closed = true;
             try {
-                diskManager.close();
+                // Close catalog first (closes heap files)
+                catalog.close();
             } finally {
-                controlFile.close();
+                try {
+                    diskManager.close();
+                } finally {
+                    controlFile.close();
+                }
             }
             log.debug("CoreDB closed: path={}", dataPath);
         }
