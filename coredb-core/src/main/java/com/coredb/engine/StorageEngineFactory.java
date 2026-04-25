@@ -26,8 +26,7 @@ public final class StorageEngineFactory {
     public static StorageEngine create(EngineType type, CoreDBConfig config) {
         return switch (type) {
             case BTREE -> new BTreeStorageEngine(config);
-            case LSM -> throw new UnsupportedOperationException(
-                "LSM storage engine not yet implemented");
+            case LSM -> throw new UnsupportedOperationException("LSM storage engine not yet implemented");
         };
     }
 }

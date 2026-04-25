@@ -14,8 +14,7 @@ import java.util.Optional;
  *
  * <p>This interface defines the contract that all storage engines must satisfy,
  * providing a clean seam between the logical table layer and the physical storage
- * mechanism. It supports both B+ tree (heap + index) and future LSM tree
- * implementations.</p>
+ * mechanism.</p>
  *
  * <p>Key design decisions:
  * <ul>

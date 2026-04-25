@@ -13,8 +13,7 @@ import java.util.Optional;
 /**
  * B+ tree storage engine implementation.
  *
- * <p>Combines a heap file for tuple storage with a B+ tree index on the
- * primary key. This implementation will be built out later.</p>
+ * <p>Combines a heap file for tuple storage with a B+ tree index on the primary key.</p>
  *
  * <p>Current state: stub implementation that throws UnsupportedOperationException
  * for all operations.</p>
