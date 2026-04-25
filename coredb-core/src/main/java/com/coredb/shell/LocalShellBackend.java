@@ -4,6 +4,7 @@ import com.coredb.api.Column;
 import com.coredb.api.CoreDB;
 import com.coredb.api.Row;
 import com.coredb.api.Schema;
+import com.coredb.catalog.BootstrapCatalog;
 import com.coredb.catalog.ColumnDefParser;
 import com.coredb.catalog.ControlFile;
 import com.coredb.heap.HeapFile;
@@ -220,7 +221,7 @@ public final class LocalShellBackend implements ShellBackend {
             return "error: heap file not found: " + db.dataPath().relativize(tablePath);
         }
 
-        try (HeapFile hf = HeapFile.open(tablePath, oid, RAW_SCHEMA)) {
+        try (HeapFile hf = HeapFile.open(tablePath, oid, schemaForOid(oid))) {
             Row row = Row.of(id, name, age);
             RecordId rid = hf.insert(row);
             return String.format("rid=%s  (xmin=%d xmax=%d)", rid, Constants.BOOTSTRAP_XID, Constants.INVALID_XID);
@@ -260,7 +261,7 @@ public final class LocalShellBackend implements ShellBackend {
             return "error: heap file not found: " + db.dataPath().relativize(tablePath);
         }
 
-        try (HeapFile hf = HeapFile.open(tablePath, oid, RAW_SCHEMA)) {
+        try (HeapFile hf = HeapFile.open(tablePath, oid, schemaForOid(oid))) {
             Optional<Row> row = hf.get(rid);
             if (row.isPresent()) {
                 return row.get().values().toString();
@@ -291,7 +292,7 @@ public final class LocalShellBackend implements ShellBackend {
             return "error: heap file not found: " + db.dataPath().relativize(tablePath);
         }
 
-        try (HeapFile hf = HeapFile.open(tablePath, oid, RAW_SCHEMA)) {
+        try (HeapFile hf = HeapFile.open(tablePath, oid, schemaForOid(oid))) {
             StringBuilder sb = new StringBuilder();
             int count = 0;
 
@@ -342,7 +343,7 @@ public final class LocalShellBackend implements ShellBackend {
             return "error: heap file not found: " + db.dataPath().relativize(tablePath);
         }
 
-        try (HeapFile hf = HeapFile.open(tablePath, oid, RAW_SCHEMA)) {
+        try (HeapFile hf = HeapFile.open(tablePath, oid, schemaForOid(oid))) {
             hf.delete(rid);
             return "ok (t_xmax set)";
         } catch (Exception e) {
@@ -369,7 +370,7 @@ public final class LocalShellBackend implements ShellBackend {
             return "error: heap file not found: " + db.dataPath().relativize(tablePath);
         }
 
-        try (HeapFile hf = HeapFile.open(tablePath, oid, RAW_SCHEMA)) {
+        try (HeapFile hf = HeapFile.open(tablePath, oid, schemaForOid(oid))) {
             long fileSize = hf.fileSize();
             int nextPageId = hf.nextPageId();
             int dataPages = nextPageId - 1; // Page 0 is meta
@@ -518,6 +519,14 @@ public final class LocalShellBackend implements ShellBackend {
         } catch (IOException e) {
             return "error: " + e.getMessage();
         }
+    }
+
+    private static Schema schemaForOid(int oid) {
+        return switch (oid) {
+            case BootstrapCatalog.CORE_CLASS_OID      -> BootstrapCatalog.CORE_CLASS_SCHEMA;
+            case BootstrapCatalog.CORE_ATTRIBUTE_OID  -> BootstrapCatalog.CORE_ATTRIBUTE_SCHEMA;
+            default                                   -> RAW_SCHEMA;
+        };
     }
 
     private String handleBootstrap() {
