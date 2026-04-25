@@ -123,7 +123,7 @@ public final class Catalog implements AutoCloseable {
         // Note: Table heap file is created and closed above (fsynced via close).
         // Catalog files (core_class, core_attribute) remain open for the lifetime
         // of Catalog instance and are synced on Catalog.close().
-        // TODO: No immediate fsync of catalog files after insert. If process crashes
+        // Note: There is no immediate fsync of catalog files after insert. If process crashes
         // before Catalog.close(), the catalog entries may not be persisted.
     }
 
@@ -240,9 +240,9 @@ public final class Catalog implements AutoCloseable {
         int engineTypeCode = classRow.getInt(3);
         EngineType engineType = EngineType.values()[engineTypeCode];
 
-        // Look up columns from core_attribute - collect in a map first, then sort by attnum
-        // TODO: This is O(n) over all attribute rows per table lookup. For v1 this is fine,
-        // but we should add an index (e.g., btree on tableId) or cache for production use.
+        // Look up columns from core_attribute - collect in a map first, then sort by attnum.
+        // This is O(n) over all attribute rows per table lookup. For v1 this is acceptable,
+        // but an index (e.g., btree on tableId) or cache would be needed for production use.
         record ColInfo(String name, ColumnType type, boolean nullable, int attnum) {}
         List<ColInfo> colInfos = new ArrayList<>();
 
