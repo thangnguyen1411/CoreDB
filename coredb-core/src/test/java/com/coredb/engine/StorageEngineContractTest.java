@@ -44,17 +44,15 @@ public abstract class StorageEngineContractTest {
     protected abstract StorageEngine createEngine(Path dataDir, TableMeta meta) throws IOException;
 
     /**
-     * Hook for concrete subclasses to verify that a dead tuple version exists.
-     * The abstract default does nothing; BTreeStorageEngineTest must override
-     * this to scan the raw heap and assert two physical tuples exist after upsert.
+     * Abstract hook for concrete subclasses to verify that a dead tuple version exists.
+     * Every storage engine implementation MUST override this to prove MVCC semantics
+     * by scanning the raw heap and asserting two physical tuples exist after upsert.
      *
      * @param dataDir the data directory
      * @param meta    table metadata
      * @param pk      the primary key that was updated
      */
-    protected void assertDeadVersionExists(Path dataDir, TableMeta meta, long pk) {
-        // Default: no assertion. Concrete subclass must override.
-    }
+    protected abstract void assertDeadVersionExists(Path dataDir, TableMeta meta, long pk);
 
     private TableMeta createTestTableMeta() {
         Schema schema = Schema.of(

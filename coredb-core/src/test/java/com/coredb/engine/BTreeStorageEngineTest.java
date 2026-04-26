@@ -22,9 +22,7 @@ class BTreeStorageEngineTest extends StorageEngineContractTest {
     @Override
     protected StorageEngine createEngine(Path dataDir, TableMeta meta) throws IOException {
         CoreDBConfig config = CoreDBConfig.defaults();
-        StorageEngine engine = StorageEngineFactory.create(EngineType.BTREE, config);
-        engine.open(dataDir, meta);
-        return engine;
+        return StorageEngineFactory.create(EngineType.BTREE, config);
     }
 
     /**
