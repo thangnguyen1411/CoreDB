@@ -18,6 +18,9 @@ public final class Constants {
     // byte array format, so we add this magic for version/corruption detection.
     public static final int FSM_FILE_MAGIC = 0x46534D00;
 
+    // Index file magic ("IDXP" = 0x49445850, stands for "Index Page")
+    public static final int INDEX_FILE_MAGIC = 0x49445850;
+
     public static final int INVALID_XID      = 0;
     public static final int BOOTSTRAP_XID    = 1;
     public static final int FROZEN_XID       = 2;

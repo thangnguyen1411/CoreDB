@@ -11,6 +11,7 @@ import com.coredb.catalog.ControlFile;
 import com.coredb.catalog.TableMeta;
 import com.coredb.heap.HeapFile;
 import com.coredb.heap.RecordId;
+import com.coredb.index.IndexFile;
 import com.coredb.util.Constants;
 
 import java.io.IOException;
@@ -72,6 +73,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             case "list-tables"       -> handleListTables();
             case "describe"          -> handleDescribe(args);
             case "drop-table"        -> handleDropTable(args);
+            case "index-meta"        -> handleIndexMeta(args);
             case "help"              -> formatHelp();
             default                  -> "unknown command: " + command + "  (type 'help' for available commands)";
         };
@@ -115,6 +117,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
               delete-raw table=<name>|oid=<N> rid=page:slot         delete a row by RecordId
               heap-stats table=<name>|oid=<N>                       show file stats
               heap-meta table=<name>|oid=<N>                        show meta page of per-table heap file
+              index-meta table=<name>|oid=<N>                       show meta page of per-table index file
             """;
     }
 
@@ -524,5 +527,37 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             return "already initialized (pg_control exists)";
         }
         throw new IllegalStateException("pg_control missing — CoreDB.open() should have initialized");
+    }
+
+    private String handleIndexMeta(String args) {
+        OidResolution resolution = resolveOidFull(args);
+        if (!resolution.isSuccess()) {
+            return resolution.errorMessage();
+        }
+        int oid = resolution.oid();
+
+        // Build path: dataDir/base/1/<oid>_pk
+        Path indexPath = db.dataPath().resolve("base").resolve("1").resolve(oid + "_pk");
+
+        if (!Files.exists(indexPath)) {
+            return "error: index file not found: " + db.dataPath().relativize(indexPath);
+        }
+
+        try {
+            try (IndexFile idx = IndexFile.open(indexPath, oid)) {
+                String path = db.dataPath().relativize(idx.indexPath()).toString();
+                StringBuilder sb = new StringBuilder();
+                sb.append("path=").append(path).append("\n");
+                sb.append(String.format("magic=0x%08X (\"IDXP\")%n", Constants.INDEX_FILE_MAGIC));
+                sb.append("formatVersion=1\n");
+                sb.append("oid=").append(oid).append("\n");
+                sb.append("root=").append(idx.rootPageId()).append("\n");
+                sb.append("height=").append(idx.treeHeight()).append("\n");
+                sb.append("nextPageId=").append(idx.nextPageId());
+                return sb.toString();
+            }
+        } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
     }
 }
