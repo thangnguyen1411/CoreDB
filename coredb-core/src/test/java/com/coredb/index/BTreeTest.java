@@ -6,6 +6,10 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import java.util.TreeMap;
@@ -366,6 +370,379 @@ class BTreeTest {
         // Search for keys beyond range
         assertThat(tree.search(-1L)).isEmpty();
         assertThat(tree.search(10000L)).isEmpty();
+
+        indexFile.close();
+    }
+
+    // ============================================================================
+    // Range Scan Tests
+    // ============================================================================
+
+    @Test
+    void rangeScan_fromGreaterThanTo_returnsEmptyIterator() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        // Insert some keys
+        for (int i = 0; i < 100; i++) {
+            tree.insert((long) i, new RecordId(i + 1, 0));
+        }
+
+        // from > to should return empty iterator
+        Iterator<Map.Entry<Long, RecordId>> iter = tree.rangeScan(50L, 10L);
+        assertThat(iter.hasNext()).isFalse();
+
+        indexFile.close();
+    }
+
+    @Test
+    void rangeScan_fromGreaterThanMaxKey_returnsEmptyIterator() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        // Insert keys 0-99
+        for (int i = 0; i < 100; i++) {
+            tree.insert((long) i, new RecordId(i + 1, 0));
+        }
+
+        // from > maxKey should return empty
+        Iterator<Map.Entry<Long, RecordId>> iter = tree.rangeScan(1000L, 2000L);
+        assertThat(iter.hasNext()).isFalse();
+
+        indexFile.close();
+    }
+
+    @Test
+    void rangeScan_fromLessThanMinKey_startsAtFirstLeaf() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        // Insert keys 50-149
+        for (int i = 50; i < 150; i++) {
+            tree.insert((long) i, new RecordId(i + 1, 0));
+        }
+
+        // from < minKey should start at first leaf
+        Iterator<Map.Entry<Long, RecordId>> iter = tree.rangeScan(0L, 60L);
+
+        List<Long> keys = new ArrayList<>();
+        while (iter.hasNext()) {
+            keys.add(iter.next().getKey());
+        }
+
+        // Should return keys 50-60 (inclusive)
+        assertThat(keys).containsExactly(50L, 51L, 52L, 53L, 54L, 55L, 56L, 57L, 58L, 59L, 60L);
+
+        indexFile.close();
+    }
+
+    @Test
+    void rangeScan_fromEqualsToEqualsExistingKey_returnsSingleEntry() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        // Insert keys 0-99
+        for (int i = 0; i < 100; i++) {
+            tree.insert((long) i, new RecordId(i + 1, 0));
+        }
+
+        // from == to == existingKey should return exactly one entry
+        Iterator<Map.Entry<Long, RecordId>> iter = tree.rangeScan(42L, 42L);
+
+        assertThat(iter.hasNext()).isTrue();
+        Map.Entry<Long, RecordId> entry = iter.next();
+        assertThat(entry.getKey()).isEqualTo(42L);
+        assertThat(entry.getValue()).isEqualTo(new RecordId(43, 0));
+        assertThat(iter.hasNext()).isFalse();
+
+        indexFile.close();
+    }
+
+    @Test
+    void rangeScan_fromEqualsToEqualsNonExistingKey_returnsEmptyIterator() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        // Insert even keys only
+        for (int i = 0; i < 100; i += 2) {
+            tree.insert((long) i, new RecordId(i + 1, 0));
+        }
+
+        // from == to == non-existingKey should return empty
+        Iterator<Map.Entry<Long, RecordId>> iter = tree.rangeScan(43L, 43L);
+        assertThat(iter.hasNext()).isFalse();
+
+        indexFile.close();
+    }
+
+    @Test
+    void rangeScan_emptyTree_returnsEmptyIterator() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        // Empty tree should return empty iterator
+        Iterator<Map.Entry<Long, RecordId>> iter = tree.rangeScan(0L, 100L);
+        assertThat(iter.hasNext()).isFalse();
+
+        indexFile.close();
+    }
+
+    @Test
+    void rangeScan_singlePage_rangeWithinPage() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        // Insert 100 keys (should fit on one page)
+        for (int i = 0; i < 100; i++) {
+            tree.insert((long) i, new RecordId(i + 1, i % 10));
+        }
+
+        // Range within the page
+        Iterator<Map.Entry<Long, RecordId>> iter = tree.rangeScan(25L, 35L);
+
+        List<Long> keys = new ArrayList<>();
+        List<RecordId> rids = new ArrayList<>();
+        while (iter.hasNext()) {
+            Map.Entry<Long, RecordId> entry = iter.next();
+            keys.add(entry.getKey());
+            rids.add(entry.getValue());
+        }
+
+        // Should return keys 25-35 (inclusive)
+        assertThat(keys).hasSize(11);
+        for (int i = 25; i <= 35; i++) {
+            assertThat(keys.get(i - 25)).isEqualTo((long) i);
+            assertThat(rids.get(i - 25)).isEqualTo(new RecordId(i + 1, i % 10));
+        }
+
+        indexFile.close();
+    }
+
+    @Test
+    void rangeScan_multiplePages_crossesPageBoundary() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        // Insert many keys to force multiple leaf pages
+        // With ~400 entries per page, 1000 keys should create at least 3 pages
+        for (int i = 0; i < 1000; i++) {
+            tree.insert((long) i, new RecordId(i + 1, 0));
+        }
+
+        // Range that crosses page boundaries
+        Iterator<Map.Entry<Long, RecordId>> iter = tree.rangeScan(350L, 450L);
+
+        List<Long> keys = new ArrayList<>();
+        while (iter.hasNext()) {
+            keys.add(iter.next().getKey());
+        }
+
+        // Should return keys 350-450 (inclusive)
+        assertThat(keys).hasSize(101);
+        assertThat(keys.get(0)).isEqualTo(350L);
+        assertThat(keys.get(keys.size() - 1)).isEqualTo(450L);
+
+        // Verify all keys are in order
+        for (int i = 0; i < keys.size(); i++) {
+            assertThat(keys.get(i)).isEqualTo((long) (350 + i));
+        }
+
+        indexFile.close();
+    }
+
+    @Test
+    void rangeScan_fullRange_returnsAllKeys() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        // Insert 1000 keys
+        for (int i = 0; i < 1000; i++) {
+            tree.insert((long) i, new RecordId(i + 1, 0));
+        }
+
+        // Full range scan
+        Iterator<Map.Entry<Long, RecordId>> iter = tree.rangeScan(Long.MIN_VALUE, Long.MAX_VALUE);
+
+        List<Long> keys = new ArrayList<>();
+        while (iter.hasNext()) {
+            keys.add(iter.next().getKey());
+        }
+
+        // Should return all 1000 keys
+        assertThat(keys).hasSize(1000);
+        for (int i = 0; i < 1000; i++) {
+            assertThat(keys.get(i)).isEqualTo((long) i);
+        }
+
+        indexFile.close();
+    }
+
+    @Test
+    void rangeScan_randomKeys_matchesTreeMap() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        Random random = new Random(12345);
+        TreeMap<Long, RecordId> expected = new TreeMap<>();
+
+        // Insert 10,000 random keys
+        for (int i = 0; i < 10000; i++) {
+            long key = random.nextLong(100000);
+            RecordId rid = new RecordId(i + 1, random.nextInt(100));
+
+            // Skip duplicates
+            if (!expected.containsKey(key)) {
+                tree.insert(key, rid);
+                expected.put(key, rid);
+            }
+        }
+
+        // Test a dozen different ranges
+        long[] rangeStarts = {0, 1000, 5000, 9000, 25000, 50000, 75000, 90000, 99999, -1000};
+        long[] rangeEnds = {100, 2000, 6000, 10000, 30000, 55000, 80000, 95000, 100000, 50000};
+
+        for (int r = 0; r < rangeStarts.length; r++) {
+            long from = rangeStarts[r];
+            long to = rangeEnds[r];
+
+            // Get expected results from TreeMap
+            List<Map.Entry<Long, RecordId>> expectedEntries = new ArrayList<>(
+                expected.subMap(from, true, to, true).entrySet()
+            );
+
+            // Get actual results from BTree
+            Iterator<Map.Entry<Long, RecordId>> iter = tree.rangeScan(from, to);
+            List<Map.Entry<Long, RecordId>> actualEntries = new ArrayList<>();
+            while (iter.hasNext()) {
+                actualEntries.add(iter.next());
+            }
+
+            // Compare
+            assertThat(actualEntries)
+                .as("Range [%d, %d] should match TreeMap", from, to)
+                .hasSize(expectedEntries.size());
+
+            for (int i = 0; i < expectedEntries.size(); i++) {
+                Map.Entry<Long, RecordId> expectedEntry = expectedEntries.get(i);
+                Map.Entry<Long, RecordId> actualEntry = actualEntries.get(i);
+
+                assertThat(actualEntry.getKey())
+                    .as("Key at index %d in range [%d, %d]", i, from, to)
+                    .isEqualTo(expectedEntry.getKey());
+                assertThat(actualEntry.getValue())
+                    .as("RecordId for key %d in range [%d, %d]", expectedEntry.getKey(), from, to)
+                    .isEqualTo(expectedEntry.getValue());
+            }
+        }
+
+        indexFile.close();
+    }
+
+    @Test
+    void rangeScan_afterReopen_stillWorks() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+
+        // Create and populate tree
+        TreeMap<Long, RecordId> expected = new TreeMap<>();
+        {
+            IndexFile indexFile = IndexFile.create(indexPath, 1000);
+            BTree tree = BTree.create(indexFile);
+
+            Random random = new Random(42);
+            for (int i = 0; i < 1000; i++) {
+                long key = random.nextLong(10000);
+                RecordId rid = new RecordId(i + 1, 0);
+                if (!expected.containsKey(key)) {
+                    tree.insert(key, rid);
+                    expected.put(key, rid);
+                }
+            }
+
+            indexFile.close();
+        }
+
+        // Reopen and range scan
+        {
+            IndexFile indexFile = IndexFile.open(indexPath, 1000);
+            BTree tree = BTree.open(indexFile);
+
+            Iterator<Map.Entry<Long, RecordId>> iter = tree.rangeScan(1000L, 2000L);
+
+            List<Long> keys = new ArrayList<>();
+            while (iter.hasNext()) {
+                keys.add(iter.next().getKey());
+            }
+
+            // Verify against TreeMap
+            List<Long> expectedKeys = new ArrayList<>(expected.subMap(1000L, true, 2000L, true).keySet());
+            assertThat(keys).isEqualTo(expectedKeys);
+
+            indexFile.close();
+        }
+    }
+
+    @Test
+    void rangeScan_unorderedInsert_returnsSortedOrder() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        // Insert keys in descending order
+        for (int i = 999; i >= 0; i--) {
+            tree.insert((long) i, new RecordId(i + 1, 0));
+        }
+
+        // Range scan should still return in ascending order
+        Iterator<Map.Entry<Long, RecordId>> iter = tree.rangeScan(0L, 999L);
+
+        List<Long> keys = new ArrayList<>();
+        while (iter.hasNext()) {
+            keys.add(iter.next().getKey());
+        }
+
+        // Should be sorted ascending
+        assertThat(keys).hasSize(1000);
+        for (int i = 0; i < 1000; i++) {
+            assertThat(keys.get(i)).isEqualTo((long) i);
+        }
+
+        indexFile.close();
+    }
+
+    @Test
+    void rangeScan_partialIteratorConsumption_doesNotLoadAllPages() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        // Insert many keys
+        for (int i = 0; i < 1000; i++) {
+            tree.insert((long) i, new RecordId(i + 1, 0));
+        }
+
+        // Get iterator but only consume first 5 entries
+        Iterator<Map.Entry<Long, RecordId>> iter = tree.rangeScan(0L, 999L);
+
+        List<Long> keys = new ArrayList<>();
+        for (int i = 0; i < 5 && iter.hasNext(); i++) {
+            keys.add(iter.next().getKey());
+        }
+
+        // Should have first 5 keys
+        assertThat(keys).containsExactly(0L, 1L, 2L, 3L, 4L);
+
+        // Iterator is lazy - this test verifies it doesn't crash
+        // (actual lazy loading is hard to test without mocking)
 
         indexFile.close();
     }

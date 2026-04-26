@@ -112,6 +112,19 @@ public final class BTreeLeafPage {
     }
 
     /**
+     * Finds the first slot where key >= searchKey.
+     * This is the starting point for range scans.
+     *
+     * @param searchKey the key to search for
+     * @return slot index (0..entryCount) where all entries before have keys < searchKey
+     *         and entries at or after have keys >= searchKey. Returns entryCount if
+     *         all keys are less than searchKey.
+     */
+    public int findFirstSlotGe(long searchKey) {
+        return layout.findInsertionPoint(searchKey);
+    }
+
+    /**
      * Inserts a (key, RecordId) pair into the leaf page at the correct sorted position.
      *
      * <p>If the key already exists, returns {@link InsertResult#DUPLICATE_KEY}.
