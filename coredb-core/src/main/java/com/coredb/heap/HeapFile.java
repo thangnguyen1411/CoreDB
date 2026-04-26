@@ -259,10 +259,12 @@ public final class HeapFile implements AutoCloseable {
             }
 
             // Verify the page actually has enough space (FSM is a hint)
-            Page page = readPage(pageId);
+            PinnedPage pinned = readPage(pageId);
+            Page page = pinned.page();
             if (page.pageType() != PageType.HEAP) {
                 // Zero out FSM entry so requestPage skips this non-HEAP page
                 fsm.updatePage(pageId, 0);
+                pinned.unpin(false);
                 continue;
             }
             HeapPage heapPage = new HeapPage(page);
@@ -271,7 +273,7 @@ public final class HeapFile implements AutoCloseable {
             if (actualFree >= spaceNeeded) {
                 // FSM was correct — insert and update FSM
                 RecordId rid = heapPage.insert(dataBytes, natts, nullBitmap);
-                writePage(page);
+                pinned.unpin(true); // Mark dirty since we modified the page
                 fsm.updatePage(pageId, heapPage.freeBytes());
                 return rid;
             }
@@ -282,6 +284,7 @@ public final class HeapFile implements AutoCloseable {
             log.debug("FSM stale for page {}: category {} (promised >= {} bytes), actual {} bytes",
                       pageId, category, category * 32, actualFree);
             fsm.updatePage(pageId, actualFree);
+            pinned.unpin(false);
             // Continue to next retry iteration
         }
 
@@ -289,8 +292,7 @@ public final class HeapFile implements AutoCloseable {
         Page newPage = allocateNewPage();
         HeapPage heapPage = new HeapPage(newPage);
         RecordId rid = heapPage.insert(dataBytes, natts, nullBitmap);
-        writePage(newPage);
-        // FSM will be grown by allocateNewPage if needed, and updated here
+        // allocateNewPage() already unpins the frame, just update FSM
         fsm.updatePage(newPage.pageId(), heapPage.freeBytes());
         return rid;
     }
@@ -301,8 +303,10 @@ public final class HeapFile implements AutoCloseable {
         }
 
         // 1. Read Page
-        Page page = readPage(recordId.pageId());
+        PinnedPage pinned = readPage(recordId.pageId());
+        Page page = pinned.page();
         if (page.pageType() != PageType.HEAP) {
+            pinned.unpin(false);
             return Optional.empty();
         }
         HeapPage heapPage = new HeapPage(page);
@@ -315,9 +319,11 @@ public final class HeapFile implements AutoCloseable {
 
             // Stub visibility: BOOTSTRAP_XID = always visible, INVALID_XID = not deleted
             if (header.xmin() != Constants.BOOTSTRAP_XID) {
+                pinned.unpin(false);
                 return Optional.empty();
             }
             if (header.xmax() != Constants.INVALID_XID) {
+                pinned.unpin(false);
                 return Optional.empty();
             }
 
@@ -327,9 +333,11 @@ public final class HeapFile implements AutoCloseable {
             System.arraycopy(raw, hoff, data, 0, data.length);
 
             Row row = RowSerializer.deserialize(data, schema, header);
+            pinned.unpin(false);
             return Optional.of(row);
         } catch (StorageException e) {
             log.debug("Failed to read row at {}: {}", recordId, e.getMessage());
+            pinned.unpin(false);
             return Optional.empty();
         }
     }
@@ -338,13 +346,15 @@ public final class HeapFile implements AutoCloseable {
         if (rid.pageId() < 1 || rid.pageId() >= pageCount()) {
             throw new StorageException("page " + rid.pageId() + " does not exist");
         }
-        Page page = readPage(rid.pageId());
+        PinnedPage pinned = readPage(rid.pageId());
+        Page page = pinned.page();
         if (page.pageType() != PageType.HEAP) {
+            pinned.unpin(false);
             throw new StorageException("page " + rid.pageId() + " is not a heap page");
         }
         HeapPage heapPage = new HeapPage(page);
         heapPage.delete(rid.slotNo());
-        writePage(page);
+        pinned.unpin(true); // Mark dirty since we modified the page
 
         // Update FSM to reflect freed space
         fsm.updatePage(rid.pageId(), heapPage.freeBytes());
@@ -462,25 +472,43 @@ public final class HeapFile implements AutoCloseable {
     }
 
     /**
+     * Holder for a pinned page and its buffer descriptor.
+     * Callers must call unpin(dirty) when done to release the frame.
+     */
+    public record PinnedPage(Page page, BufferDescriptor frame, BufferPool pool) {
+        /**
+         * Unpins this page. If frame is null (bootstrap mode), this is a no-op.
+         * @param dirty true if the page was modified
+         */
+        public void unpin(boolean dirty) {
+            if (frame != null && pool != null) {
+                pool.unpinPage(frame, dirty);
+            }
+        }
+    }
+
+    /**
      * Reads a page from this heap file by page ID.
      * The returned page is backed by a buffer pool frame that remains pinned (buffer pool mode).
-     * In bootstrap mode, returns a standalone Page that doesn't need unpinning.
+     * Callers MUST call unpin() on the returned PinnedPage when done.
+     * In bootstrap mode, returns a standalone Page that doesn't need unpinning (frame will be null).
      *
      * @param pageId the page ID to read
-     * @return the Page at that ID
+     * @return PinnedPage containing the Page and its backing frame
      * @throws IOException if read fails or page doesn't exist
      */
-    public Page readPage(int pageId) throws IOException {
+    public PinnedPage readPage(int pageId) throws IOException {
         if (pageId < 1 || pageId >= nextPageId) {
             throw new StorageException("page " + pageId + " does not exist (allocated=" + nextPageId + ")");
         }
         if (bufferPool != null) {
             BufferDescriptor frame = bufferPool.fetchPage(oid, pageId);
-            // Return a Page wrapper around the buffer - frame remains pinned
-            return Page.Factory.wrap(pageId, frame.page());
+            Page page = Page.Factory.wrap(pageId, frame.page());
+            return new PinnedPage(page, frame, bufferPool);
         } else {
-            // Bootstrap mode: read directly from channel
-            return PageIO.readPage(channel, pageId);
+            // Bootstrap mode: read directly from channel, no frame to track
+            Page page = PageIO.readPage(channel, pageId);
+            return new PinnedPage(page, null, null);
         }
     }
 
@@ -491,26 +519,15 @@ public final class HeapFile implements AutoCloseable {
      *
      * @param page the page to write
      * @throws IOException if write fails
+     * @deprecated Use PinnedPage.unpin(dirty) instead
      */
+    @Deprecated
     public void writePage(Page page) throws IOException {
         if (bufferPool == null && channel != null) {
             // Bootstrap mode: write directly to channel
             PageIO.writePage(channel, page);
         }
         // Buffer pool mode: caller should unpin the frame with dirty=true
-    }
-
-    /**
-     * Unpins a page that was previously fetched via readPage().
-     * Only valid in buffer pool mode.
-     *
-     * @param frame the buffer descriptor returned by readPage (via fetchPage)
-     * @param dirty true if the page was modified
-     */
-    public void unpinPage(BufferDescriptor frame, boolean dirty) {
-        if (bufferPool != null) {
-            bufferPool.unpinPage(frame, dirty);
-        }
     }
 
     /**
@@ -564,6 +581,7 @@ public final class HeapFile implements AutoCloseable {
     // Iterates pages sequentially, yielding live rows without materializing all into memory
     private final class LazyRowIterator implements Iterator<Row> {
         private int nextPageId = 1;
+        private PinnedPage currentPinned = null;
         private Page currentPage = null;
         private Iterator<RecordId> currentPageRids = null;
         private Row nextRow = null;
@@ -605,14 +623,31 @@ public final class HeapFile implements AutoCloseable {
                     continue;
                 }
 
-                currentPage = HeapFile.this.readPage(nextPageId);
+                // Unpin previous page before loading next
+                if (currentPinned != null) {
+                    currentPinned.unpin(false);
+                    currentPinned = null;
+                    currentPage = null;
+                }
+
+                currentPinned = HeapFile.this.readPage(nextPageId);
+                currentPage = currentPinned.page();
                 nextPageId++;
                 if (currentPage.pageType() != PageType.HEAP) {
+                    currentPinned.unpin(false);
+                    currentPinned = null;
+                    currentPage = null;
                     currentPageRids = null;
                     continue;
                 }
                 HeapPage heapPage = new HeapPage(currentPage);
                 currentPageRids = heapPage.scan().iterator();
+            }
+            // End of iteration - unpin the last page
+            if (currentPinned != null) {
+                currentPinned.unpin(false);
+                currentPinned = null;
+                currentPage = null;
             }
             nextRow = null;
         }

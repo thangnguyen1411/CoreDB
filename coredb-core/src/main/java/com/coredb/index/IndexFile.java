@@ -240,23 +240,42 @@ public final class IndexFile implements AutoCloseable {
     // === Page operations ===
 
     /**
+     * Holder for a pinned page and its buffer descriptor.
+     * Callers must call unpin(dirty) when done to release the frame.
+     */
+    public record PinnedPage(Page page, BufferDescriptor frame, BufferPool pool) {
+        /**
+         * Unpins this page. If frame is null (bootstrap mode), this is a no-op.
+         * @param dirty true if the page was modified
+         */
+        public void unpin(boolean dirty) {
+            if (frame != null && pool != null) {
+                pool.unpinPage(frame, dirty);
+            }
+        }
+    }
+
+    /**
      * Reads a page from the index file by page ID.
      * The returned page is backed by a buffer pool frame that remains pinned.
+     * Callers MUST call unpin() on the returned PinnedPage when done.
      *
      * @param pageId the page ID to read
-     * @return the Page at that ID (backed by a pinned buffer frame)
+     * @return PinnedPage containing the Page and its backing frame
      * @throws IOException if read fails or page doesn't exist
      */
-    public Page readPage(int pageId) throws IOException {
+    public PinnedPage readPage(int pageId) throws IOException {
         if (pageId < 1 || pageId >= nextPageId) {
             throw new StorageException("page " + pageId + " does not exist (allocated=" + nextPageId + ")");
         }
         if (bufferPool != null) {
             BufferDescriptor frame = bufferPool.fetchPage(oid, pageId);
-            return Page.Factory.wrap(pageId, frame.page());
+            Page page = Page.Factory.wrap(pageId, frame.page());
+            return new PinnedPage(page, frame, bufferPool);
         } else {
             // Bootstrap/test mode: read directly from channel
-            return PageIO.readPage(channel, pageId);
+            Page page = PageIO.readPage(channel, pageId);
+            return new PinnedPage(page, null, null);
         }
     }
 
@@ -267,25 +286,15 @@ public final class IndexFile implements AutoCloseable {
      *
      * @param page the page to write
      * @throws IOException if write fails
+     * @deprecated Use PinnedPage.unpin(dirty) instead
      */
+    @Deprecated
     public void writePage(Page page) throws IOException {
         if (bufferPool == null && channel != null) {
             // Bootstrap/test mode: write directly to channel
             PageIO.writePage(channel, page);
         }
         // Buffer pool mode: caller should unpin the frame with dirty=true
-    }
-
-    /**
-     * Unpins a page that was previously fetched via readPage().
-     *
-     * @param frame the buffer descriptor
-     * @param dirty true if the page was modified
-     */
-    public void unpinPage(BufferDescriptor frame, boolean dirty) {
-        if (bufferPool != null) {
-            bufferPool.unpinPage(frame, dirty);
-        }
     }
 
     /**

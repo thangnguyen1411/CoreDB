@@ -222,17 +222,21 @@ public final class Catalog implements AutoCloseable {
      */
     private RecordId findTableRecordId(String name) throws IOException {
         for (int pageId = 1; pageId < coreClassFile.pageCount(); pageId++) {
-            Page page = coreClassFile.readPage(pageId);
+            HeapFile.PinnedPage pinned = coreClassFile.readPage(pageId);
+            Page page = pinned.page();
             if (page.pageType() != PageType.HEAP) {
+                pinned.unpin(false);
                 continue;
             }
             HeapPage hp = new HeapPage(page);
             for (RecordId rid : hp.scan()) {
                 Optional<Row> row = coreClassFile.get(rid);
                 if (row.isPresent() && name.equals(row.get().getString(1))) {
+                    pinned.unpin(false);
                     return rid;
                 }
             }
+            pinned.unpin(false);
         }
         return null;
     }
