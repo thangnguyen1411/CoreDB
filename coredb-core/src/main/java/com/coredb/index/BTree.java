@@ -1,0 +1,345 @@
+package com.coredb.index;
+
+import com.coredb.heap.RecordId;
+import com.coredb.page.Page;
+import com.coredb.page.PageType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.util.Optional;
+
+/**
+ * B+ tree index structure.
+ *
+ * <p>Ties together leaf pages, internal pages, and the index file to provide
+ * a complete B+ tree implementation with:
+ * <ul>
+ *   <li>Descent from root to leaf for search and insert</li>
+ *   <li>Split propagation up the tree</li>
+ *   <li>Root split handling (tree height growth)</li>
+ *   <li>Path tracking using an int[] stack (no parent pointers in pages)</li>
+ * </ul>
+ *
+ * <p>The B+ tree uses the standard PostgreSQL pattern:
+ * <ul>
+ *   <li>All leaf pages are linked via btpo_prev/btpo_next</li>
+ *   <li>Internal pages route searches using separator keys</li>
+ *   <li>Splits propagate upward; root split creates new root and increases height</li>
+ *   <li>The descent path is tracked on a stack; parent pointers are not stored</li>
+ * </ul>
+ */
+public final class BTree {
+
+    private static final Logger log = LoggerFactory.getLogger(BTree.class);
+
+    // Maximum tree height for path stack (generous limit)
+    private static final int MAX_HEIGHT = 32;
+
+    private final IndexFile indexFile;
+
+    // Path tracking stack for descent and split propagation
+    // pathStack[i] = pageId at level i during descent
+    // Level 0 = leaf, Level height-1 = root
+    private final int[] pathStack;
+    private int pathDepth;
+
+    private BTree(IndexFile indexFile) {
+        this.indexFile = indexFile;
+        this.pathStack = new int[MAX_HEIGHT];
+        this.pathDepth = 0;
+    }
+
+    /**
+     * Creates a new B+ tree with an empty root leaf page.
+     *
+     * <p>The IndexFile must already be created with an initial root page.</p>
+     *
+     * @param indexFile the index file containing the tree
+     * @return a new BTree instance
+     */
+    public static BTree create(IndexFile indexFile) {
+        return new BTree(indexFile);
+    }
+
+    /**
+     * Opens an existing B+ tree from an index file.
+     *
+     * @param indexFile the index file containing the tree
+     * @return a BTree instance for the existing tree
+     */
+    public static BTree open(IndexFile indexFile) {
+        return new BTree(indexFile);
+    }
+
+    /**
+     * Returns the index file associated with this tree.
+     */
+    public IndexFile indexFile() {
+        return indexFile;
+    }
+
+    /**
+     * Returns the current tree height.
+     * 0 = root is a leaf, 1 = one internal level above leaves, etc.
+     */
+    public int treeHeight() {
+        return indexFile.treeHeight();
+    }
+
+    /**
+     * Returns the root page ID.
+     */
+    public int rootPageId() {
+        return indexFile.rootPageId();
+    }
+
+    /**
+     * Searches for a key in the B+ tree.
+     *
+     * @param key the key to search for
+     * @return Optional containing the RecordId if found, empty otherwise
+     * @throws IOException if page read fails
+     */
+    public Optional<RecordId> search(long key) throws IOException {
+        // Descend to the appropriate leaf page
+        int leafPageId = descendToLeaf(key);
+
+        // Search in the leaf
+        Page page = indexFile.readPage(leafPageId);
+        BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(page));
+        return leaf.search(key);
+    }
+
+    /**
+     * Inserts a (key, RecordId) pair into the B+ tree.
+     *
+     * <p>If the key already exists, throws IllegalStateException.
+     * If a leaf splits, the split propagates up the tree.
+     * If the root splits, a new root is created and tree height increases.</p>
+     *
+     * @param key the key to insert
+     * @param rid the RecordId associated with the key
+     * @throws IOException if file operations fail
+     * @throws IllegalStateException if key already exists
+     */
+    public void insert(long key, RecordId rid) throws IOException {
+        // Descend to leaf, tracking the path
+        int leafPageId = descendToLeafWithPath(key);
+
+        // Try to insert into the leaf
+        Page page = indexFile.readPage(leafPageId);
+        BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(page));
+
+        InsertResult result = leaf.insert(key, rid);
+
+        if (result == InsertResult.OK) {
+            // Simple case: insert succeeded, write the page back
+            indexFile.writePage(leaf.layout().page());
+            return;
+        }
+
+        if (result == InsertResult.DUPLICATE_KEY) {
+            throw new IllegalStateException("Duplicate key: " + key);
+        }
+
+        // result == InsertResult.FULL: need to split
+        handleLeafSplit(leaf, key, rid);
+    }
+
+    /**
+     * Handles a leaf page split and propagates the split upward.
+     *
+     * @param leaf the full leaf page that needs splitting
+     * @param key the key to insert
+     * @param rid the RecordId to insert
+     * @throws IOException if file operations fail
+     */
+    private void handleLeafSplit(BTreeLeafPage leaf, long key, RecordId rid) throws IOException {
+        // Split the leaf page
+        SplitResult splitResult = leaf.split(indexFile);
+
+        // Determine which page to insert into
+        int targetPageId;
+        BTreeLeafPage targetPage;
+
+        if (key < splitResult.separatorKey()) {
+            // Insert into left (original) page
+            targetPageId = leaf.pageId();
+            targetPage = leaf;
+        } else {
+            // Insert into right (new) page
+            targetPageId = splitResult.newRightPageId();
+            Page rightPageData = indexFile.readPage(targetPageId);
+            targetPage = BTreeLeafPage.of(IndexPageLayout.of(rightPageData));
+        }
+
+        // Insert the key into the appropriate page
+        InsertResult insertResult = targetPage.insert(key, rid);
+        if (insertResult != InsertResult.OK) {
+            // This should not happen - new page should have room
+            throw new IllegalStateException("Failed to insert into split page: " + insertResult);
+        }
+
+        // Write the target page
+        indexFile.writePage(targetPage.layout().page());
+
+        // Propagate the split upward
+        propagateSplit(
+            splitResult.separatorKey(),
+            splitResult.newRightPageId(),
+            leaf.pageId(),  // left page
+            splitResult.newRightPageId()  // right page
+        );
+    }
+
+    /**
+     * Propagates a split up the tree, inserting the separator into parent pages.
+     *
+     * @param separatorKey the key that separates left and right children
+     * @param rightPageId the new right child page ID
+     * @param leftPageId the left child page ID (for root split detection)
+     @param actualRightPageId the actual right page ID to use in separator
+     * @throws IOException if file operations fail
+     */
+    private void propagateSplit(long separatorKey, int rightPageId, int leftPageId, int actualRightPageId) throws IOException {
+        // Walk up the path stack, inserting separators into parents
+        while (pathDepth > 0) {
+            pathDepth--;
+            int parentPageId = pathStack[pathDepth];
+
+            Page parentPageData = indexFile.readPage(parentPageId);
+            BTreeInternalPage parent = BTreeInternalPage.of(IndexPageLayout.of(parentPageData));
+
+            // Try to insert the separator into the parent
+            InsertResult result = parent.insertSeparator(separatorKey, rightPageId);
+
+            if (result == InsertResult.OK) {
+                // Parent had room, write it and we're done
+                indexFile.writePage(parent.layout().page());
+                return;
+            }
+
+            if (result == InsertResult.DUPLICATE_KEY) {
+                // This shouldn't happen during normal split propagation
+                throw new IllegalStateException("Duplicate separator key during split propagation: " + separatorKey);
+            }
+
+            // Parent is full, need to split it
+            BTreeInternalPage.InternalSplitResult internalSplit = parent.split(indexFile);
+
+            // Determine which child gets the new separator
+            // The separator key tells us: keys < separator go left, keys >= go right
+            long newSeparator = internalSplit.promotedKey();
+            int newRightPageId = internalSplit.rightPageId();
+
+            // The new separator we were trying to insert
+            // Compare with promoted key to decide which page gets it
+            if (separatorKey < newSeparator) {
+                // Insert into left page (original)
+                BTreeInternalPage leftPage = parent;
+                InsertResult insertResult = leftPage.insertSeparator(separatorKey, rightPageId);
+                if (insertResult != InsertResult.OK) {
+                    throw new IllegalStateException("Failed to insert into split internal page: " + insertResult);
+                }
+                indexFile.writePage(leftPage.layout().page());
+            } else {
+                // Insert into right page (new)
+                Page rightPageData = indexFile.readPage(newRightPageId);
+                BTreeInternalPage rightPage = BTreeInternalPage.of(IndexPageLayout.of(rightPageData));
+                InsertResult insertResult = rightPage.insertSeparator(separatorKey, rightPageId);
+                if (insertResult != InsertResult.OK) {
+                    throw new IllegalStateException("Failed to insert into new internal page: " + insertResult);
+                }
+                indexFile.writePage(rightPage.layout().page());
+            }
+
+            // Continue propagating with the promoted key
+            separatorKey = newSeparator;
+            rightPageId = newRightPageId;
+            leftPageId = internalSplit.leftPageId();
+            // Loop continues to next parent level
+        }
+
+        // If we exit the loop, we've propagated all the way to above the root
+        // This means the root split and we need a new root
+        createNewRoot(separatorKey, leftPageId, rightPageId);
+    }
+
+    /**
+     * Creates a new root page when the old root splits.
+     *
+     * @param separatorKey the separator key between the two children
+     * @param leftChild the left child page ID (old root)
+     * @param rightChild the right child page ID (new sibling from split)
+     * @throws IOException if file operations fail
+     */
+    private void createNewRoot(long separatorKey, int leftChild, int rightChild) throws IOException {
+        // Allocate a new internal page at the new level
+        int newLevel = treeHeight() + 1;
+        Page newRootPage = indexFile.allocateNewPage(PageType.INDEX_INTERNAL);
+        BTreeInternalPage newRoot = BTreeInternalPage.of(IndexPageLayout.of(newRootPage));
+        newRoot.setBtpoLevel(newLevel);
+
+        // Initialize with the two children
+        newRoot.initializeWithChildren(leftChild, separatorKey, rightChild);
+
+        // Write the new root
+        indexFile.writePage(newRoot.layout().page());
+
+        // Update the index file metadata
+        indexFile.setRootPageId(newRoot.pageId());
+
+        log.debug("Created new root page {} at level {}, tree height now {}",
+                newRoot.pageId(), newLevel, treeHeight());
+    }
+
+    /**
+     * Descends from root to the appropriate leaf page for the given key.
+     *
+     * @param key the search key
+     * @return the leaf page ID where the key belongs
+     * @throws IOException if page read fails
+     */
+    private int descendToLeaf(long key) throws IOException {
+        int currentPageId = rootPageId();
+        int currentHeight = treeHeight();
+
+        // Descend through internal levels
+        for (int level = currentHeight; level > 0; level--) {
+            Page page = indexFile.readPage(currentPageId);
+            BTreeInternalPage internal = BTreeInternalPage.of(IndexPageLayout.of(page));
+            currentPageId = internal.routeChildFor(key);
+        }
+
+        return currentPageId;
+    }
+
+    /**
+     * Descends from root to leaf, tracking the path on the stack for split propagation.
+     *
+     * @param key the search key
+     * @return the leaf page ID where the key belongs
+     * @throws IOException if page read fails
+     */
+    private int descendToLeafWithPath(long key) throws IOException {
+        pathDepth = 0;
+        int currentPageId = rootPageId();
+        int currentHeight = treeHeight();
+
+        // Descend through internal levels, tracking the path
+        for (int level = currentHeight; level > 0; level--) {
+            // Push current page onto path stack
+            if (pathDepth >= MAX_HEIGHT) {
+                throw new IllegalStateException("Tree height exceeds maximum: " + MAX_HEIGHT);
+            }
+            pathStack[pathDepth++] = currentPageId;
+
+            Page page = indexFile.readPage(currentPageId);
+            BTreeInternalPage internal = BTreeInternalPage.of(IndexPageLayout.of(page));
+            currentPageId = internal.routeChildFor(key);
+        }
+
+        return currentPageId;
+    }
+}
