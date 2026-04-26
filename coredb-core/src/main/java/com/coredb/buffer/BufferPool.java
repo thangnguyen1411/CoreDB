@@ -88,9 +88,10 @@ public final class BufferPool implements AutoCloseable {
         
         Integer frameId = pageTable.get(key);
         if (frameId != null) {
-            // Hit: page already in pool
+            // Hit: page already in pool — bump usage count (hot pages survive longer)
             BufferDescriptor frame = descriptors[frameId];
             frame.pin();
+            frame.bumpUsageCount();
             hits++;
             return frame;
         }
@@ -101,7 +102,7 @@ public final class BufferPool implements AutoCloseable {
         // Find a free frame (no eviction yet)
         BufferDescriptor victim = findFreeFrame();
         if (victim == null) {
-            throw new StorageException("Buffer pool full (" + frameCount + " frames).");
+            throw new StorageException("Buffer pool full (" + frameCount + " frames). ");
         }
 
         // Read page from disk into the frame
@@ -110,8 +111,9 @@ public final class BufferPool implements AutoCloseable {
         victim.page().put(page.buffer().duplicate().clear());
         victim.page().flip();
 
-        // Set up the frame
+        // Set up the frame — usageCount = 1 on first load
         victim.bind(tableOid, pageId);
+        victim.initUsageCount();
         victim.pin();
         
         // Register in page table

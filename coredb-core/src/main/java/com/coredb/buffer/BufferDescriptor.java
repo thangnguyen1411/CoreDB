@@ -104,6 +104,20 @@ public final class BufferDescriptor {
     }
 
     /**
+     * Initializes usageCount to 1 when a page is first loaded (cache miss).
+     */
+    void initUsageCount() {
+        usageCount = 1;
+    }
+
+    /**
+     * Bumps usageCount on cache hit, capped at 5 (hot pages survive longer).
+     */
+    void bumpUsageCount() {
+        usageCount = Math.min(5, usageCount + 1);
+    }
+
+    /**
      * Marks the buffer as clean (after successful flush to disk).
      * Preserves the binding for potential cache reuse.
      */

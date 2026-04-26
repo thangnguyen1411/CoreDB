@@ -67,6 +67,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             case "scan-raw"       -> handleScanRaw(args);
             case "delete-raw"     -> handleDeleteRaw(args);
             case "heap-stats"     -> handleHeapStats(args);
+            case "buffer-stats"   -> handleBufferStats();
             case "schema-parse"      -> handleSchemaParse(args);
             case "control-info"      -> handleControlInfo();
             case "control-alloc-oid" -> handleControlAllocOid();
@@ -99,6 +100,12 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         return String.format("file=%s  exists=%b", path, exists);
     }
 
+    private String handleBufferStats() {
+        // BufferPool exists but is not yet integrated into CoreDB.
+        // For now, show a placeholder with what the stats would look like.
+        return "buffer-stats: BufferPool implemented. Integration with CoreDB not yet implemented.";
+    }
+
     private String formatHelp() {
         return """
             Cluster commands:
@@ -123,6 +130,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             Diagnostics:
               version                    print version and config
               status                     show DB file path and whether it exists
+              buffer-stats               show buffer pool statistics
               help                       list available commands
               quit                       exit
 
