@@ -246,4 +246,131 @@ class BTreeLeafPageTest {
         assertThat(leaf.entryCount()).isEqualTo(1);
         assertThat(leaf.keyAt(0)).isEqualTo(42L);
     }
+
+    // ============================================================================
+    // Delete Tests
+    // ============================================================================
+
+    @Test
+    void delete_existingKey_removesEntry() {
+        BTreeLeafPage leaf = BTreeLeafPage.createEmpty(1);
+
+        leaf.insert(10L, new RecordId(1, 0));
+        leaf.insert(20L, new RecordId(1, 1));
+        leaf.insert(30L, new RecordId(1, 2));
+
+        boolean deleted = leaf.delete(20L);
+
+        assertThat(deleted).isTrue();
+        assertThat(leaf.entryCount()).isEqualTo(2);
+        assertThat(leaf.keyAt(0)).isEqualTo(10L);
+        assertThat(leaf.keyAt(1)).isEqualTo(30L);
+        assertThat(leaf.search(20L)).isEmpty();
+    }
+
+    @Test
+    void delete_missingKey_returnsFalse() {
+        BTreeLeafPage leaf = BTreeLeafPage.createEmpty(1);
+
+        leaf.insert(10L, new RecordId(1, 0));
+        leaf.insert(30L, new RecordId(1, 1));
+
+        boolean deleted = leaf.delete(20L);
+
+        assertThat(deleted).isFalse();
+        assertThat(leaf.entryCount()).isEqualTo(2);
+    }
+
+    @Test
+    void delete_onlyEntry_leafBecomesEmpty() {
+        BTreeLeafPage leaf = BTreeLeafPage.createEmpty(1);
+
+        leaf.insert(42L, new RecordId(1, 0));
+
+        boolean deleted = leaf.delete(42L);
+
+        assertThat(deleted).isTrue();
+        assertThat(leaf.entryCount()).isEqualTo(0);
+    }
+
+    @Test
+    void delete_fromEmptyPage_returnsFalse() {
+        BTreeLeafPage leaf = BTreeLeafPage.createEmpty(1);
+
+        boolean deleted = leaf.delete(42L);
+
+        assertThat(deleted).isFalse();
+    }
+
+    @Test
+    void delete_firstEntry_maintainsSortedOrder() {
+        BTreeLeafPage leaf = BTreeLeafPage.createEmpty(1);
+
+        leaf.insert(10L, new RecordId(1, 0));
+        leaf.insert(20L, new RecordId(1, 1));
+        leaf.insert(30L, new RecordId(1, 2));
+
+        leaf.delete(10L);
+
+        assertThat(leaf.entryCount()).isEqualTo(2);
+        assertThat(leaf.keyAt(0)).isEqualTo(20L);
+        assertThat(leaf.keyAt(1)).isEqualTo(30L);
+    }
+
+    @Test
+    void delete_lastEntry_maintainsSortedOrder() {
+        BTreeLeafPage leaf = BTreeLeafPage.createEmpty(1);
+
+        leaf.insert(10L, new RecordId(1, 0));
+        leaf.insert(20L, new RecordId(1, 1));
+        leaf.insert(30L, new RecordId(1, 2));
+
+        leaf.delete(30L);
+
+        assertThat(leaf.entryCount()).isEqualTo(2);
+        assertThat(leaf.keyAt(0)).isEqualTo(10L);
+        assertThat(leaf.keyAt(1)).isEqualTo(20L);
+    }
+
+    @Test
+    void delete_multipleEntries_oneByOne() {
+        BTreeLeafPage leaf = BTreeLeafPage.createEmpty(1);
+
+        // Insert 5 entries
+        for (int i = 1; i <= 5; i++) {
+            leaf.insert(i * 10L, new RecordId(1, i));
+        }
+
+        // Delete in random order
+        assertThat(leaf.delete(30L)).isTrue();
+        assertThat(leaf.delete(10L)).isTrue();
+        assertThat(leaf.delete(50L)).isTrue();
+
+        // Verify remaining
+        assertThat(leaf.entryCount()).isEqualTo(2);
+        assertThat(leaf.keyAt(0)).isEqualTo(20L);
+        assertThat(leaf.keyAt(1)).isEqualTo(40L);
+
+        // Verify searches
+        assertThat(leaf.search(10L)).isEmpty();
+        assertThat(leaf.search(20L)).isPresent();
+        assertThat(leaf.search(30L)).isEmpty();
+        assertThat(leaf.search(40L)).isPresent();
+        assertThat(leaf.search(50L)).isEmpty();
+    }
+
+    @Test
+    void delete_returnsFreeBytes() {
+        BTreeLeafPage leaf = BTreeLeafPage.createEmpty(1);
+
+        leaf.insert(42L, new RecordId(1, 0));
+        int freeAfterInsert = leaf.freeBytes();
+
+        leaf.delete(42L);
+        int freeAfterDelete = leaf.freeBytes();
+
+        // pdLower decreases by 4 (one ItemId removed), but tuple data stays
+        // So freeBytes increases by 4
+        assertThat(freeAfterDelete).isEqualTo(freeAfterInsert + 4);
+    }
 }
