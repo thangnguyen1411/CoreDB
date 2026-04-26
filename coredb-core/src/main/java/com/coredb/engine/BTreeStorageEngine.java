@@ -103,19 +103,30 @@ public class BTreeStorageEngine implements StorageEngine {
 
     @Override
     public void put(long pk, Row row) throws IOException {
-        // INSERT only. If PK exists, throw
         Optional<RecordId> existing = pkIndex.search(pk);
         if (existing.isPresent()) {
-            throw new IllegalStateException("UPDATE path not yet implemented.");
+            // UPDATE path - MVCC upsert semantics
+            RecordId oldRid = existing.get();
+
+            // 1. Delete old index entry (remove key→oldRid mapping)
+            pkIndex.delete(pk);
+
+            // 2. Mark old tuple as deleted in heap (sets t_xmax, creates dead version)
+            heap.delete(oldRid);
+
+            // 3. Insert new tuple into heap
+            RecordId newRid = heap.insert(row);
+
+            // 4. Insert new index entry (key→newRid mapping)
+            pkIndex.insert(pk, newRid);
+
+            log.debug("Updated row with pk={}: oldRid={} -> newRid={}", pk, oldRid, newRid);
+        } else {
+            // INSERT path
+            RecordId rid = heap.insert(row);
+            pkIndex.insert(pk, rid);
+            log.debug("Inserted row with pk={} at rid={}", pk, rid);
         }
-
-        // Insert into heap first (get RecordId)
-        RecordId rid = heap.insert(row);
-
-        // Insert into PK index
-        pkIndex.insert(pk, rid);
-
-        log.debug("Inserted row with pk={} at rid={}", pk, rid);
     }
 
     @Override

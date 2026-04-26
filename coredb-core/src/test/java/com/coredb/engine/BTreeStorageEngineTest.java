@@ -3,18 +3,17 @@ package com.coredb.engine;
 import com.coredb.api.CoreDBConfig;
 import com.coredb.catalog.TableMeta;
 import com.coredb.config.EngineType;
-import org.junit.jupiter.api.Test;
+import com.coredb.heap.HeapFile;
 
 import java.io.IOException;
 import java.nio.file.Path;
 
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Contract tests for {@link BTreeStorageEngine}.
  *
- * <p>Tests insert/get/delete without UPDATE path. The upsert test
- * is expected to fail with "UPDATE path not yet implemented." exception.</p>
+ * <p>Full MVCC upsert support with dead version verification.</p>
  */
 class BTreeStorageEngineTest extends StorageEngineContractTest {
 
@@ -27,30 +26,67 @@ class BTreeStorageEngineTest extends StorageEngineContractTest {
     }
 
     /**
-     * PUT of existing key should throw because UPDATE path is not yet implemented.
-     * This test verifies the expected behavior.
+     * Verifies that after an upsert, a dead tuple version exists in the heap.
+     * This is the MVCC semantics check - old version is marked deleted but
+     * remains physically present until VACUUM.
      */
-    @Test
-    void putOfExistingKey_throwsUpdatePathNotImplemented() throws IOException {
-        TableMeta meta = createTestTableMeta();
-        Path dataDir = tempDir.resolve("data");
-        java.nio.file.Files.createDirectories(dataDir);
+    @Override
+    protected void assertDeadVersionExists(Path dataDir, TableMeta meta, long pk) {
+        // Open heap file directly to count physical tuples
+        Path heapPath = dataDir.resolve("base/1/" + meta.oid());
 
-        // First put
-        try (StorageEngine engine = createEngine(dataDir, meta)) {
-            engine.open(dataDir, meta);
-            com.coredb.api.Row original = com.coredb.api.Row.of(1L, "Alice", 30);
-            engine.put(1L, original);
-        }
+        try (HeapFile hf = HeapFile.open(heapPath, meta.oid(), meta.schema())) {
+            int liveCount = 0;
+            int deadCount = 0;
+            int totalCount = 0;
 
-        // Second put should throw
-        try (StorageEngine engine = createEngine(dataDir, meta)) {
-            engine.open(dataDir, meta);
-            com.coredb.api.Row updated = com.coredb.api.Row.of(1L, "Bob", 31);
+            // Scan all pages and count tuple versions
+            for (int pageId = 1; pageId < hf.pageCount(); pageId++) {
+                com.coredb.page.Page page = hf.readPage(pageId);
+                if (page.pageType() != com.coredb.page.PageType.HEAP) {
+                    continue;
+                }
+                com.coredb.heap.HeapPage heapPage = new com.coredb.heap.HeapPage(page);
 
-            assertThatThrownBy(() -> engine.put(1L, updated))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("UPDATE path not yet implemented.");
+                // Iterate through all line pointers (including dead ones)
+                for (int slot = 1; slot < heapPage.linePointerCount(); slot++) {
+                    try {
+                        byte[] raw = heapPage.get(slot);
+                        totalCount++;
+
+                        // Parse header to check visibility
+                        java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(raw).order(java.nio.ByteOrder.BIG_ENDIAN);
+                        com.coredb.heap.HeapTupleHeader header = com.coredb.heap.HeapTupleHeader.readFrom(buf, 0);
+
+                        // In our stub visibility model:
+                        // - xmin = BOOTSTRAP_XID, xmax = INVALID_XID  => live
+                        // - xmin = BOOTSTRAP_XID, xmax != INVALID_XID => dead (deleted)
+                        if (header.xmin() == com.coredb.util.Constants.BOOTSTRAP_XID) {
+                            if (header.xmax() == com.coredb.util.Constants.INVALID_XID) {
+                                liveCount++;
+                            } else {
+                                deadCount++;
+                            }
+                        }
+                    } catch (Exception e) {
+                        // Skip invalid/deleted slots
+                    }
+                }
+            }
+
+            // After upsert: should have 1 live (new version) + 1 dead (old version) = 2 total
+            assertThat(liveCount)
+                .as("Expected 1 live tuple after upsert")
+                .isEqualTo(1);
+            assertThat(deadCount)
+                .as("Expected 1 dead tuple version after upsert (MVCC semantics)")
+                .isEqualTo(1);
+            assertThat(totalCount)
+                .as("Expected 2 physical tuples total (1 live + 1 dead)")
+                .isEqualTo(2);
+
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to verify dead version exists", e);
         }
     }
 
