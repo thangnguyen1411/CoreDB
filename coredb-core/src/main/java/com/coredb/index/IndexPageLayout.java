@@ -311,6 +311,27 @@ public final class IndexPageLayout {
         return -1;
     }
 
+    /**
+     * Finds the slot where the given key should be inserted in an internal page.
+     * Uses readInternalEntry instead of readLeafEntry.
+     * Returns insertion point (0..entryCount) such that all entries before have keys < search key.
+     */
+    public int findInternalInsertionPoint(long searchKey) {
+        int low = 0;
+        int high = entryCount();
+
+        while (low < high) {
+            int mid = (low + high) >>> 1;
+            InternalEntry entry = readInternalEntry(mid);
+            if (entry.key() < searchKey) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        return low;
+    }
+
     // === Inner classes ===
 
     public record LeafEntry(long key, RecordId rid) {}

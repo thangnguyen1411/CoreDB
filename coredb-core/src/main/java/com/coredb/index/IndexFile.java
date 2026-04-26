@@ -194,13 +194,9 @@ public final class IndexFile implements AutoCloseable {
     public Page allocateNewPage(PageType type) throws IOException {
         int newPageId = nextPageId;
 
-        Page newPage;
-        if (type == PageType.INDEX_LEAF) {
-            newPage = IndexPageLayout.createEmpty(newPageId, type).page();
-        } else {
-            // For internal pages, allocate and caller will set level via IndexPageLayout
-            newPage = Page.Factory.allocate(newPageId, type);
-        }
+        // Always use IndexPageLayout.createEmpty to ensure proper initialization
+        // of pd_special and the opaque area (btpo_prev, btpo_next, btpo_level)
+        Page newPage = IndexPageLayout.createEmpty(newPageId, type).page();
 
         PageIO.writePage(channel, newPage);
 
