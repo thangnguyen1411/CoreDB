@@ -113,7 +113,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
               schema-parse <def>                       parse column definition
 
             Data commands (via StorageEngine):
-              put <table> <pk> <col1> <col2> ...       insert a row (fails on duplicate PK)
+              put <table> <pk> <col1> <col2> ...       insert or update a row (MVCC upsert)
               get <table> <pk>                         retrieve a row by primary key
               delete <table> <pk>                      delete a row by primary key
 
@@ -703,9 +703,6 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             }
 
         } catch (IllegalStateException e) {
-            if (e.getMessage().contains("UPDATE path")) {
-                return "error: UPDATE path not yet implemented.";
-            }
             return "error: " + e.getMessage();
         } catch (IOException | IllegalArgumentException e) {
             return "error: " + e.getMessage();

@@ -4,8 +4,10 @@ import com.coredb.api.CoreDBConfig;
 import com.coredb.catalog.TableMeta;
 import com.coredb.config.EngineType;
 import com.coredb.heap.HeapFile;
+import com.coredb.heap.HeapTupleHeader;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.file.Path;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -49,14 +51,21 @@ class BTreeStorageEngineTest extends StorageEngineContractTest {
                 com.coredb.heap.HeapPage heapPage = new com.coredb.heap.HeapPage(page);
 
                 // Iterate through all line pointers (including dead ones)
-                for (int slot = 1; slot < heapPage.linePointerCount(); slot++) {
+                for (int slot = 0; slot < heapPage.slotCount(); slot++) {
                     try {
-                        byte[] raw = heapPage.get(slot);
+                        // Read ItemId directly from page to access both live and dead tuples
+                        com.coredb.page.Page pageData = heapPage.page();
+                        int itemId = pageData.readItemId(slot);
+
+                        // Skip unused slots (offset = 0)
+                        int offset = com.coredb.page.ItemId.offset(itemId);
+                        if (offset == 0) continue;
+
                         totalCount++;
 
-                        // Parse header to check visibility
-                        java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(raw).order(java.nio.ByteOrder.BIG_ENDIAN);
-                        com.coredb.heap.HeapTupleHeader header = com.coredb.heap.HeapTupleHeader.readFrom(buf, 0);
+                        // Read tuple header directly from page buffer at the offset
+                        ByteBuffer buf = pageData.buffer();
+                        HeapTupleHeader header = HeapTupleHeader.readFrom(buf, offset);
 
                         // In our stub visibility model:
                         // - xmin = BOOTSTRAP_XID, xmax = INVALID_XID  => live
@@ -69,7 +78,7 @@ class BTreeStorageEngineTest extends StorageEngineContractTest {
                             }
                         }
                     } catch (Exception e) {
-                        // Skip invalid/deleted slots
+                        // Skip invalid slots
                     }
                 }
             }
@@ -88,14 +97,5 @@ class BTreeStorageEngineTest extends StorageEngineContractTest {
         } catch (IOException e) {
             throw new RuntimeException("Failed to verify dead version exists", e);
         }
-    }
-
-    private TableMeta createTestTableMeta() {
-        com.coredb.api.Schema schema = com.coredb.api.Schema.of(
-            com.coredb.api.Column.longCol("id").withNullable(false),
-            com.coredb.api.Column.stringCol("name"),
-            com.coredb.api.Column.intCol("age")
-        );
-        return new TableMeta(1002, "test_table", schema, "id", EngineType.BTREE);
     }
 }
