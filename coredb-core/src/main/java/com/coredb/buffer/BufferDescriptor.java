@@ -4,11 +4,11 @@ import java.nio.ByteBuffer;
 
 /**
  * BufferDescriptor represents a single frame in the buffer pool.
- * 
+ *
  * One descriptor per frame. Mutable state (pinCount, usageCount, dirty, pdLsn)
  * tracks the page's lifecycle in the pool. When a frame is evicted, reset() clears
  * all mutable state for reuse.
- * 
+ *
  * PostgreSQL parallel: BufferDesc (src/include/storage/buf.h)
  */
 public final class BufferDescriptor {
@@ -88,15 +88,28 @@ public final class BufferDescriptor {
      */
     void unpin() {
         if (pinCount <= 0) {
-            throw new IllegalStateException("Unpin called on unpinned buffer frame " + frameId);
+            throw new IllegalStateException(
+                "Unpin called on unpinned buffer frame " + frameId
+            );
         }
         pinCount--;
     }
 
     /**
      * Marks the buffer as dirty and bumps usage count.
-     * Dirty pages must be flushed to disk before eviction.
-     * PostgreSQL: BM_DIRTY flag + usage_count bump.
+     *
+     * Dirty flag: set when the page's in-memory contents diverge from disk.
+     * The eviction logic must flush dirty pages before reusing the frame,
+     * otherwise modifications are lost.
+     *
+     * Usage count: bumped because modified pages are likely part of an active
+     * workload and should be kept in memory longer. Capped at 5 to prevent
+     * hot pages from dominating the pool indefinitely; the clock-sweep
+     * eviction algorithm decrements this counter periodically, so a value
+     * of 5 gives a page ~5 sweep cycles before it becomes evictable.
+     * PostgreSQL uses the same cap via BM_MAX_USAGE_COUNT (src/backend/bufmgr/freelist.c).
+     *
+     * PostgreSQL: BM_DIRTY flag + usage_count bump in MarkBufferDirty().
      */
     void markDirty() {
         dirty = true;
@@ -147,7 +160,7 @@ public final class BufferDescriptor {
 
     /**
      * Returns a compact key for hash table lookups.
-     * Packs (tableOid, pageId) into a long for use as HashMap key.
+     * Packs 2 int values (tableOid, pageId) into a long for use as HashMap key.
      */
     static long key(int tableOid, int pageId) {
         return ((long) tableOid << 32) | (pageId & 0xFFFFFFFFL);
@@ -155,7 +168,14 @@ public final class BufferDescriptor {
 
     @Override
     public String toString() {
-        return String.format("BufferDescriptor[frame=%d, oid=%d, page=%d, pins=%d, usage=%d, dirty=%s]",
-            frameId, tableOid, pageId, pinCount, usageCount, dirty);
+        return String.format(
+            "BufferDescriptor[frame=%d, oid=%d, page=%d, pins=%d, usage=%d, dirty=%s]",
+            frameId,
+            tableOid,
+            pageId,
+            pinCount,
+            usageCount,
+            dirty
+        );
     }
 }
