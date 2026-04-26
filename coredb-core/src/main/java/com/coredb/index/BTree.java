@@ -232,6 +232,48 @@ public final class BTree {
     }
 
     /**
+     * Deletes a key from the B+ tree.
+     *
+     * <p>This removes the entry from the appropriate leaf page. The operation:
+     * <ul>
+     *   <li>Descends from root to the leaf containing the key</li>
+     *   <li>Removes the entry from the leaf's ItemId array</li>
+     *   <li>Writes the modified page back</li>
+     * </ul>
+     *
+     * <p>This implementation matches PostgreSQL's behavior:
+     * <ul>
+     *   <li>No parent adjustment (separators may become stale - this is acceptable)</li>
+     *   <li>No sibling redistribution</li>
+     *   <li>No page merge on delete</li>
+     *   <li>Empty leaves remain in the chain</li>
+     * </ul>
+     *
+     * <p>Page recycling is deferred to VACUUM.</p>
+     *
+     * @param key the key to delete
+     * @return true if the key was found and deleted, false if not found
+     * @throws IOException if page operations fail
+     */
+    public boolean delete(long key) throws IOException {
+        // Descend to the appropriate leaf page
+        int leafPageId = descendToLeaf(key);
+
+        // Delete from the leaf
+        Page page = indexFile.readPage(leafPageId);
+        BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(page));
+
+        boolean deleted = leaf.delete(key);
+
+        if (deleted) {
+            // Write the modified page back
+            indexFile.writePage(leaf.layout().page());
+        }
+
+        return deleted;
+    }
+
+    /**
      * Inserts a (key, RecordId) pair into the B+ tree.
      *
      * <p>If the key already exists, throws IllegalStateException.

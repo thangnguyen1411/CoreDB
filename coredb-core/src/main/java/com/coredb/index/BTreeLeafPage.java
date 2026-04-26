@@ -352,6 +352,45 @@ public final class BTreeLeafPage {
     }
 
     /**
+     * Deletes an entry from the leaf page.
+     *
+     * <p>This performs an in-page deletion by:
+     * <ul>
+     *   <li>Locating the slot via binary search</li>
+     *   <li>Shifting all ItemIds after the slot left by one position</li>
+     *   <li>Decrementing pdLower by 4 (one ItemId removed)</li>
+     * </ul>
+     *
+     * <p>The tuple data is left in place (lazy deletion). This matches PostgreSQL's
+     * approach - the ItemId array is the authority on which entries are live.</p>
+     *
+     * <p>Empty leaves remain in the chain. Page recycling is deferred to VACUUM.</p>
+     *
+     * @param key the key to delete
+     * @return true if the key was found and deleted, false if not found
+     */
+    public boolean delete(long key) {
+        int slot = layout.searchKey(key);
+        if (slot < 0) {
+            return false; // Key not found
+        }
+
+        int count = layout.entryCount();
+
+        // Shift all ItemIds after the slot left by one position
+        for (int i = slot; i < count - 1; i++) {
+            int itemId = layout.readItemId(i + 1);
+            layout.writeItemId(i, itemId);
+        }
+
+        // Update pdLower to reflect the removed ItemId slot
+        short newLower = (short) (layout.pdLower() - 4); // 4 bytes per ItemId
+        layout.setPdLower(newLower);
+
+        return true;
+    }
+
+    /**
      * Simple holder for key/rid pairs during split.
      */
     private record Entry(long key, RecordId rid) {

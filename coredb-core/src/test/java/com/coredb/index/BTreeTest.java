@@ -1,6 +1,7 @@
 package com.coredb.index;
 
 import com.coredb.heap.RecordId;
+import com.coredb.page.Page;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -745,5 +746,338 @@ class BTreeTest {
         // (actual lazy loading is hard to test without mocking)
 
         indexFile.close();
+    }
+
+    // ============================================================================
+    // Delete Tests
+    // ============================================================================
+
+    @Test
+    void delete_existingKey_returnsTrueAndKeyNotSearchable() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        tree.insert(42L, new RecordId(1, 0));
+
+        boolean deleted = tree.delete(42L);
+
+        assertThat(deleted).isTrue();
+        assertThat(tree.search(42L)).isEmpty();
+
+        indexFile.close();
+    }
+
+    @Test
+    void delete_missingKey_returnsFalse() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        tree.insert(10L, new RecordId(1, 0));
+        tree.insert(30L, new RecordId(1, 1));
+
+        boolean deleted = tree.delete(20L);
+
+        assertThat(deleted).isFalse();
+        // Other keys should still be present
+        assertThat(tree.search(10L)).isPresent();
+        assertThat(tree.search(30L)).isPresent();
+
+        indexFile.close();
+    }
+
+    @Test
+    void delete_fromEmptyTree_returnsFalse() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        boolean deleted = tree.delete(42L);
+
+        assertThat(deleted).isFalse();
+
+        indexFile.close();
+    }
+
+    @Test
+    void delete_multipleKeys_otherKeysStillSearchable() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        // Insert 100 keys
+        for (int i = 0; i < 100; i++) {
+            tree.insert((long) i, new RecordId(i + 1, 0));
+        }
+
+        // Delete every third key
+        for (int i = 0; i < 100; i += 3) {
+            assertThat(tree.delete((long) i)).isTrue();
+        }
+
+        // Verify deleted keys are gone
+        for (int i = 0; i < 100; i += 3) {
+            assertThat(tree.search((long) i))
+                .as("Key %d should be deleted", i)
+                .isEmpty();
+        }
+
+        // Verify other keys are still present
+        for (int i = 1; i < 100; i++) {
+            if (i % 3 != 0) {
+                assertThat(tree.search((long) i))
+                    .as("Key %d should still be present", i)
+                    .isPresent();
+            }
+        }
+
+        indexFile.close();
+    }
+
+    @Test
+    void delete_afterReopen_stillWorks() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+
+        // Create and populate tree
+        {
+            IndexFile indexFile = IndexFile.create(indexPath, 1000);
+            BTree tree = BTree.create(indexFile);
+
+            for (int i = 0; i < 100; i++) {
+                tree.insert((long) i, new RecordId(i + 1, 0));
+            }
+
+            indexFile.close();
+        }
+
+        // Reopen and delete some keys
+        {
+            IndexFile indexFile = IndexFile.open(indexPath, 1000);
+            BTree tree = BTree.open(indexFile);
+
+            // Delete odd keys
+            for (int i = 1; i < 100; i += 2) {
+                assertThat(tree.delete((long) i)).isTrue();
+            }
+
+            // Verify odd keys are gone
+            for (int i = 1; i < 100; i += 2) {
+                assertThat(tree.search((long) i)).isEmpty();
+            }
+
+            // Verify even keys are still present
+            for (int i = 0; i < 100; i += 2) {
+                assertThat(tree.search((long) i)).isPresent();
+            }
+
+            indexFile.close();
+        }
+    }
+
+    @Test
+    void delete_andReinsertSameKey_works() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        tree.insert(42L, new RecordId(1, 0));
+        assertThat(tree.search(42L)).hasValue(new RecordId(1, 0));
+
+        tree.delete(42L);
+        assertThat(tree.search(42L)).isEmpty();
+
+        tree.insert(42L, new RecordId(2, 5));
+        assertThat(tree.search(42L)).hasValue(new RecordId(2, 5));
+
+        indexFile.close();
+    }
+
+    /**
+     * Insert 1,000 keys, delete the odd-numbered ones,
+     * verify even keys still findable, verify range-scan emits exactly the evens,
+     * verify leaf chain unchanged in length.
+     */
+    @Test
+    void deliverable_thousandKeysDeleteOdds() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        // Insert 1,000 keys
+        for (int i = 0; i < 1000; i++) {
+            tree.insert((long) i, new RecordId(i + 1, i % 100));
+        }
+
+        // Count pages before delete (to verify chain length unchanged)
+        int pagesBeforeDelete = countLeafPages(tree, indexFile);
+
+        // Delete odd-numbered keys
+        for (int i = 1; i < 1000; i += 2) {
+            boolean deleted = tree.delete((long) i);
+            assertThat(deleted)
+                .as("Odd key %d should be deleted", i)
+                .isTrue();
+        }
+
+        // Verify even keys still findable
+        for (int i = 0; i < 1000; i += 2) {
+            Optional<RecordId> result = tree.search((long) i);
+            assertThat(result)
+                .as("Even key %d should still be findable", i)
+                .isPresent();
+            assertThat(result.get()).isEqualTo(new RecordId(i + 1, i % 100));
+        }
+
+        // Verify odd keys are gone
+        for (int i = 1; i < 1000; i += 2) {
+            assertThat(tree.search((long) i))
+                .as("Odd key %d should be deleted", i)
+                .isEmpty();
+        }
+
+        // Range scan should emit exactly the evens
+        Iterator<Map.Entry<Long, RecordId>> iter = tree.rangeScan(0L, 999L);
+        List<Long> rangeKeys = new ArrayList<>();
+        while (iter.hasNext()) {
+            rangeKeys.add(iter.next().getKey());
+        }
+
+        // Should have exactly 500 even keys
+        assertThat(rangeKeys).hasSize(500);
+
+        // All should be even
+        for (Long key : rangeKeys) {
+            assertThat(key % 2).as("Key %d should be even", key).isEqualTo(0);
+        }
+
+        // Keys should be in sorted order
+        for (int i = 0; i < rangeKeys.size() - 1; i++) {
+            assertThat(rangeKeys.get(i)).isLessThan(rangeKeys.get(i + 1));
+        }
+
+        // Leaf chain unchanged in length (no page merges)
+        int pagesAfterDelete = countLeafPages(tree, indexFile);
+        assertThat(pagesAfterDelete)
+            .as("Leaf chain length should be unchanged (no merges)")
+            .isEqualTo(pagesBeforeDelete);
+
+        indexFile.close();
+    }
+
+    @Test
+    void rangeScan_afterDeletes_returnsOnlyRemainingKeys() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        // Insert keys 0-99
+        for (int i = 0; i < 100; i++) {
+            tree.insert((long) i, new RecordId(i + 1, 0));
+        }
+
+        // Delete keys 30-69
+        for (int i = 30; i < 70; i++) {
+            tree.delete((long) i);
+        }
+
+        // Range scan should skip deleted keys
+        Iterator<Map.Entry<Long, RecordId>> iter = tree.rangeScan(0L, 99L);
+        List<Long> keys = new ArrayList<>();
+        while (iter.hasNext()) {
+            keys.add(iter.next().getKey());
+        }
+
+        // Should have 60 keys (0-29 and 70-99, deleted 30-69 which is 40 keys)
+        assertThat(keys).hasSize(60);
+        assertThat(keys.get(0)).isEqualTo(0L);
+        assertThat(keys.get(29)).isEqualTo(29L);
+        assertThat(keys.get(30)).isEqualTo(70L);
+        assertThat(keys.get(59)).isEqualTo(99L);
+
+        indexFile.close();
+    }
+
+    @Test
+    void delete_withManySplits_treeRemainsValid() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+        BTree tree = BTree.create(indexFile);
+
+        // Insert many keys to cause splits (at least 3 levels)
+        int keyCount = 10000;
+        for (int i = 0; i < keyCount; i++) {
+            tree.insert((long) i, new RecordId(i + 1, 0));
+        }
+
+        int height = tree.treeHeight();
+        // Height should be at least 1 (root is internal with leaf children)
+        // or 2 if the root itself split
+        assertThat(height).isGreaterThanOrEqualTo(1);
+
+        // Delete half the keys
+        for (int i = 0; i < keyCount; i += 2) {
+            boolean deleted = tree.delete((long) i);
+            assertThat(deleted)
+                .as("Key %d should be deleted", i)
+                .isTrue();
+        }
+
+        // Verify remaining keys (odd keys)
+        for (int i = 1; i < keyCount; i += 2) {
+            Optional<RecordId> result = tree.search((long) i);
+            assertThat(result)
+                .as("Key %d should still be present", i)
+                .isPresent();
+        }
+
+        // Verify deleted keys are gone
+        for (int i = 0; i < keyCount; i += 2) {
+            assertThat(tree.search((long) i))
+                .as("Key %d should be deleted", i)
+                .isEmpty();
+        }
+
+        // Full range scan should return exactly the odd keys
+        Iterator<Map.Entry<Long, RecordId>> iter = tree.rangeScan(0L, (long) (keyCount - 1));
+        List<Long> rangeKeys = new ArrayList<>();
+        while (iter.hasNext()) {
+            rangeKeys.add(iter.next().getKey());
+        }
+
+        assertThat(rangeKeys).hasSize(keyCount / 2);
+        for (Long key : rangeKeys) {
+            assertThat(key % 2).as("Key %d should be odd", key).isEqualTo(1);
+        }
+
+        indexFile.close();
+    }
+
+    /**
+     * Helper method to count leaf pages by traversing the leaf chain.
+     */
+    private int countLeafPages(BTree tree, IndexFile indexFile) throws IOException {
+        // Find the leftmost leaf by going to the lowest key
+        int currentPageId = tree.rootPageId();
+        int height = tree.treeHeight();
+
+        // Descend to find the leftmost leaf
+        for (int level = height; level > 0; level--) {
+            Page page = indexFile.readPage(currentPageId);
+            BTreeInternalPage internal = BTreeInternalPage.of(IndexPageLayout.of(page));
+            // Route to the leftmost child (key less than minimum)
+            currentPageId = internal.routeChildFor(Long.MIN_VALUE);
+        }
+
+        // Now traverse the leaf chain
+        int count = 0;
+        while (currentPageId != 0) {
+            count++;
+            Page page = indexFile.readPage(currentPageId);
+            BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(page));
+            currentPageId = leaf.btpoNext();
+        }
+
+        return count;
     }
 }
