@@ -226,6 +226,13 @@ public final class IndexFile implements AutoCloseable {
         return channel.size();
     }
 
+    public void flush() throws IOException {
+        if (channel != null) {
+            updateMetaPage();
+            channel.force(true);
+        }
+    }
+
     @Override
     public void close() throws IOException {
         updateMetaPage();

@@ -40,7 +40,6 @@ public class BTreeStorageEngine implements StorageEngine {
     private HeapFile heap;
     private IndexFile indexFile;
     private BTree pkIndex;
-    private TableMeta meta;
     private int pkColumnIndex;
 
     BTreeStorageEngine(CoreDBConfig config) {
@@ -49,8 +48,6 @@ public class BTreeStorageEngine implements StorageEngine {
 
     @Override
     public void open(Path dataDir, TableMeta meta) throws IOException {
-        this.meta = meta;
-
         // Resolve PK column index for extracting PK values from rows
         Schema schema = meta.schema();
         this.pkColumnIndex = schema.indexOf(meta.pkColumn());
@@ -95,7 +92,6 @@ public class BTreeStorageEngine implements StorageEngine {
             heap = null;
         }
         pkIndex = null;
-        meta = null;
     }
 
     @Override
@@ -242,21 +238,10 @@ public class BTreeStorageEngine implements StorageEngine {
     @Override
     public void flush() throws IOException {
         if (heap != null) {
-            // HeapFile.close() handles fsync
-            heap.close();
-            // Re-open for continued use
-            Path heapPath = heap.tablePath();
-            int oid = heap.oid();
-            Schema schema = meta.schema();
-            heap = HeapFile.open(heapPath, oid, schema);
+            heap.flush();
         }
         if (indexFile != null) {
-            indexFile.close();
-            // Re-open for continued use
-            Path indexPath = indexFile.indexPath();
-            int oid = indexFile.oid();
-            indexFile = IndexFile.open(indexPath, oid);
-            pkIndex = BTree.open(indexFile);
+            indexFile.flush();
         }
     }
 

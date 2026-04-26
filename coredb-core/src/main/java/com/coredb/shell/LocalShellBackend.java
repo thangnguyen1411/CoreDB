@@ -695,11 +695,12 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
 
             Row row = Row.of(values);
 
-            // Open engine and insert
+            // Open engine and insert/update
             try (StorageEngine engine = StorageEngineFactory.create(db.config().engineType(), db.config())) {
                 engine.open(db.dataPath(), meta);
+                boolean isUpdate = engine.get(pk).isPresent();
                 engine.put(pk, row);
-                return "ok (inserted)";
+                return isUpdate ? "ok (updated)" : "ok (inserted)";
             }
 
         } catch (IllegalStateException e) {
