@@ -7,6 +7,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.AbstractMap;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Optional;
 
 /**
@@ -109,6 +113,122 @@ public final class BTree {
         Page page = indexFile.readPage(leafPageId);
         BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(page));
         return leaf.search(key);
+    }
+
+    /**
+     * Performs a range scan over the B+ tree, returning all keys in [from, to].
+     *
+     * <p>This implementation uses the leaf chain (btpo_next pointers) to traverse
+     * leaves horizontally without re-descending the tree. This is the standard
+     * PostgreSQL approach for range scans.</p>
+     *
+     * <p>The iterator is lazy: it only loads the next leaf page when needed.</p>
+     *
+     * @param from the starting key (inclusive)
+     * @param to the ending key (inclusive)
+     * @return an iterator over (key, RecordId) pairs in sorted order
+     * @throws IOException if page read fails
+     */
+    public Iterator<Map.Entry<Long, RecordId>> rangeScan(long from, long to) throws IOException {
+        if (from > to) {
+            return java.util.Collections.emptyIterator();
+        }
+
+        return new RangeScanIterator(from, to);
+    }
+
+    /**
+     * Iterator implementation for range scans using the leaf chain.
+     *
+     * <p>Algorithm:
+     * <ol>
+     *   <li>Descend once to find the leaf containing `from`</li>
+     *   <li>Within that leaf, find first slot with key >= from</li>
+     *   <li>Iterate forward through entries</li>
+     *   <li>When falling off the end of a leaf, follow btpo_next</li>
+     *   <li>Stop when key > to or btpo_next == 0</li>
+     * </ol>
+     */
+    private class RangeScanIterator implements Iterator<Map.Entry<Long, RecordId>> {
+        private final long to;
+        private BTreeLeafPage currentLeaf;
+        private int currentSlot;
+        private Map.Entry<Long, RecordId> nextEntry;
+        private boolean hasNext;
+
+        RangeScanIterator(long from, long to) throws IOException {
+            this.to = to;
+            this.currentLeaf = null;
+            this.currentSlot = 0;
+            this.nextEntry = null;
+            this.hasNext = false;
+
+            // Descend to the leaf containing 'from'
+            int leafPageId = descendToLeaf(from);
+            Page page = indexFile.readPage(leafPageId);
+            this.currentLeaf = BTreeLeafPage.of(IndexPageLayout.of(page));
+
+            // Find first slot with key >= from
+            this.currentSlot = currentLeaf.findFirstSlotGe(from);
+
+            // Pre-fetch first entry
+            advance();
+        }
+
+        private void advance() throws IOException {
+            while (true) {
+                // Check if we have more entries on current leaf
+                if (currentSlot < currentLeaf.entryCount()) {
+                    long key = currentLeaf.keyAt(currentSlot);
+                    if (key > to) {
+                        // Past our range, we're done
+                        hasNext = false;
+                        nextEntry = null;
+                        return;
+                    }
+                    // Found next entry in range
+                    RecordId rid = currentLeaf.ridAt(currentSlot);
+                    nextEntry = new AbstractMap.SimpleEntry<>(key, rid);
+                    hasNext = true;
+                    currentSlot++;
+                    return;
+                }
+
+                // Need to move to next leaf
+                int nextPageId = currentLeaf.btpoNext();
+                if (nextPageId == 0) {
+                    // No more leaves, we're done
+                    hasNext = false;
+                    nextEntry = null;
+                    return;
+                }
+
+                // Load next leaf
+                Page nextPage = indexFile.readPage(nextPageId);
+                currentLeaf = BTreeLeafPage.of(IndexPageLayout.of(nextPage));
+                currentSlot = 0;
+                // Continue loop to check this new leaf
+            }
+        }
+
+        @Override
+        public boolean hasNext() {
+            return hasNext;
+        }
+
+        @Override
+        public Map.Entry<Long, RecordId> next() {
+            if (!hasNext) {
+                throw new NoSuchElementException();
+            }
+            Map.Entry<Long, RecordId> result = nextEntry;
+            try {
+                advance();
+            } catch (IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+            return result;
+        }
     }
 
     /**
