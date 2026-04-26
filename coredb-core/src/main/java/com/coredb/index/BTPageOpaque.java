@@ -8,6 +8,11 @@ import java.nio.ByteBuffer;
 /**
  * B-tree page opaque data stored in the special area (pd_special) of index pages.
  *
+ * <p>In PostgreSQL terminology, "opaque" means access-method-specific data that
+ * the generic page layer doesn't understand — only the B-tree code interprets
+ * these bytes. This is where B-tree stores sibling pointers (for leaf chains)
+ * and tree level information.</p>
+ *
  * <p>PostgreSQL's BTPageOpaqueData provides sibling pointers and level information
  * for B-tree pages. This is stored in the "special space" at the end of the page,
  * accessed via pd_special.</p>
@@ -18,6 +23,9 @@ import java.nio.ByteBuffer;
  * bytes 4-7   btpo_next   right sibling page id (0 = none)
  * bytes 8-11  btpo_level  0 = leaf, 1+ = internal
  * </pre>
+ *
+ * <p>Note: 4 bytes for level is overkill (1 byte would suffice for practical trees),
+ * but we match PostgreSQL's BTPageOpaqueData layout exactly for alignment.</p>
  *
  * <p>For index pages: pd_special = PAGE_SIZE - 12</p>
  */
