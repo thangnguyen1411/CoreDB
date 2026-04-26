@@ -1063,19 +1063,23 @@ class BTreeTest {
 
         // Descend to find the leftmost leaf
         for (int level = height; level > 0; level--) {
-            Page page = indexFile.readPage(currentPageId);
+            IndexFile.PinnedPage pinned = indexFile.readPage(currentPageId);
+            Page page = pinned.page();
             BTreeInternalPage internal = BTreeInternalPage.of(IndexPageLayout.of(page));
             // Route to the leftmost child (key less than minimum)
             currentPageId = internal.routeChildFor(Long.MIN_VALUE);
+            pinned.unpin(false);
         }
 
         // Now traverse the leaf chain
         int count = 0;
         while (currentPageId != 0) {
             count++;
-            Page page = indexFile.readPage(currentPageId);
+            IndexFile.PinnedPage pinned = indexFile.readPage(currentPageId);
+            Page page = pinned.page();
             BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(page));
             currentPageId = leaf.btpoNext();
+            pinned.unpin(false);
         }
 
         return count;

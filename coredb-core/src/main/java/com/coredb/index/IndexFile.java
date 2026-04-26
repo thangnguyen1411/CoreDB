@@ -243,14 +243,22 @@ public final class IndexFile implements AutoCloseable {
      * Holder for a pinned page and its buffer descriptor.
      * Callers must call unpin(dirty) when done to release the frame.
      */
-    public record PinnedPage(Page page, BufferDescriptor frame, BufferPool pool) {
+    public record PinnedPage(Page page, BufferDescriptor frame, BufferPool pool, java.nio.channels.FileChannel channel) {
         /**
-         * Unpins this page. If frame is null (bootstrap mode), this is a no-op.
+         * Unpins this page. If frame is null (bootstrap mode), writes to disk if dirty.
          * @param dirty true if the page was modified
          */
         public void unpin(boolean dirty) {
             if (frame != null && pool != null) {
                 pool.unpinPage(frame, dirty);
+            } else if (dirty && channel != null) {
+                // Bootstrap mode: write directly to disk and sync
+                try {
+                    PageIO.writePage(channel, page);
+                    channel.force(true);
+                } catch (java.io.IOException e) {
+                    throw new RuntimeException("Failed to write page in bootstrap mode", e);
+                }
             }
         }
     }
@@ -271,11 +279,11 @@ public final class IndexFile implements AutoCloseable {
         if (bufferPool != null) {
             BufferDescriptor frame = bufferPool.fetchPage(oid, pageId);
             Page page = Page.Factory.wrap(pageId, frame.page());
-            return new PinnedPage(page, frame, bufferPool);
+            return new PinnedPage(page, frame, bufferPool, null);
         } else {
             // Bootstrap/test mode: read directly from channel
             Page page = PageIO.readPage(channel, pageId);
-            return new PinnedPage(page, null, null);
+            return new PinnedPage(page, null, null, channel);
         }
     }
 
@@ -321,7 +329,7 @@ public final class IndexFile implements AutoCloseable {
 
             // Return pinned page - caller must unpin when done
             Page page = Page.Factory.wrap(newPageId, newFrame.page());
-            PinnedPage pinned = new PinnedPage(page, newFrame, bufferPool);
+            PinnedPage pinned = new PinnedPage(page, newFrame, bufferPool, null);
 
             // Update and persist nextPageId in meta page
             nextPageId = newPageId + 1;
@@ -339,7 +347,7 @@ public final class IndexFile implements AutoCloseable {
             updateMetaPage();
 
             log.debug("Allocated page id={} in index file oid={}", newPageId, oid);
-            return new PinnedPage(layout.page(), null, null);
+            return new PinnedPage(layout.page(), null, null, channel);
         }
     }
 

@@ -289,10 +289,12 @@ public final class HeapFile implements AutoCloseable {
         }
 
         // 4. ALLOCATE NEW PAGE: No existing page has room (or FSM kept lying)
-        Page newPage = allocateNewPage();
+        PinnedPage newPinned = allocateNewPage();
+        Page newPage = newPinned.page();
         HeapPage heapPage = new HeapPage(newPage);
         RecordId rid = heapPage.insert(dataBytes, natts, nullBitmap);
-        // allocateNewPage() already unpins the frame, just update FSM
+        // Unpin the new page (dirty since we inserted data)
+        newPinned.unpin(true);
         fsm.updatePage(newPage.pageId(), heapPage.freeBytes());
         return rid;
     }
@@ -432,28 +434,29 @@ public final class HeapFile implements AutoCloseable {
      * Allocates a new page at the end of the file.
      * Updates the meta page to persist the new nextPageId.
      * Grows the FSM to track the new page if needed.
+     * The returned PinnedPage must be unpinned by the caller after modifications.
      *
-     * @return a new HEAP page with the freshly allocated pageId
+     * @return a PinnedPage containing the newly allocated HEAP page
      * @throws IOException if allocation fails
      */
-    private Page allocateNewPage() throws IOException {
+    private PinnedPage allocateNewPage() throws IOException {
         int newPageId = nextPageId;
 
-        Page newPage;
+        PinnedPage pinned;
         if (bufferPool != null) {
             // Buffer pool mode: get new page from buffer pool
             BufferDescriptor newFrame = bufferPool.fetchNewPage(oid, newPageId);
-            newPage = Page.Factory.wrap(newPageId, newFrame.page());
+            Page newPage = Page.Factory.wrap(newPageId, newFrame.page());
 
             // Initialize as heap page
             newPage.buffer().putInt(8, PageType.HEAP.ordinal());
 
-            // Unpin (page stays dirty, will be flushed later)
-            bufferPool.unpinPage(newFrame, true);
+            // Return pinned page - caller must unpin after modifying
+            pinned = new PinnedPage(newPage, newFrame, bufferPool, null);
         } else {
-            // Bootstrap mode: write directly to channel
-            newPage = Page.Factory.allocateHeapPage(newPageId);
-            PageIO.writePage(channel, newPage);
+            // Bootstrap mode: create page in memory, caller will write via unpin
+            Page newPage = Page.Factory.allocateHeapPage(newPageId);
+            pinned = new PinnedPage(newPage, null, null, channel);
         }
 
         // Update and persist nextPageId in meta page
@@ -468,21 +471,29 @@ public final class HeapFile implements AutoCloseable {
         }
 
         log.debug("Allocated page id={} in heap file oid={}", newPageId, oid);
-        return newPage;
+        return pinned;
     }
 
     /**
      * Holder for a pinned page and its buffer descriptor.
      * Callers must call unpin(dirty) when done to release the frame.
      */
-    public record PinnedPage(Page page, BufferDescriptor frame, BufferPool pool) {
+    public record PinnedPage(Page page, BufferDescriptor frame, BufferPool pool, java.nio.channels.FileChannel channel) {
         /**
-         * Unpins this page. If frame is null (bootstrap mode), this is a no-op.
+         * Unpins this page. If frame is null (bootstrap mode), writes to disk if dirty.
          * @param dirty true if the page was modified
          */
         public void unpin(boolean dirty) {
             if (frame != null && pool != null) {
                 pool.unpinPage(frame, dirty);
+            } else if (dirty && channel != null) {
+                // Bootstrap mode: write directly to disk and sync
+                try {
+                    PageIO.writePage(channel, page);
+                    channel.force(true);
+                } catch (java.io.IOException e) {
+                    throw new RuntimeException("Failed to write page in bootstrap mode", e);
+                }
             }
         }
     }
@@ -504,11 +515,11 @@ public final class HeapFile implements AutoCloseable {
         if (bufferPool != null) {
             BufferDescriptor frame = bufferPool.fetchPage(oid, pageId);
             Page page = Page.Factory.wrap(pageId, frame.page());
-            return new PinnedPage(page, frame, bufferPool);
+            return new PinnedPage(page, frame, bufferPool, null);
         } else {
             // Bootstrap mode: read directly from channel, no frame to track
             Page page = PageIO.readPage(channel, pageId);
-            return new PinnedPage(page, null, null);
+            return new PinnedPage(page, null, null, channel);
         }
     }
 
