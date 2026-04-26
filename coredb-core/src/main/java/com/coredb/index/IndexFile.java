@@ -300,38 +300,47 @@ public final class IndexFile implements AutoCloseable {
     /**
      * Allocates a new page at the end of the file.
      * Updates the meta page to persist the new nextPageId.
+     * The returned PinnedPage must be unpinned by the caller when done.
      *
      * @param type the type of page to allocate (INDEX_LEAF or INDEX_INTERNAL)
-     * @return a new page with the freshly allocated pageId
+     * @return a PinnedPage containing the newly allocated page
      * @throws IOException if allocation fails
      */
-    public Page allocateNewPage(PageType type) throws IOException {
+    public PinnedPage allocateNewPage(PageType type) throws IOException {
         int newPageId = nextPageId;
-
-        IndexPageLayout layout = IndexPageLayout.createEmpty(newPageId, type);
 
         if (bufferPool != null) {
             // Get new page from buffer pool
             BufferDescriptor newFrame = bufferPool.fetchNewPage(oid, newPageId);
 
-            // Copy the initialized content to the frame buffer
+            // Initialize the frame buffer with empty page structure
+            IndexPageLayout layout = IndexPageLayout.createEmpty(newPageId, type);
             newFrame.page().clear();
             newFrame.page().put(layout.page().buffer().duplicate());
             newFrame.page().flip();
 
-            // Unpin (page stays dirty, will be flushed later)
-            bufferPool.unpinPage(newFrame, true);
+            // Return pinned page - caller must unpin when done
+            Page page = Page.Factory.wrap(newPageId, newFrame.page());
+            PinnedPage pinned = new PinnedPage(page, newFrame, bufferPool);
+
+            // Update and persist nextPageId in meta page
+            nextPageId = newPageId + 1;
+            updateMetaPage();
+
+            log.debug("Allocated page id={} in index file oid={}", newPageId, oid);
+            return pinned;
         } else {
             // Bootstrap/test mode: write directly to channel
+            IndexPageLayout layout = IndexPageLayout.createEmpty(newPageId, type);
             PageIO.writePage(channel, layout.page());
+
+            // Update and persist nextPageId in meta page
+            nextPageId = newPageId + 1;
+            updateMetaPage();
+
+            log.debug("Allocated page id={} in index file oid={}", newPageId, oid);
+            return new PinnedPage(layout.page(), null, null);
         }
-
-        // Update and persist nextPageId in meta page
-        nextPageId = newPageId + 1;
-        updateMetaPage();
-
-        log.debug("Allocated page id={} in index file oid={}", newPageId, oid);
-        return layout.page();
     }
 
     /**

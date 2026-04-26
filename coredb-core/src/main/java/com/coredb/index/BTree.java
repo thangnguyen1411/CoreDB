@@ -110,9 +110,12 @@ public final class BTree {
         int leafPageId = descendToLeaf(key);
 
         // Search in the leaf
-        Page page = indexFile.readPage(leafPageId);
+        IndexFile.PinnedPage pinned = indexFile.readPage(leafPageId);
+        Page page = pinned.page();
         BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(page));
-        return leaf.search(key);
+        Optional<RecordId> result = leaf.search(key);
+        pinned.unpin(false);
+        return result;
     }
 
     /**
@@ -149,12 +152,15 @@ public final class BTree {
      *   <li>Stop when key > to or btpo_next == 0</li>
      * </ol>
      */
-    private class RangeScanIterator implements Iterator<Map.Entry<Long, RecordId>> {
+    private class RangeScanIterator implements Iterator<Map.Entry<Long, RecordId>>, AutoCloseable {
         private final long to;
         private BTreeLeafPage currentLeaf;
         private int currentSlot;
         private Map.Entry<Long, RecordId> nextEntry;
         private boolean hasNext;
+
+        private IndexFile.PinnedPage currentPinned;
+        private boolean closed = false;
 
         RangeScanIterator(long from, long to) throws IOException {
             this.to = to;
@@ -162,10 +168,13 @@ public final class BTree {
             this.currentSlot = 0;
             this.nextEntry = null;
             this.hasNext = false;
+            this.currentPinned = null;
+            this.closed = false;
 
             // Descend to the leaf containing 'from'
             int leafPageId = descendToLeaf(from);
-            Page page = indexFile.readPage(leafPageId);
+            currentPinned = indexFile.readPage(leafPageId);
+            Page page = currentPinned.page();
             this.currentLeaf = BTreeLeafPage.of(IndexPageLayout.of(page));
 
             // Find first slot with key >= from
@@ -181,7 +190,11 @@ public final class BTree {
                 if (currentSlot < currentLeaf.entryCount()) {
                     long key = currentLeaf.keyAt(currentSlot);
                     if (key > to) {
-                        // Past our range, we're done
+                        // Past our range, we're done - unpin the last page
+                        if (currentPinned != null) {
+                            currentPinned.unpin(false);
+                            currentPinned = null;
+                        }
                         hasNext = false;
                         nextEntry = null;
                         return;
@@ -197,14 +210,24 @@ public final class BTree {
                 // Need to move to next leaf
                 int nextPageId = currentLeaf.btpoNext();
                 if (nextPageId == 0) {
-                    // No more leaves, we're done
+                    // No more leaves, we're done - unpin the last page
+                    if (currentPinned != null) {
+                        currentPinned.unpin(false);
+                        currentPinned = null;
+                    }
                     hasNext = false;
                     nextEntry = null;
                     return;
                 }
 
+                // Unpin previous leaf before loading next
+                if (currentPinned != null) {
+                    currentPinned.unpin(false);
+                }
+
                 // Load next leaf
-                Page nextPage = indexFile.readPage(nextPageId);
+                currentPinned = indexFile.readPage(nextPageId);
+                Page nextPage = currentPinned.page();
                 currentLeaf = BTreeLeafPage.of(IndexPageLayout.of(nextPage));
                 currentSlot = 0;
                 // Continue loop to check this new leaf
@@ -228,6 +251,15 @@ public final class BTree {
                 throw new java.io.UncheckedIOException(e);
             }
             return result;
+        }
+
+        @Override
+        public void close() {
+            if (!closed && currentPinned != null) {
+                currentPinned.unpin(false);
+                currentPinned = null;
+            }
+            closed = true;
         }
     }
 
@@ -260,14 +292,17 @@ public final class BTree {
         int leafPageId = descendToLeaf(key);
 
         // Delete from the leaf
-        Page page = indexFile.readPage(leafPageId);
+        IndexFile.PinnedPage pinned = indexFile.readPage(leafPageId);
+        Page page = pinned.page();
         BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(page));
 
         boolean deleted = leaf.delete(key);
 
         if (deleted) {
-            // Write the modified page back
-            indexFile.writePage(leaf.layout().page());
+            // Mark page dirty and unpin
+            pinned.unpin(true);
+        } else {
+            pinned.unpin(false);
         }
 
         return deleted;
@@ -290,61 +325,71 @@ public final class BTree {
         int leafPageId = descendToLeafWithPath(key);
 
         // Try to insert into the leaf
-        Page page = indexFile.readPage(leafPageId);
+        IndexFile.PinnedPage pinned = indexFile.readPage(leafPageId);
+        Page page = pinned.page();
         BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(page));
 
         InsertResult result = leaf.insert(key, rid);
 
         if (result == InsertResult.OK) {
-            // Simple case: insert succeeded, write the page back
-            indexFile.writePage(leaf.layout().page());
+            // Simple case: insert succeeded, unpin dirty
+            pinned.unpin(true);
             return;
         }
 
         if (result == InsertResult.DUPLICATE_KEY) {
+            pinned.unpin(false);
             throw new IllegalStateException("Duplicate key: " + key);
         }
 
         // result == InsertResult.FULL: need to split
-        handleLeafSplit(leaf, key, rid);
+        // Note: handleLeafSplit will unpin the page
+        handleLeafSplit(leaf, pinned, key, rid);
     }
 
     /**
      * Handles a leaf page split and propagates the split upward.
      *
      * @param leaf the full leaf page that needs splitting
+     * @param leafPinned the pinned page for the leaf (will be unpinned by this method)
      * @param key the key to insert
      * @param rid the RecordId to insert
      * @throws IOException if file operations fail
      */
-    private void handleLeafSplit(BTreeLeafPage leaf, long key, RecordId rid) throws IOException {
+    private void handleLeafSplit(BTreeLeafPage leaf, IndexFile.PinnedPage leafPinned, long key, RecordId rid) throws IOException {
         // Split the leaf page
         SplitResult splitResult = leaf.split(indexFile);
 
         // Determine which page to insert into
         int targetPageId;
         BTreeLeafPage targetPage;
+        IndexFile.PinnedPage targetPinned = null;
 
         if (key < splitResult.separatorKey()) {
             // Insert into left (original) page
             targetPageId = leaf.pageId();
             targetPage = leaf;
+            targetPinned = leafPinned; // Reuse the same pinned page
         } else {
             // Insert into right (new) page
             targetPageId = splitResult.newRightPageId();
-            Page rightPageData = indexFile.readPage(targetPageId);
+            targetPinned = indexFile.readPage(targetPageId);
+            Page rightPageData = targetPinned.page();
             targetPage = BTreeLeafPage.of(IndexPageLayout.of(rightPageData));
+            // Unpin the original leaf since we're not using it
+            leafPinned.unpin(true);
         }
 
         // Insert the key into the appropriate page
         InsertResult insertResult = targetPage.insert(key, rid);
         if (insertResult != InsertResult.OK) {
             // This should not happen - new page should have room
+            targetPinned.unpin(true);
             throw new IllegalStateException("Failed to insert into split page: " + insertResult);
         }
 
-        // Write the target page
-        indexFile.writePage(targetPage.layout().page());
+        // Unpin the target page (dirty)
+        targetPinned.unpin(true);
 
         // Propagate the split upward
         propagateSplit(
@@ -368,20 +413,22 @@ public final class BTree {
             pathDepth--;
             int parentPageId = pathStack[pathDepth];
 
-            Page parentPageData = indexFile.readPage(parentPageId);
+            IndexFile.PinnedPage parentPinned = indexFile.readPage(parentPageId);
+            Page parentPageData = parentPinned.page();
             BTreeInternalPage parent = BTreeInternalPage.of(IndexPageLayout.of(parentPageData));
 
             // Try to insert the separator into the parent
             InsertResult result = parent.insertSeparator(separatorKey, rightPageId);
 
             if (result == InsertResult.OK) {
-                // Parent had room, write it and we're done
-                indexFile.writePage(parent.layout().page());
+                // Parent had room, unpin dirty and we're done
+                parentPinned.unpin(true);
                 return;
             }
 
             if (result == InsertResult.DUPLICATE_KEY) {
                 // This shouldn't happen during normal split propagation
+                parentPinned.unpin(false);
                 throw new IllegalStateException("Duplicate separator key during split propagation: " + separatorKey);
             }
 
@@ -400,18 +447,25 @@ public final class BTree {
                 BTreeInternalPage leftPage = parent;
                 InsertResult insertResult = leftPage.insertSeparator(separatorKey, rightPageId);
                 if (insertResult != InsertResult.OK) {
+                    parentPinned.unpin(true);
                     throw new IllegalStateException("Failed to insert into split internal page: " + insertResult);
                 }
-                indexFile.writePage(leftPage.layout().page());
+                // Unpin left page (original parent, modified)
+                parentPinned.unpin(true);
             } else {
                 // Insert into right page (new)
-                Page rightPageData = indexFile.readPage(newRightPageId);
+                IndexFile.PinnedPage rightPinned = indexFile.readPage(newRightPageId);
+                Page rightPageData = rightPinned.page();
                 BTreeInternalPage rightPage = BTreeInternalPage.of(IndexPageLayout.of(rightPageData));
                 InsertResult insertResult = rightPage.insertSeparator(separatorKey, rightPageId);
                 if (insertResult != InsertResult.OK) {
+                    rightPinned.unpin(true);
+                    parentPinned.unpin(true);
                     throw new IllegalStateException("Failed to insert into new internal page: " + insertResult);
                 }
-                indexFile.writePage(rightPage.layout().page());
+                // Unpin both pages
+                rightPinned.unpin(true);
+                parentPinned.unpin(true);
             }
 
             // Continue propagating with the promoted key
@@ -437,15 +491,16 @@ public final class BTree {
     private void createNewRoot(long separatorKey, int leftChild, int rightChild) throws IOException {
         // Allocate a new internal page at the new level
         int newLevel = treeHeight() + 1;
-        Page newRootPage = indexFile.allocateNewPage(PageType.INDEX_INTERNAL);
+        IndexFile.PinnedPage newRootPinned = indexFile.allocateNewPage(PageType.INDEX_INTERNAL);
+        Page newRootPage = newRootPinned.page();
         BTreeInternalPage newRoot = BTreeInternalPage.of(IndexPageLayout.of(newRootPage));
         newRoot.setBtpoLevel(newLevel);
 
         // Initialize with the two children
         newRoot.initializeWithChildren(leftChild, separatorKey, rightChild);
 
-        // Write the new root
-        indexFile.writePage(newRoot.layout().page());
+        // Unpin the new root (dirty) - modifications are in the buffer pool frame
+        newRootPinned.unpin(true);
 
         // Update the index file metadata
         indexFile.setRootPageId(newRoot.pageId());
@@ -467,9 +522,11 @@ public final class BTree {
 
         // Descend through internal levels
         for (int level = currentHeight; level > 0; level--) {
-            Page page = indexFile.readPage(currentPageId);
+            IndexFile.PinnedPage pinned = indexFile.readPage(currentPageId);
+            Page page = pinned.page();
             BTreeInternalPage internal = BTreeInternalPage.of(IndexPageLayout.of(page));
             currentPageId = internal.routeChildFor(key);
+            pinned.unpin(false); // Internal pages are read-only during descent
         }
 
         return currentPageId;
@@ -495,9 +552,11 @@ public final class BTree {
             }
             pathStack[pathDepth++] = currentPageId;
 
-            Page page = indexFile.readPage(currentPageId);
+            IndexFile.PinnedPage pinned = indexFile.readPage(currentPageId);
+            Page page = pinned.page();
             BTreeInternalPage internal = BTreeInternalPage.of(IndexPageLayout.of(page));
             currentPageId = internal.routeChildFor(key);
+            pinned.unpin(false); // Internal pages are read-only during descent
         }
 
         return currentPageId;

@@ -373,7 +373,8 @@ public final class BTreeInternalPage {
         int promotedChild = entries[splitPoint].childPageId;
 
         // Allocate new right page at same level
-        Page newPage = indexFile.allocateNewPage(PageType.INDEX_INTERNAL);
+        IndexFile.PinnedPage newPinned = indexFile.allocateNewPage(PageType.INDEX_INTERNAL);
+        Page newPage = newPinned.page();
         BTreeInternalPage rightPage = BTreeInternalPage.of(IndexPageLayout.of(newPage));
         rightPage.setBtpoLevel(this.btpoLevel());
 
@@ -402,9 +403,8 @@ public final class BTreeInternalPage {
             }
         }
 
-        // Write both pages
-        indexFile.writePage(rightPage.layout().page());
-        indexFile.writePage(this.layout().page());
+        // Unpin the new right page (modified)
+        newPinned.unpin(true);
 
         // Return the promoted key and both child page IDs
         return new InternalSplitResult(promotedKey, this.pageId(), rightPage.pageId());

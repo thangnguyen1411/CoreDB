@@ -292,7 +292,8 @@ public final class BTreeLeafPage {
         int splitPoint = (count + 1) / 2;
 
         // Allocate new right sibling page
-        Page newPage = indexFile.allocateNewPage(PageType.INDEX_LEAF);
+        IndexFile.PinnedPage newPinned = indexFile.allocateNewPage(PageType.INDEX_LEAF);
+        Page newPage = newPinned.page();
         BTreeLeafPage rightPage = BTreeLeafPage.of(IndexPageLayout.of(newPage));
 
         // Insert upper half entries into the new right page
@@ -333,19 +334,17 @@ public final class BTreeLeafPage {
             }
         }
 
-        // Write pages with proper fsync ordering per PostgreSQL:
-        // 1. Write and fsync the new right page first
-        indexFile.writePage(rightPage.layout.page());
+        // Unpin pages - modifications are in buffer pool frames
+        // The new right page was modified (entries inserted, pointers set)
+        newPinned.unpin(true);
 
-        // 2. Write and fsync this (left) page with updated btpo_next
-        indexFile.writePage(this.layout.page());
-
-        // 3. If there was a right sibling, update its btpo_prev
+        // If there was a right sibling, update its btpo_prev
         if (oldRightSibling != 0) {
-            com.coredb.page.Page oldRightPageData = indexFile.readPage(oldRightSibling);
+            IndexFile.PinnedPage oldRightPinned = indexFile.readPage(oldRightSibling);
+            com.coredb.page.Page oldRightPageData = oldRightPinned.page();
             BTreeLeafPage oldRightPage = BTreeLeafPage.of(IndexPageLayout.of(oldRightPageData));
             oldRightPage.setBtpoPrev(newRightPageId);
-            indexFile.writePage(oldRightPageData);
+            oldRightPinned.unpin(true);
         }
 
         return new SplitResult(separatorKey, newRightPageId);
