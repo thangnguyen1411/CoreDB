@@ -1,6 +1,7 @@
 package com.coredb.index;
 
 import com.coredb.heap.RecordId;
+import com.coredb.page.Page;
 import com.coredb.page.PageType;
 
 import java.util.Optional;
@@ -231,5 +232,115 @@ public final class BTreeLeafPage {
      */
     public void setBtpoNext(int next) {
         layout.setBtpoNext(next);
+    }
+
+    /**
+     * Splits this leaf page into two, allocating a new right sibling.
+     *
+     * <p>This method handles the mechanics of splitting a full leaf page:
+     * <ul>
+     *   <li>Allocates a new right-sibling page via {@link IndexFile#allocateNewPage}</li>
+     *   <li>Moves the upper half of entries to the new page</li>
+     *   <li>Maintains the doubly-linked sibling chain correctly</li>
+     *   <li>Returns the separator key for parent insertion</li>
+     * </ul>
+     *
+     * <p>Sibling pointer maintenance follows PostgreSQL's pattern:
+     * <pre>
+     * Before:  ... <-> L (full) <-> R_old <-> ...
+     * After:   ... <-> L         <-> R_new <-> R_old <-> ...
+     * </pre>
+     *
+     * <p>fsync ordering: The new page is written first and fsync'd before
+     * updating L's btpo_next and R_old's btpo_prev. This ensures that a
+     * crash between writes leaves the new page orphaned but not visible,
+     * which is recoverable by later vacuum.</p>
+     *
+     * @param indexFile the index file for allocating the new page
+     * @return SplitResult containing the separator key and new right page ID
+     * @throws java.io.IOException if file operations fail
+     */
+    public SplitResult split(IndexFile indexFile) throws java.io.IOException {
+        // Collect all entries from this page
+        int count = entryCount();
+        if (count < 2) {
+            throw new IllegalStateException("Cannot split page with fewer than 2 entries");
+        }
+
+        // Read all entries before we modify the page
+        Entry[] entries = new Entry[count];
+        for (int i = 0; i < count; i++) {
+            entries[i] = new Entry(keyAt(i), ridAt(i));
+        }
+
+        // Split point: upper half goes to new page
+        // For even counts: split exactly in half
+        // For odd counts: left page gets one more (ceiling division)
+        int splitPoint = (count + 1) / 2;
+
+        // Allocate new right sibling page
+        Page newPage = indexFile.allocateNewPage(PageType.INDEX_LEAF);
+        BTreeLeafPage rightPage = BTreeLeafPage.of(IndexPageLayout.of(newPage));
+
+        // Insert upper half entries into the new right page
+        for (int i = splitPoint; i < count; i++) {
+            InsertResult result = rightPage.insert(entries[i].key, entries[i].rid);
+            if (result != InsertResult.OK) {
+                throw new IllegalStateException("New page should have room: " + result);
+            }
+        }
+
+        // The separator key is the smallest key now on the right page
+        long separatorKey = entries[splitPoint].key;
+
+        // Update sibling chain pointers
+        int oldRightSibling = this.btpoNext();
+        int newRightPageId = rightPage.pageId();
+        int leftPageId = this.pageId();
+
+        // Point new page at this page (left) and old right sibling
+        rightPage.setBtpoPrev(leftPageId);
+        rightPage.setBtpoNext(oldRightSibling);
+
+        // Save left sibling pointer before reinitializing
+        int leftSibling = this.btpoPrev();
+
+        // Reset this page and re-insert lower half entries
+        // We do this by creating a fresh empty layout at the same pageId
+        this.layout.initializeAsLeaf();
+
+        // Restore sibling pointers (initializeAsLeaf resets them)
+        this.setBtpoPrev(leftSibling);
+        this.setBtpoNext(newRightPageId);
+
+        for (int i = 0; i < splitPoint; i++) {
+            InsertResult result = this.insert(entries[i].key, entries[i].rid);
+            if (result != InsertResult.OK) {
+                throw new IllegalStateException("Left page should have room after split: " + result);
+            }
+        }
+
+        // Write pages with proper fsync ordering per PostgreSQL:
+        // 1. Write and fsync the new right page first
+        indexFile.writePage(rightPage.layout.page());
+
+        // 2. Write and fsync this (left) page with updated btpo_next
+        indexFile.writePage(this.layout.page());
+
+        // 3. If there was a right sibling, update its btpo_prev
+        if (oldRightSibling != 0) {
+            com.coredb.page.Page oldRightPageData = indexFile.readPage(oldRightSibling);
+            BTreeLeafPage oldRightPage = BTreeLeafPage.of(IndexPageLayout.of(oldRightPageData));
+            oldRightPage.setBtpoPrev(newRightPageId);
+            indexFile.writePage(oldRightPageData);
+        }
+
+        return new SplitResult(separatorKey, newRightPageId);
+    }
+
+    /**
+     * Simple holder for key/rid pairs during split.
+     */
+    private record Entry(long key, RecordId rid) {
     }
 }
