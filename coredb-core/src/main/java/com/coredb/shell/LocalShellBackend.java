@@ -9,6 +9,8 @@ import com.coredb.catalog.Catalog;
 import com.coredb.catalog.ColumnDefParser;
 import com.coredb.catalog.ControlFile;
 import com.coredb.catalog.TableMeta;
+import com.coredb.engine.StorageEngine;
+import com.coredb.engine.StorageEngineFactory;
 import com.coredb.heap.HeapFile;
 import com.coredb.heap.RecordId;
 import com.coredb.index.BTreeLeafPage;
@@ -77,6 +79,9 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             case "drop-table"        -> handleDropTable(args);
             case "index-meta"        -> handleIndexMeta(args);
             case "index-dump"        -> handleIndexDump(args);
+            case "put"               -> handlePut(args);
+            case "get"               -> handleGet(args);
+            case "delete"            -> handleDelete(args);
             case "help"              -> formatHelp();
             default                  -> "unknown command: " + command + "  (type 'help' for available commands)";
         };
@@ -106,6 +111,11 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
               describe <name>                          show table schema
               drop-table <name>                        drop a table (soft delete)
               schema-parse <def>                       parse column definition
+
+            Data commands (via StorageEngine):
+              put <table> <pk> <col1> <col2> ...       insert a row (fails on duplicate PK)
+              get <table> <pk>                         retrieve a row by primary key
+              delete <table> <pk>                      delete a row by primary key
 
             Diagnostics:
               version                    print version and config
@@ -628,5 +638,177 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         } catch (IOException e) {
             return "error: " + e.getMessage();
         }
+    }
+
+    // ==================== StorageEngine Data Commands ====================
+
+    /**
+     * Handles: put <table> <pk> <col1> <col2> ...
+     * Inserts a row via the StorageEngine (throws on duplicate PK).
+     */
+    private String handlePut(String args) {
+        if (args.isBlank()) {
+            return "usage: put <table> <pk> <col1> <col2> ...";
+        }
+
+        String[] parts = args.trim().split("\\s+");
+        if (parts.length < 2) {
+            return "usage: put <table> <pk> <col1> <col2> ...";
+        }
+
+        String tableName = parts[0];
+        long pk;
+        try {
+            pk = Long.parseLong(parts[1]);
+        } catch (NumberFormatException e) {
+            return "error: primary key must be a long integer";
+        }
+
+        try {
+            Catalog cat = getCatalog();
+            Optional<TableMeta> metaOpt = cat.openTable(tableName);
+            if (metaOpt.isEmpty()) {
+                return "error: unknown table: " + tableName;
+            }
+            TableMeta meta = metaOpt.get();
+
+            // Build row from remaining arguments (pk + remaining columns)
+            Object[] values = new Object[meta.schema().columnCount()];
+
+            // First column is the PK
+            int pkIndex = meta.schema().indexOf(meta.pkColumn());
+            values[pkIndex] = pk;
+
+            // Parse remaining arguments for other columns
+            int argIdx = 2;  // Start after table name and pk
+            for (int i = 0; i < meta.schema().columnCount(); i++) {
+                if (i == pkIndex) continue;  // Skip PK, already set
+
+                if (argIdx >= parts.length) {
+                    return "error: not enough values provided (expected " +
+                           (meta.schema().columnCount() - 1) + " non-PK columns)";
+                }
+
+                values[i] = parseValue(parts[argIdx], meta.schema().column(i).type());
+                argIdx++;
+            }
+
+            Row row = Row.of(values);
+
+            // Open engine and insert
+            try (StorageEngine engine = StorageEngineFactory.create(db.config().engineType(), db.config())) {
+                engine.open(db.dataPath(), meta);
+                engine.put(pk, row);
+                return "ok (inserted)";
+            }
+
+        } catch (IllegalStateException e) {
+            if (e.getMessage().contains("UPDATE path")) {
+                return "error: UPDATE path not yet implemented.";
+            }
+            return "error: " + e.getMessage();
+        } catch (IOException | IllegalArgumentException e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Handles: get <table> <pk>
+     * Retrieves a row by primary key via the StorageEngine.
+     */
+    private String handleGet(String args) {
+        if (args.isBlank()) {
+            return "usage: get <table> <pk>";
+        }
+
+        String[] parts = args.trim().split("\\s+");
+        if (parts.length != 2) {
+            return "usage: get <table> <pk>";
+        }
+
+        String tableName = parts[0];
+        long pk;
+        try {
+            pk = Long.parseLong(parts[1]);
+        } catch (NumberFormatException e) {
+            return "error: primary key must be a long integer";
+        }
+
+        try {
+            Catalog cat = getCatalog();
+            Optional<TableMeta> metaOpt = cat.openTable(tableName);
+            if (metaOpt.isEmpty()) {
+                return "error: unknown table: " + tableName;
+            }
+            TableMeta meta = metaOpt.get();
+
+            // Open engine and get
+            try (StorageEngine engine = StorageEngineFactory.create(db.config().engineType(), db.config())) {
+                engine.open(db.dataPath(), meta);
+                Optional<Row> row = engine.get(pk);
+                if (row.isPresent()) {
+                    return row.get().values().toString();
+                } else {
+                    return "(not found)";
+                }
+            }
+
+        } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Handles: delete <table> <pk>
+     * Deletes a row by primary key via the StorageEngine.
+     */
+    private String handleDelete(String args) {
+        if (args.isBlank()) {
+            return "usage: delete <table> <pk>";
+        }
+
+        String[] parts = args.trim().split("\\s+");
+        if (parts.length != 2) {
+            return "usage: delete <table> <pk>";
+        }
+
+        String tableName = parts[0];
+        long pk;
+        try {
+            pk = Long.parseLong(parts[1]);
+        } catch (NumberFormatException e) {
+            return "error: primary key must be a long integer";
+        }
+
+        try {
+            Catalog cat = getCatalog();
+            Optional<TableMeta> metaOpt = cat.openTable(tableName);
+            if (metaOpt.isEmpty()) {
+                return "error: unknown table: " + tableName;
+            }
+            TableMeta meta = metaOpt.get();
+
+            // Open engine and delete
+            try (StorageEngine engine = StorageEngineFactory.create(db.config().engineType(), db.config())) {
+                engine.open(db.dataPath(), meta);
+                engine.delete(pk);
+                return "ok";
+            }
+
+        } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Parses a value string into the appropriate type.
+     */
+    private Object parseValue(String value, com.coredb.api.ColumnType type) {
+        return switch (type) {
+            case LONG -> Long.parseLong(value);
+            case INT -> Integer.parseInt(value);
+            case STRING -> value;
+            case BOOL -> Boolean.parseBoolean(value);
+        };
     }
 }
