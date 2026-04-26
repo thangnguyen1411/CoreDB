@@ -10,7 +10,6 @@ import com.coredb.catalog.ColumnDefParser;
 import com.coredb.catalog.ControlFile;
 import com.coredb.catalog.TableMeta;
 import com.coredb.engine.StorageEngine;
-import com.coredb.engine.StorageEngineFactory;
 import com.coredb.heap.HeapFile;
 import com.coredb.heap.RecordId;
 import com.coredb.index.BTreeLeafPage;
@@ -82,6 +81,8 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             case "put"               -> handlePut(args);
             case "get"               -> handleGet(args);
             case "delete"            -> handleDelete(args);
+            case "scan"              -> handleScan(args);
+            case "range"             -> handleRange(args);
             case "help"              -> formatHelp();
             default                  -> "unknown command: " + command + "  (type 'help' for available commands)";
         };
@@ -112,10 +113,12 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
               drop-table <name>                        drop a table (soft delete)
               schema-parse <def>                       parse column definition
 
-            Data commands (via StorageEngine):
-              put <table> <pk> <col1> <col2> ...       insert or update a row (MVCC upsert)
+            Data commands (via StorageEngine - uses heap+index, MVCC semantics):
+              put <table> <pk> <col1> <col2> ...       insert or update a row (upsert)
               get <table> <pk>                         retrieve a row by primary key
               delete <table> <pk>                      delete a row by primary key
+              scan <table>                             full table scan (heap order)
+              range <table> <from-pk> <to-pk>          range scan by primary key (sorted)
 
             Diagnostics:
               version                    print version and config
@@ -123,7 +126,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
               help                       list available commands
               quit                       exit
 
-            Debug: (raw heap commands bypass Catalog and access heap files directly)
+            Debug: (raw heap commands - bypass StorageEngine, direct heap access)
               insert-raw table=<name>|oid=<N> id=N name=XXX age=N   insert a row
               get-raw table=<name>|oid=<N> rid=page:slot            get a row by RecordId
               scan-raw table=<name>|oid=<N>                         scan all rows
@@ -644,7 +647,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
 
     /**
      * Handles: put <table> <pk> <col1> <col2> ...
-     * Inserts a row via the StorageEngine (throws on duplicate PK).
+     * Inserts or updates a row via the StorageEngine (MVCC upsert).
      */
     private String handlePut(String args) {
         if (args.isBlank()) {
@@ -695,13 +698,11 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
 
             Row row = Row.of(values);
 
-            // Open engine and insert/update
-            try (StorageEngine engine = StorageEngineFactory.create(db.config().engineType(), db.config())) {
-                engine.open(db.dataPath(), meta);
-                boolean isUpdate = engine.get(pk).isPresent();
-                engine.put(pk, row);
-                return isUpdate ? "ok (updated)" : "ok (inserted)";
-            }
+            // Use cached engine from CoreDB
+            StorageEngine engine = db.getEngineForTable(meta);
+            boolean isUpdate = engine.get(pk).isPresent();
+            engine.put(pk, row);
+            return isUpdate ? "ok (updated)" : "ok (inserted)";
 
         } catch (IllegalStateException e) {
             return "error: " + e.getMessage();
@@ -740,15 +741,13 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             }
             TableMeta meta = metaOpt.get();
 
-            // Open engine and get
-            try (StorageEngine engine = StorageEngineFactory.create(db.config().engineType(), db.config())) {
-                engine.open(db.dataPath(), meta);
-                Optional<Row> row = engine.get(pk);
-                if (row.isPresent()) {
-                    return row.get().values().toString();
-                } else {
-                    return "(not found)";
-                }
+            // Use cached engine from CoreDB
+            StorageEngine engine = db.getEngineForTable(meta);
+            Optional<Row> row = engine.get(pk);
+            if (row.isPresent()) {
+                return row.get().values().toString();
+            } else {
+                return "(not found)";
             }
 
         } catch (IOException e) {
@@ -786,12 +785,102 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             }
             TableMeta meta = metaOpt.get();
 
-            // Open engine and delete
-            try (StorageEngine engine = StorageEngineFactory.create(db.config().engineType(), db.config())) {
-                engine.open(db.dataPath(), meta);
-                engine.delete(pk);
-                return "ok";
+            // Use cached engine from CoreDB
+            StorageEngine engine = db.getEngineForTable(meta);
+            engine.delete(pk);
+            return "ok";
+
+        } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Handles: scan <table>
+     * Full table scan via StorageEngine (returns rows in heap order).
+     */
+    private String handleScan(String args) {
+        if (args.isBlank()) {
+            return "usage: scan <table>";
+        }
+
+        String tableName = args.trim().split("\\s+")[0];
+
+        try {
+            Catalog cat = getCatalog();
+            Optional<TableMeta> metaOpt = cat.openTable(tableName);
+            if (metaOpt.isEmpty()) {
+                return "error: unknown table: " + tableName;
             }
+            TableMeta meta = metaOpt.get();
+
+            StorageEngine engine = db.getEngineForTable(meta);
+            StringBuilder sb = new StringBuilder();
+            int count = 0;
+
+            java.util.Iterator<java.util.Map.Entry<Long, Row>> it = engine.fullScan();
+            while (it.hasNext()) {
+                java.util.Map.Entry<Long, Row> entry = it.next();
+                sb.append(entry.getKey()).append(": ").append(entry.getValue().values().toString()).append("\n");
+                count++;
+            }
+
+            if (count == 0) {
+                return "(no rows)";
+            }
+            return String.format("(%d rows)%n", count) + sb.toString().stripTrailing();
+
+        } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Handles: range <table> <from-pk> <to-pk>
+     * Range scan via StorageEngine (returns rows in PK order, inclusive).
+     */
+    private String handleRange(String args) {
+        if (args.isBlank()) {
+            return "usage: range <table> <from-pk> <to-pk>";
+        }
+
+        String[] parts = args.trim().split("\\s+");
+        if (parts.length != 3) {
+            return "usage: range <table> <from-pk> <to-pk>";
+        }
+
+        String tableName = parts[0];
+        long fromPk, toPk;
+        try {
+            fromPk = Long.parseLong(parts[1]);
+            toPk = Long.parseLong(parts[2]);
+        } catch (NumberFormatException e) {
+            return "error: primary key range bounds must be long integers";
+        }
+
+        try {
+            Catalog cat = getCatalog();
+            Optional<TableMeta> metaOpt = cat.openTable(tableName);
+            if (metaOpt.isEmpty()) {
+                return "error: unknown table: " + tableName;
+            }
+            TableMeta meta = metaOpt.get();
+
+            StorageEngine engine = db.getEngineForTable(meta);
+            StringBuilder sb = new StringBuilder();
+            int count = 0;
+
+            java.util.Iterator<java.util.Map.Entry<Long, Row>> it = engine.rangeScan(fromPk, toPk);
+            while (it.hasNext()) {
+                java.util.Map.Entry<Long, Row> entry = it.next();
+                sb.append(entry.getKey()).append(": ").append(entry.getValue().values().toString()).append("\n");
+                count++;
+            }
+
+            if (count == 0) {
+                return "(no rows in range)";
+            }
+            return String.format("(%d rows)%n", count) + sb.toString().stripTrailing();
 
         } catch (IOException e) {
             return "error: " + e.getMessage();
