@@ -1,5 +1,6 @@
 package com.coredb.api;
 
+import com.coredb.buffer.BufferPool;
 import com.coredb.catalog.BootstrapCatalog;
 import com.coredb.catalog.Catalog;
 import com.coredb.catalog.ControlFile;
@@ -22,14 +23,16 @@ public final class CoreDB implements AutoCloseable {
     private final Path dataPath;
     private final CoreDBConfig config;
     private final ControlFile controlFile;
+    private final BufferPool bufferPool;
     private final Catalog catalog;
     private final Map<Integer, StorageEngine> engineCache;
     private volatile boolean closed = false;
 
-    private CoreDB(Path dataPath, CoreDBConfig config, ControlFile controlFile, Catalog catalog) {
+    private CoreDB(Path dataPath, CoreDBConfig config, ControlFile controlFile, BufferPool bufferPool, Catalog catalog) {
         this.dataPath = dataPath;
         this.config = config;
         this.controlFile = controlFile;
+        this.bufferPool = bufferPool;
         this.catalog = catalog;
         this.engineCache = new ConcurrentHashMap<>();
         log.debug("CoreDB opened: path={} engine={} pageSize={}", dataPath, config.engineType(), config.pageSize());
@@ -64,10 +67,13 @@ public final class CoreDB implements AutoCloseable {
             log.info("Database bootstrap complete");
         }
 
-        // Create Catalog (opens core_class and core_attribute heap files)
-        Catalog catalog = new Catalog(dataPath, controlFile);
+        // Create BufferPool first (before Catalog, which needs it)
+        BufferPool bufferPool = new BufferPool(config.bufferPoolSize());
 
-        return new CoreDB(dataPath, config, controlFile, catalog);
+        // Create Catalog (opens core_class and core_attribute heap files via buffer pool)
+        Catalog catalog = new Catalog(dataPath, controlFile, bufferPool);
+
+        return new CoreDB(dataPath, config, controlFile, bufferPool, catalog);
     }
 
     public Path dataPath() {
@@ -101,13 +107,20 @@ public final class CoreDB implements AutoCloseable {
         return engineCache.computeIfAbsent(meta.oid(), oid -> {
             try {
                 StorageEngine engine = StorageEngineFactory.create(config.engineType(), config);
-                engine.open(dataPath, meta);
+                engine.open(dataPath, meta, bufferPool);
                 log.debug("Opened StorageEngine for table {} (oid={})", meta.name(), oid);
                 return engine;
             } catch (IOException e) {
                 throw new java.io.UncheckedIOException(e);
             }
         });
+    }
+
+    /**
+     * Returns the buffer pool for this database instance.
+     */
+    public BufferPool bufferPool() {
+        return bufferPool;
     }
 
     public boolean isClosed() {
@@ -132,7 +145,11 @@ public final class CoreDB implements AutoCloseable {
             try {
                 catalog.close();
             } finally {
-                controlFile.close();
+                try {
+                    bufferPool.close();
+                } finally {
+                    controlFile.close();
+                }
             }
             log.debug("CoreDB closed: path={}", dataPath);
         }

@@ -3,6 +3,7 @@ package com.coredb.engine;
 import com.coredb.api.CoreDBConfig;
 import com.coredb.api.Row;
 import com.coredb.api.Schema;
+import com.coredb.buffer.BufferPool;
 import com.coredb.catalog.TableMeta;
 import com.coredb.heap.HeapFile;
 import com.coredb.heap.RecordId;
@@ -37,6 +38,7 @@ public class BTreeStorageEngine implements StorageEngine {
     private final CoreDBConfig config;
 
     // Engine state (valid after open())
+    private BufferPool bufferPool;
     private HeapFile heap;
     private IndexFile indexFile;
     private BTree pkIndex;
@@ -47,7 +49,8 @@ public class BTreeStorageEngine implements StorageEngine {
     }
 
     @Override
-    public void open(Path dataDir, TableMeta meta) throws IOException {
+    public void open(Path dataDir, TableMeta meta, BufferPool bufferPool) throws IOException {
+        this.bufferPool = bufferPool;
         // Resolve PK column index for extracting PK values from rows
         Schema schema = meta.schema();
         this.pkColumnIndex = schema.indexOf(meta.pkColumn());
@@ -63,18 +66,18 @@ public class BTreeStorageEngine implements StorageEngine {
         // Open or create heap file: base/1/<oid>
         Path heapPath = dataDir.resolve("base/1/" + meta.oid());
         if (java.nio.file.Files.exists(heapPath)) {
-            this.heap = HeapFile.open(heapPath, meta.oid(), schema);
+            this.heap = HeapFile.open(heapPath, meta.oid(), schema, bufferPool);
         } else {
-            this.heap = HeapFile.create(heapPath, meta.oid(), schema);
+            this.heap = HeapFile.create(heapPath, meta.oid(), schema, bufferPool);
         }
 
         // Open or create index file: base/1/<oid>_pk
         Path indexPath = dataDir.resolve("base/1/" + meta.oid() + "_pk");
         if (java.nio.file.Files.exists(indexPath)) {
-            this.indexFile = IndexFile.open(indexPath, meta.oid());
+            this.indexFile = IndexFile.open(indexPath, meta.oid(), bufferPool);
             this.pkIndex = BTree.open(indexFile);
         } else {
-            this.indexFile = IndexFile.create(indexPath, meta.oid());
+            this.indexFile = IndexFile.create(indexPath, meta.oid(), bufferPool);
             this.pkIndex = BTree.create(indexFile);
         }
 

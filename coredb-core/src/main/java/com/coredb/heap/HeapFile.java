@@ -2,6 +2,8 @@ package com.coredb.heap;
 
 import com.coredb.api.Row;
 import com.coredb.api.Schema;
+import com.coredb.buffer.BufferDescriptor;
+import com.coredb.buffer.BufferPool;
 import com.coredb.fsm.FreeSpaceMap;
 import com.coredb.page.ItemId;
 import com.coredb.page.Page;
@@ -39,18 +41,20 @@ public final class HeapFile implements AutoCloseable {
     private final Path tablePath;
     private final int oid;
     private final Schema schema;
-    private final FileChannel channel;
+    private final BufferPool bufferPool;
+    private final FileChannel channel; // Used for bootstrap mode when bufferPool is null
     private int nextPageId;
-    private final Page metaPage;
+    private Page metaPage;
     private final FreeSpaceMap fsm;
 
     /**
      * Private constructor for per-table file mode.
      */
-    private HeapFile(Path tablePath, int oid, Schema schema, FileChannel channel, int nextPageId, Page metaPage, FreeSpaceMap fsm) {
+    private HeapFile(Path tablePath, int oid, Schema schema, BufferPool bufferPool, int nextPageId, Page metaPage, FreeSpaceMap fsm, FileChannel channel) {
         this.schema = schema;
         this.tablePath = tablePath;
         this.oid = oid;
+        this.bufferPool = bufferPool;
         this.channel = channel;
         this.nextPageId = nextPageId;
         this.metaPage = metaPage;
@@ -58,7 +62,8 @@ public final class HeapFile implements AutoCloseable {
     }
 
     /**
-     * Creates a new per-table heap file with a meta page.
+     * Creates a new per-table heap file with a meta page (for bootstrap use only).
+     * This version does not use the buffer pool and writes directly to disk.
      *
      * @param tablePath path to the table file (e.g., dataDir/base/1/1000)
      * @param oid       the table OID
@@ -86,11 +91,51 @@ public final class HeapFile implements AutoCloseable {
         FreeSpaceMap fsm = FreeSpaceMap.create(fsmPath, 0);
 
         log.info("Created heap file: {} (oid={})", tablePath.toAbsolutePath(), oid);
-        return new HeapFile(tablePath, oid, schema, channel, nextPageId, metaPage, fsm);
+        return new HeapFile(tablePath, oid, schema, null, nextPageId, metaPage, fsm, channel);
     }
 
     /**
-     * Opens an existing per-table heap file and validates the meta page.
+     * Creates a new per-table heap file with a meta page.
+     *
+     * @param tablePath path to the table file (e.g., dataDir/base/1/1000)
+     * @param oid       the table OID
+     * @param schema    the table schema
+     * @param bufferPool the buffer pool for caching pages
+     * @return a new HeapFile instance
+     * @throws IOException if creation fails
+     */
+    public static HeapFile create(Path tablePath, int oid, Schema schema, BufferPool bufferPool) throws IOException {
+        Path parent = tablePath.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+
+        // Create the file first (will be opened by BufferPool)
+        FileChannel channel = FileChannel.open(tablePath,
+                StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+
+        // Write meta page (page 0) directly
+        Page metaPage = buildInitialMetaPage(oid);
+        PageIO.writePage(channel, metaPage);
+        channel.force(true);
+        channel.close();
+
+        // Now register with buffer pool
+        bufferPool.registerFile(oid, tablePath);
+
+        int nextPageId = 1; // Page 0 is meta, data pages start at 1
+
+        // Create FSM file alongside heap file (initially 0 pages tracked)
+        Path fsmPath = tablePath.getParent().resolve(tablePath.getFileName() + "_fsm");
+        FreeSpaceMap fsm = FreeSpaceMap.create(fsmPath, 0);
+
+        log.info("Created heap file: {} (oid={})", tablePath.toAbsolutePath(), oid);
+        return new HeapFile(tablePath, oid, schema, bufferPool, nextPageId, metaPage, fsm, null);
+    }
+
+    /**
+     * Opens an existing per-table heap file and validates the meta page (for bootstrap use only).
+     * This version does not use the buffer pool and reads directly from disk.
      *
      * @param tablePath path to the table file
      * @param oid       expected table OID
@@ -124,7 +169,48 @@ public final class HeapFile implements AutoCloseable {
         }
 
         log.info("Opened heap file: {} (oid={}, pages={})", tablePath.toAbsolutePath(), oid, nextPageId);
-        return new HeapFile(tablePath, oid, schema, channel, nextPageId, metaPage, fsm);
+        return new HeapFile(tablePath, oid, schema, null, nextPageId, metaPage, fsm, channel);
+    }
+
+    /**
+     * Opens an existing per-table heap file and validates the meta page.
+     *
+     * @param tablePath path to the table file
+     * @param oid       expected table OID
+     * @param schema    the table schema
+     * @param bufferPool the buffer pool for caching pages
+     * @return a HeapFile instance
+     * @throws IOException         if file cannot be read
+     * @throws CorruptionException if meta page validation fails
+     */
+    public static HeapFile open(Path tablePath, int oid, Schema schema, BufferPool bufferPool) throws IOException {
+        if (!Files.exists(tablePath)) {
+            throw new IOException("Heap file not found: " + tablePath);
+        }
+
+        // Register with buffer pool (opens the channel)
+        bufferPool.registerFile(oid, tablePath);
+
+        // Read and validate meta page via buffer pool
+        BufferDescriptor metaFrame = bufferPool.fetchPage(oid, 0);
+        Page metaPage = Page.Factory.wrap(0, metaFrame.page().duplicate());
+        int nextPageId = validateMetaPage(metaPage, tablePath, oid);
+        bufferPool.unpinPage(metaFrame, false);
+
+        // Open or create FSM file
+        Path fsmPath = tablePath.getParent().resolve(tablePath.getFileName() + "_fsm");
+        FreeSpaceMap fsm;
+        if (Files.exists(fsmPath)) {
+            fsm = FreeSpaceMap.open(fsmPath);
+        } else {
+            // FSM missing (e.g., deleted manually) — create fresh one
+            log.warn("FSM file missing for oid={}, creating fresh: {}", oid, fsmPath);
+            int dataPageCount = Math.max(0, nextPageId - 1); // Exclude meta page
+            fsm = FreeSpaceMap.create(fsmPath, dataPageCount);
+        }
+
+        log.info("Opened heap file: {} (oid={}, pages={})", tablePath.toAbsolutePath(), oid, nextPageId);
+        return new HeapFile(tablePath, oid, schema, bufferPool, nextPageId, metaPage, fsm, null);
     }
 
 
@@ -275,8 +361,11 @@ public final class HeapFile implements AutoCloseable {
 
     public void flush() throws IOException {
         fsm.flush();
-        if (channel != null) {
-            updateMetaPage();
+        if (bufferPool != null) {
+            // Flush all dirty pages for this table via buffer pool
+            bufferPool.flushAllForTable(oid);
+        } else if (channel != null) {
+            // Bootstrap mode: fsync the channel directly
             channel.force(true);
         }
     }
@@ -286,8 +375,11 @@ public final class HeapFile implements AutoCloseable {
         // Close FSM first (it has its own file channel)
         fsm.close();
 
-        if (channel != null) {
-            updateMetaPage(); // Ensure meta page is up to date
+        if (bufferPool != null) {
+            // Unregister from buffer pool (this flushes dirty pages and closes channel)
+            bufferPool.unregisterFile(oid);
+        } else if (channel != null) {
+            // Bootstrap mode: close the channel directly
             channel.force(true);
             channel.close();
         }
@@ -336,8 +428,23 @@ public final class HeapFile implements AutoCloseable {
      */
     private Page allocateNewPage() throws IOException {
         int newPageId = nextPageId;
-        Page newPage = Page.Factory.allocateHeapPage(newPageId);
-        PageIO.writePage(channel, newPage);
+
+        Page newPage;
+        if (bufferPool != null) {
+            // Buffer pool mode: get new page from buffer pool
+            BufferDescriptor newFrame = bufferPool.fetchNewPage(oid, newPageId);
+            newPage = Page.Factory.wrap(newPageId, newFrame.page());
+
+            // Initialize as heap page
+            newPage.buffer().putInt(8, PageType.HEAP.ordinal());
+
+            // Unpin (page stays dirty, will be flushed later)
+            bufferPool.unpinPage(newFrame, true);
+        } else {
+            // Bootstrap mode: write directly to channel
+            newPage = Page.Factory.allocateHeapPage(newPageId);
+            PageIO.writePage(channel, newPage);
+        }
 
         // Update and persist nextPageId in meta page
         nextPageId = newPageId + 1;
@@ -356,6 +463,8 @@ public final class HeapFile implements AutoCloseable {
 
     /**
      * Reads a page from this heap file by page ID.
+     * The returned page is backed by a buffer pool frame that remains pinned (buffer pool mode).
+     * In bootstrap mode, returns a standalone Page that doesn't need unpinning.
      *
      * @param pageId the page ID to read
      * @return the Page at that ID
@@ -365,17 +474,43 @@ public final class HeapFile implements AutoCloseable {
         if (pageId < 1 || pageId >= nextPageId) {
             throw new StorageException("page " + pageId + " does not exist (allocated=" + nextPageId + ")");
         }
-        return PageIO.readPage(channel, pageId);
+        if (bufferPool != null) {
+            BufferDescriptor frame = bufferPool.fetchPage(oid, pageId);
+            // Return a Page wrapper around the buffer - frame remains pinned
+            return Page.Factory.wrap(pageId, frame.page());
+        } else {
+            // Bootstrap mode: read directly from channel
+            return PageIO.readPage(channel, pageId);
+        }
     }
 
     /**
      * Writes a page to this heap file.
+     * In buffer pool mode, the caller must unpin the frame with dirty=true.
+     * In bootstrap mode, writes directly to disk.
      *
      * @param page the page to write
      * @throws IOException if write fails
      */
     public void writePage(Page page) throws IOException {
-        PageIO.writePage(channel, page);
+        if (bufferPool == null && channel != null) {
+            // Bootstrap mode: write directly to channel
+            PageIO.writePage(channel, page);
+        }
+        // Buffer pool mode: caller should unpin the frame with dirty=true
+    }
+
+    /**
+     * Unpins a page that was previously fetched via readPage().
+     * Only valid in buffer pool mode.
+     *
+     * @param frame the buffer descriptor returned by readPage (via fetchPage)
+     * @param dirty true if the page was modified
+     */
+    public void unpinPage(BufferDescriptor frame, boolean dirty) {
+        if (bufferPool != null) {
+            bufferPool.unpinPage(frame, dirty);
+        }
     }
 
     /**
@@ -385,17 +520,28 @@ public final class HeapFile implements AutoCloseable {
      * @throws IOException if size cannot be determined
      */
     public long fileSize() throws IOException {
-        return channel.size();
+        // Calculate from nextPageId (each page is PAGE_SIZE bytes)
+        return (long) nextPageId * Constants.PAGE_SIZE;
     }
 
     /**
-     * Updates the meta page (page 0) with the current nextPageId and syncs to disk.
+     * Updates the meta page (page 0) with the current nextPageId.
+     * In buffer pool mode: fetched via buffer pool, modified, and unpinned dirty.
+     * In bootstrap mode: write directly to channel.
      */
     private void updateMetaPage() throws IOException {
-        ByteBuffer buf = metaPage.buffer();
-        BinaryUtil.writeU32(buf, META_OFFSET_NEXT_PAGE_ID, nextPageId);
-        PageIO.writePage(channel, metaPage);
-        channel.force(true);
+        if (bufferPool != null) {
+            BufferDescriptor metaFrame = bufferPool.fetchPage(oid, 0);
+            ByteBuffer buf = metaFrame.page();
+            BinaryUtil.writeU32(buf, META_OFFSET_NEXT_PAGE_ID, nextPageId);
+            bufferPool.unpinPage(metaFrame, true); // Mark dirty and unpin
+        } else if (channel != null) {
+            // Bootstrap mode: update via PageIO
+            Page metaPage = PageIO.readPage(channel, 0);
+            ByteBuffer buf = metaPage.buffer();
+            BinaryUtil.writeU32(buf, META_OFFSET_NEXT_PAGE_ID, nextPageId);
+            PageIO.writePage(channel, metaPage);
+        }
     }
 
     /**

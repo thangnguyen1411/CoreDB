@@ -4,6 +4,7 @@ import com.coredb.api.Column;
 import com.coredb.api.ColumnType;
 import com.coredb.api.Row;
 import com.coredb.api.Schema;
+import com.coredb.buffer.BufferPool;
 import com.coredb.config.EngineType;
 import com.coredb.heap.HeapFile;
 import com.coredb.heap.HeapPage;
@@ -46,6 +47,7 @@ public final class Catalog implements AutoCloseable {
 
     private final Path dataDir;
     private final ControlFile controlFile;
+    private final BufferPool bufferPool;
     private final HeapFile coreClassFile;
     private final HeapFile coreAttributeFile;
 
@@ -54,18 +56,20 @@ public final class Catalog implements AutoCloseable {
      *
      * @param dataDir the data directory path
      * @param controlFile the control file for OID allocation
+     * @param bufferPool the buffer pool for caching pages
      * @throws IOException if the catalog files cannot be opened
      */
-    public Catalog(Path dataDir, ControlFile controlFile) throws IOException {
+    public Catalog(Path dataDir, ControlFile controlFile, BufferPool bufferPool) throws IOException {
         this.dataDir = dataDir;
         this.controlFile = controlFile;
+        this.bufferPool = bufferPool;
 
         Path baseDir = dataDir.resolve("base").resolve("1");
         Path coreClassPath = baseDir.resolve(String.valueOf(BootstrapCatalog.CORE_CLASS_OID));
         Path coreAttributePath = baseDir.resolve(String.valueOf(BootstrapCatalog.CORE_ATTRIBUTE_OID));
 
-        this.coreClassFile = HeapFile.open(coreClassPath, BootstrapCatalog.CORE_CLASS_OID, BootstrapCatalog.CORE_CLASS_SCHEMA);
-        this.coreAttributeFile = HeapFile.open(coreAttributePath, BootstrapCatalog.CORE_ATTRIBUTE_OID, BootstrapCatalog.CORE_ATTRIBUTE_SCHEMA);
+        this.coreClassFile = HeapFile.open(coreClassPath, BootstrapCatalog.CORE_CLASS_OID, BootstrapCatalog.CORE_CLASS_SCHEMA, bufferPool);
+        this.coreAttributeFile = HeapFile.open(coreAttributePath, BootstrapCatalog.CORE_ATTRIBUTE_OID, BootstrapCatalog.CORE_ATTRIBUTE_SCHEMA, bufferPool);
 
         log.debug("Catalog opened: core_class={}, core_attribute={}", coreClassPath, coreAttributePath);
     }
