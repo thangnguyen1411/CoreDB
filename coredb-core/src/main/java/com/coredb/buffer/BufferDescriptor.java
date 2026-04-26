@@ -131,6 +131,17 @@ public final class BufferDescriptor {
     }
 
     /**
+     * Decrements usageCount for clock-sweep eviction algorithm.
+     * Usage count never goes below 0.
+     * PostgreSQL: usage_count decrement in StrategyGetBuffer (freelist.c).
+     */
+    void decrementUsage() {
+        if (usageCount > 0) {
+            usageCount--;
+        }
+    }
+
+    /**
      * Marks the buffer as clean (after successful flush to disk).
      * Preserves the binding for potential cache reuse.
      */

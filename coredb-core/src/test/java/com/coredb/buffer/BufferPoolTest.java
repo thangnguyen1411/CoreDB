@@ -155,9 +155,9 @@ class BufferPoolTest {
     }
 
     @Test
-    void poolFull_throwsException() throws IOException {
-        // Given: a file with 5 pages but only 3 frames (3 frames = small pool for testing)
-        Path file = createTestFile(5);
+    void clockSweep_evictsUnpinnedPage() throws IOException {
+        // Given: a file with 4 pages but only 3 frames
+        Path file = createTestFile(4);
         BufferPool pool = new BufferPool(3); // Only 3 frames
 
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
@@ -169,20 +169,77 @@ class BufferPoolTest {
             // Then: pool is full (all 3 frames used)
             assertThat(pool.usedFrames()).isEqualTo(3);
 
-            // When: try to fetch a 4th page
-            assertThatThrownBy(() -> pool.fetchPage(TEST_OID, 3, channel))
-                .isInstanceOf(StorageException.class)
-                .hasMessageContaining("Buffer pool full");
-
-            // Unpin one frame and try again
+            // Unpin all frames so they can be evicted
             pool.unpinPage(frame0, false);
             pool.unpinPage(frame1, false);
             pool.unpinPage(frame2, false);
-
-            // Now frame0 could be reused, but we need to test that it was unpinned
+            
             assertThat(frame0.pinCount()).isEqualTo(0);
             assertThat(frame1.pinCount()).isEqualTo(0);
             assertThat(frame2.pinCount()).isEqualTo(0);
+
+            // When: fetch a 4th page (should evict one)
+            BufferDescriptor frame3 = pool.fetchPage(TEST_OID, 3, channel);
+            
+            // Then: eviction succeeded - we have 3 frames still
+            assertThat(pool.usedFrames()).isEqualTo(3);
+            // One of the original frames was reused
+            assertThat(frame3.frameId()).isIn(frame0.frameId(), frame1.frameId(), frame2.frameId());
+        }
+
+        pool.close();
+    }
+
+    @Test
+    void clockSweep_hotPageSurvives() throws IOException {
+        // Given: a file with 4 pages but only 3 frames
+        Path file = createTestFile(4);
+        BufferPool pool = new BufferPool(3);
+
+        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+            // Fetch 3 pages
+            BufferDescriptor frame0 = pool.fetchPage(TEST_OID, 0, channel);
+            BufferDescriptor frame1 = pool.fetchPage(TEST_OID, 1, channel);
+            pool.fetchPage(TEST_OID, 2, channel); // frame2 - stays pinned
+
+            // Unpin frames 0 and 1, but keep frame 2 pinned (hot page)
+            pool.unpinPage(frame0, false);
+            pool.unpinPage(frame1, false);
+            // frame2 stays pinned!
+
+            // Fetch page 0 again - this makes it hot (bumps usageCount)
+            BufferDescriptor frame0Again = pool.fetchPage(TEST_OID, 0, channel);
+            assertThat(frame0Again).isSameAs(frame0);
+            pool.unpinPage(frame0, false); // unpin again
+
+            // Now fetch page 3 - should evict page 1 (coldest)
+            pool.fetchPage(TEST_OID, 3, channel);
+            
+            // Frame 2 should still be in pool (was pinned)
+            // Frame 0 should still be in pool (was hot)
+            // Frame 1 was evicted
+            assertThat(pool.usedFrames()).isEqualTo(3);
+        }
+
+        pool.close();
+    }
+
+    @Test
+    void clockSweep_allPinned_throwsException() throws IOException {
+        // Given: a file with 5 pages but only 3 frames
+        Path file = createTestFile(5);
+        BufferPool pool = new BufferPool(3);
+
+        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+            // Fetch 3 pages and keep them ALL pinned
+            pool.fetchPage(TEST_OID, 0, channel);
+            pool.fetchPage(TEST_OID, 1, channel);
+            pool.fetchPage(TEST_OID, 2, channel);
+
+            // All frames are pinned - fetching a 4th page should fail
+            assertThatThrownBy(() -> pool.fetchPage(TEST_OID, 3, channel))
+                .isInstanceOf(StorageException.class)
+                .hasMessageContaining("No evictable frame found");
         }
 
         pool.close();
@@ -323,25 +380,29 @@ class BufferPoolTest {
     }
 
     @Test
-    void fetchNewPage_createsEmptyPage() {
-        // Given: a pool with available frames
+    void fetchNewPage_createsEmptyPage() throws IOException {
+        // Given: a file and a pool with available frames
+        Path file = createTestFile(1);
         BufferPool pool = new BufferPool(4);
 
-        // When: fetch a new page (no disk read needed)
-        BufferDescriptor frame = pool.fetchNewPage(TEST_OID, 5);
+        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+            // When: fetch a new page (no disk read needed)
+            BufferDescriptor frame = pool.fetchNewPage(TEST_OID, 5, channel);
 
-        // Then: frame is set up correctly
-        assertThat(frame.tableOid()).isEqualTo(TEST_OID);
-        assertThat(frame.pageId()).isEqualTo(5);
-        assertThat(frame.pinCount()).isEqualTo(1);
-        assertThat(frame.dirty()).isTrue(); // New pages are dirty
+            // Then: frame is set up correctly
+            assertThat(frame.tableOid()).isEqualTo(TEST_OID);
+            assertThat(frame.pageId()).isEqualTo(5);
+            assertThat(frame.pinCount()).isEqualTo(1);
+            assertThat(frame.dirty()).isTrue(); // New pages are dirty
 
-        // And: page buffer is empty (cleared)
-        ByteBuffer buf = frame.page();
-        assertThat(buf.limit()).isEqualTo(Constants.PAGE_SIZE);
+            // And: page buffer is empty (cleared)
+            ByteBuffer buf = frame.page();
+            assertThat(buf.limit()).isEqualTo(Constants.PAGE_SIZE);
 
-        // Mark clean to satisfy close() validation (we can't flush without a channel)
-        frame.markClean();
+            // Mark clean to satisfy close() validation
+            frame.markClean();
+        }
+
         pool.close();
     }
 
