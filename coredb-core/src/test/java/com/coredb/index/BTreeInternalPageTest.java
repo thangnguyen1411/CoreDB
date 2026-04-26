@@ -239,6 +239,7 @@ class BTreeInternalPageTest {
         assertThat(page.keyAt(1)).isEqualTo(20L);
         assertThat(page.childPageIdAt(0)).isEqualTo(2);
         assertThat(page.childPageIdAt(1)).isEqualTo(3);
+        assertThat(page.btpoLevel()).isEqualTo(1);  // CRITICAL: level must survive split
 
         // Right page: leftmost=4 (promoted child), entry=[(40,5)]
         com.coredb.page.Page rightPageData = indexFile.readPage(result.rightPageId());
@@ -278,6 +279,7 @@ class BTreeInternalPageTest {
         assertThat(result.promotedKey()).isEqualTo(30L);
 
         // Left page: leftmost=1, entries [(10,2), (20,3)]
+        assertThat(page.btpoLevel()).isEqualTo(1);  // CRITICAL: level must survive split
         assertThat(page.leftmostChild()).isEqualTo(1);
         assertThat(page.entryCount()).isEqualTo(2);
 

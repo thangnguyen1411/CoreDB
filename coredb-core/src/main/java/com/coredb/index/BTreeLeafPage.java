@@ -341,6 +341,6 @@ public final class BTreeLeafPage {
     /**
      * Simple holder for key/rid pairs during split.
      */
-    private record Entry(long key, com.coredb.heap.RecordId rid) {
+    private record Entry(long key, RecordId rid) {
     }
 }

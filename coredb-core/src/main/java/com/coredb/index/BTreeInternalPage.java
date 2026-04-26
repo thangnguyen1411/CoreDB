@@ -388,9 +388,10 @@ public final class BTreeInternalPage {
             }
         }
 
-        // Reset left page - keep original leftmostChild
+        // Reset left page - save level BEFORE initializeAsLeaf wipes it
+        int savedLevel = this.btpoLevel();
         this.layout.initializeAsLeaf(); // Reinitializes as leaf level 0
-        this.setBtpoLevel(this.btpoLevel()); // Restore level
+        this.setBtpoLevel(savedLevel); // Restore original level
         this.setLeftmostChild(originalLeftmostChild); // Restore leftmost child
 
         // Left page re-inserts entries BEFORE split point
