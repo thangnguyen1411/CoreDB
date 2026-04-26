@@ -33,6 +33,9 @@ public final class BufferPool implements AutoCloseable {
     private long hits;
     private long misses;
 
+    // Clock-sweep hand for eviction
+    private int sweepHand;
+
     /**
      * Creates a buffer pool with the specified number of frames.
      * 
@@ -99,8 +102,8 @@ public final class BufferPool implements AutoCloseable {
         // Miss: need to load from disk
         misses++;
         
-        // Find a free frame (no eviction yet)
-        BufferDescriptor victim = findFreeFrame();
+        // Find a free frame (uses clock-sweep eviction if needed)
+        BufferDescriptor victim = findFreeFrame(channel);
         if (victim == null) {
             throw new StorageException("Buffer pool full (" + frameCount + " frames). ");
         }
@@ -128,10 +131,12 @@ public final class BufferPool implements AutoCloseable {
      * 
      * @param tableOid the table OID
      * @param pageId the new page ID
+     * @param channel FileChannel for flushing dirty victims during eviction
      * @return BufferDescriptor for the new page (already pinned, dirty)
      * @throws StorageException if pool is full
+     * @throws IOException if flushing a dirty victim fails
      */
-    public BufferDescriptor fetchNewPage(int tableOid, int pageId) {
+    public BufferDescriptor fetchNewPage(int tableOid, int pageId, FileChannel channel) throws IOException {
         long key = BufferDescriptor.key(tableOid, pageId);
         
         Integer frameId = pageTable.get(key);
@@ -145,7 +150,7 @@ public final class BufferPool implements AutoCloseable {
 
         misses++;
         
-        BufferDescriptor victim = findFreeFrame();
+        BufferDescriptor victim = findFreeFrame(channel);
         if (victim == null) {
             throw new StorageException("Buffer pool full (" + frameCount + " frames).");
         }
@@ -292,16 +297,64 @@ public final class BufferPool implements AutoCloseable {
 
     /**
      * Finds a free (unbound) frame in the pool.
+     * If no free frames, uses clock-sweep eviction to select a victim.
      * 
-     * @return a free BufferDescriptor, or null if pool is full
+     * @param channel FileChannel for flushing dirty victims
+     * @return a free BufferDescriptor (possibly after eviction)
+     * @throws IOException if flushing a dirty victim fails
      */
-    private BufferDescriptor findFreeFrame() {
+    private BufferDescriptor findFreeFrame(FileChannel channel) throws IOException {
+        // First: look for completely free (unbound) frames
         for (BufferDescriptor frame : descriptors) {
             if (frame.tableOid() == 0 && frame.pinCount() == 0) {
                 return frame;
             }
         }
-        return null;
+        
+        // No free frames - use clock-sweep eviction
+        return selectVictim(channel);
+    }
+
+    /**
+     * Clock-sweep eviction algorithm (PostgreSQL: StrategyGetBuffer/freelist.c).
+     * 
+     * Sweeps through frames looking for an unpinned victim:
+     * - If usageCount == 0: select as victim (flush if dirty)
+     * - Otherwise: decrement usageCount and continue
+     * 
+     * After frameCount * 2 attempts, throws if no evictable frame found.
+     * 
+     * @param channel FileChannel for flushing dirty victims
+     * @return evicted frame ready for reuse
+     * @throws IOException if flushing fails
+     * @throws StorageException if all frames are pinned
+     */
+    private BufferDescriptor selectVictim(FileChannel channel) throws IOException {
+        for (int attempts = 0; attempts < frameCount * 2; attempts++) {
+            BufferDescriptor frame = descriptors[sweepHand];
+            
+            if (frame.pinCount() == 0) {
+                if (frame.usageCount() == 0) {
+                    // Found victim - evict it
+                    if (frame.dirty()) {
+                        flushFrame(frame.frameId(), channel);
+                    }
+                    // Remove from page table
+                    removeFromPageTable(frame.tableOid(), frame.pageId());
+                    // Reset for reuse
+                    frame.reset();
+                    return frame;
+                }
+                // Decrement usage count (gives hot pages more chances)
+                frame.decrementUsage();
+            }
+            
+            sweepHand = (sweepHand + 1) % frameCount;
+        }
+        
+        throw new StorageException(
+            "No evictable frame found - all " + frameCount + " frames pinned?"
+        );
     }
 
     /**
