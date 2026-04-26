@@ -11,7 +11,9 @@ import com.coredb.catalog.ControlFile;
 import com.coredb.catalog.TableMeta;
 import com.coredb.heap.HeapFile;
 import com.coredb.heap.RecordId;
+import com.coredb.index.BTreeLeafPage;
 import com.coredb.index.IndexFile;
+import com.coredb.index.IndexPageLayout;
 import com.coredb.util.Constants;
 
 import java.io.IOException;
@@ -74,6 +76,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             case "describe"          -> handleDescribe(args);
             case "drop-table"        -> handleDropTable(args);
             case "index-meta"        -> handleIndexMeta(args);
+            case "index-dump"        -> handleIndexDump(args);
             case "help"              -> formatHelp();
             default                  -> "unknown command: " + command + "  (type 'help' for available commands)";
         };
@@ -118,6 +121,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
               heap-stats table=<name>|oid=<N>                       show file stats
               heap-meta table=<name>|oid=<N>                        show meta page of per-table heap file
               index-meta table=<name>|oid=<N>                       show meta page of per-table index file
+              index-dump table=<name>|oid=<N> page=<P>              dump index page contents
             """;
     }
 
@@ -554,6 +558,71 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
                 sb.append("root=").append(idx.rootPageId()).append("\n");
                 sb.append("height=").append(idx.treeHeight()).append("\n");
                 sb.append("nextPageId=").append(idx.nextPageId());
+                return sb.toString();
+            }
+        } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    private String handleIndexDump(String args) {
+        // Parse table=<name>|oid=<N> and page=<P>
+        OidResolution resolution = resolveOidFull(args);
+        if (!resolution.isSuccess()) {
+            return resolution.errorMessage();
+        }
+        int oid = resolution.oid();
+
+        Integer pageId = null;
+        for (String part : args.split("\\s+")) {
+            if (part.startsWith("page=")) {
+                try {
+                    pageId = Integer.parseInt(part.substring(5));
+                } catch (NumberFormatException e) {
+                    return "usage: index-dump table=<name>|oid=<N> page=<P> (invalid page number)";
+                }
+            }
+        }
+
+        if (pageId == null) {
+            return "usage: index-dump table=<name>|oid=<N> page=<P>";
+        }
+
+        // Build path: dataDir/base/1/<oid>_pk
+        Path indexPath = db.dataPath().resolve("base").resolve("1").resolve(oid + "_pk");
+
+        if (!Files.exists(indexPath)) {
+            return "error: index file not found: " + db.dataPath().relativize(indexPath);
+        }
+
+        try {
+            try (IndexFile idx = IndexFile.open(indexPath, oid)) {
+                if (pageId < 1 || pageId >= idx.nextPageId()) {
+                    return "error: page " + pageId + " does not exist (allocated=" + idx.nextPageId() + ")";
+                }
+
+                com.coredb.page.Page page = idx.readPage(pageId);
+                IndexPageLayout layout = IndexPageLayout.of(page);
+                BTreeLeafPage leaf = BTreeLeafPage.of(layout);
+
+                StringBuilder sb = new StringBuilder();
+                sb.append("page=").append(pageId);
+                sb.append(" type=").append(leaf.isLeaf() ? "LEAF" : "INTERNAL");
+                sb.append(" level=").append(layout.btpoLevel());
+                sb.append(" prev=").append(layout.btpoPrev());
+                sb.append(" next=").append(layout.btpoNext());
+                sb.append(" entries=").append(leaf.entryCount());
+                sb.append("\n");
+
+                if (leaf.entryCount() > 0) {
+                    sb.append("  slot  key   rid\n");
+                    for (int i = 0; i < leaf.entryCount(); i++) {
+                        long key = leaf.keyAt(i);
+                        RecordId rid = leaf.ridAt(i);
+                        sb.append(String.format("  %-5d %-5d %s%n", i, key, rid));
+                    }
+                }
+
                 return sb.toString();
             }
         } catch (IOException e) {
