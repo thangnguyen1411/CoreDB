@@ -86,9 +86,6 @@ public class BTreeStorageEngine implements StorageEngine {
 
     @Override
     public void close() throws IOException {
-        if (heap != null || indexFile != null) {
-            flush();
-        }
         if (indexFile != null) {
             indexFile.close();
             indexFile = null;
@@ -105,19 +102,11 @@ public class BTreeStorageEngine implements StorageEngine {
     public void put(long pk, Row row) throws IOException {
         Optional<RecordId> existing = pkIndex.search(pk);
         if (existing.isPresent()) {
-            // UPDATE path - MVCC upsert semantics
             RecordId oldRid = existing.get();
 
-            // 1. Delete old index entry (remove key→oldRid mapping)
-            pkIndex.delete(pk);
-
-            // 2. Mark old tuple as deleted in heap (sets t_xmax, creates dead version)
-            heap.delete(oldRid);
-
-            // 3. Insert new tuple into heap
             RecordId newRid = heap.insert(row);
-
-            // 4. Insert new index entry (key→newRid mapping)
+            heap.delete(oldRid);
+            pkIndex.delete(pk);
             pkIndex.insert(pk, newRid);
 
             log.debug("Updated row with pk={}: oldRid={} -> newRid={}", pk, oldRid, newRid);
