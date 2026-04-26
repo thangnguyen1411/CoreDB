@@ -1,6 +1,7 @@
 package com.coredb.index;
 
 import com.coredb.page.Page;
+import com.coredb.page.PageIO;
 import com.coredb.page.PageType;
 import com.coredb.util.BinaryUtil;
 import com.coredb.util.Constants;
@@ -11,7 +12,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -88,11 +88,11 @@ public final class IndexFile implements AutoCloseable {
 
         // Create meta page (page 0)
         Page metaPage = buildInitialMetaPage(oid);
-        writePageToChannel(channel, metaPage);
+        PageIO.writePage(channel, metaPage);
 
         // Create initial root page as empty leaf (page 1)
         IndexPageLayout rootLayout = IndexPageLayout.createEmpty(1, PageType.INDEX_LEAF);
-        writePageToChannel(channel, rootLayout.page());
+        PageIO.writePage(channel, rootLayout.page());
 
         int rootPageId = 1;
         int treeHeight = 0; // Root is a leaf
@@ -120,7 +120,7 @@ public final class IndexFile implements AutoCloseable {
                 StandardOpenOption.READ, StandardOpenOption.WRITE);
 
         // Read and validate meta page
-        Page metaPage = readPageFromChannel(channel, 0);
+        Page metaPage = PageIO.readPage(channel, 0);
         MetaInfo metaInfo = validateMetaPage(metaPage, indexPath, oid);
 
         log.info("Opened index file: {} (oid={}, root={}, height={}, pages={})",
@@ -170,7 +170,7 @@ public final class IndexFile implements AutoCloseable {
         if (pageId < 1 || pageId >= nextPageId) {
             throw new StorageException("page " + pageId + " does not exist (allocated=" + nextPageId + ")");
         }
-        return readPageFromChannel(channel, pageId);
+        return PageIO.readPage(channel, pageId);
     }
 
     /**
@@ -180,7 +180,7 @@ public final class IndexFile implements AutoCloseable {
      * @throws IOException if write fails
      */
     public void writePage(Page page) throws IOException {
-        writePageToChannel(channel, page);
+        PageIO.writePage(channel, page);
     }
 
     /**
@@ -202,7 +202,7 @@ public final class IndexFile implements AutoCloseable {
             newPage = Page.Factory.allocate(newPageId, type);
         }
 
-        writePageToChannel(channel, newPage);
+        PageIO.writePage(channel, newPage);
 
         // Update and persist nextPageId in meta page
         nextPageId = newPageId + 1;
@@ -278,7 +278,7 @@ public final class IndexFile implements AutoCloseable {
         BinaryUtil.writeU32(buf, META_OFFSET_ROOT_PAGE_ID, rootPageId);
         BinaryUtil.writeU32(buf, META_OFFSET_TREE_HEIGHT, treeHeight);
         BinaryUtil.writeU32(buf, META_OFFSET_NEXT_PAGE_ID, nextPageId);
-        writePageToChannel(channel, metaPage);
+        PageIO.writePage(channel, metaPage);
         channel.force(true);
     }
 
@@ -294,25 +294,4 @@ public final class IndexFile implements AutoCloseable {
         return page;
     }
 
-    private static void writePageToChannel(FileChannel channel, Page page) throws IOException {
-        ByteBuffer buf = page.buffer().duplicate();
-        buf.clear();
-        long pos = (long) page.pageId() * Constants.PAGE_SIZE;
-        while (buf.hasRemaining()) {
-            pos += channel.write(buf, pos);
-        }
-    }
-
-    private static Page readPageFromChannel(FileChannel channel, int pageId) throws IOException {
-        ByteBuffer buf = ByteBuffer.allocate(Constants.PAGE_SIZE).order(ByteOrder.BIG_ENDIAN);
-        long pos = (long) pageId * Constants.PAGE_SIZE;
-        while (buf.hasRemaining()) {
-            int n = channel.read(buf, pos);
-            if (n == -1) {
-                throw new StorageException("Unexpected EOF reading page " + pageId);
-            }
-            pos += n;
-        }
-        return Page.Factory.wrap(pageId, buf);
-    }
 }

@@ -5,6 +5,7 @@ import com.coredb.api.Schema;
 import com.coredb.fsm.FreeSpaceMap;
 import com.coredb.page.ItemId;
 import com.coredb.page.Page;
+import com.coredb.page.PageIO;
 import com.coredb.page.PageType;
 import com.coredb.util.BinaryUtil;
 import com.coredb.util.Constants;
@@ -76,7 +77,7 @@ public final class HeapFile implements AutoCloseable {
 
         // Write meta page (page 0)
         Page metaPage = buildInitialMetaPage(oid);
-        writePageToChannel(channel, metaPage);
+        PageIO.writePage(channel, metaPage);
 
         int nextPageId = 1; // Page 0 is meta, data pages start at 1
 
@@ -107,7 +108,7 @@ public final class HeapFile implements AutoCloseable {
                 StandardOpenOption.READ, StandardOpenOption.WRITE);
 
         // Read and validate meta page
-        Page metaPage = readPageFromChannel(channel, 0);
+        Page metaPage = PageIO.readPage(channel, 0);
         int nextPageId = validateMetaPage(metaPage, tablePath, oid);
 
         // Open or create FSM file
@@ -328,7 +329,7 @@ public final class HeapFile implements AutoCloseable {
     private Page allocateNewPage() throws IOException {
         int newPageId = nextPageId;
         Page newPage = Page.Factory.allocateHeapPage(newPageId);
-        writePageToChannel(channel, newPage);
+        PageIO.writePage(channel, newPage);
 
         // Update and persist nextPageId in meta page
         nextPageId = newPageId + 1;
@@ -356,7 +357,7 @@ public final class HeapFile implements AutoCloseable {
         if (pageId < 1 || pageId >= nextPageId) {
             throw new StorageException("page " + pageId + " does not exist (allocated=" + nextPageId + ")");
         }
-        return readPageFromChannel(channel, pageId);
+        return PageIO.readPage(channel, pageId);
     }
 
     /**
@@ -366,7 +367,7 @@ public final class HeapFile implements AutoCloseable {
      * @throws IOException if write fails
      */
     public void writePage(Page page) throws IOException {
-        writePageToChannel(channel, page);
+        PageIO.writePage(channel, page);
     }
 
     /**
@@ -385,7 +386,7 @@ public final class HeapFile implements AutoCloseable {
     private void updateMetaPage() throws IOException {
         ByteBuffer buf = metaPage.buffer();
         BinaryUtil.writeU32(buf, META_OFFSET_NEXT_PAGE_ID, nextPageId);
-        writePageToChannel(channel, metaPage);
+        PageIO.writePage(channel, metaPage);
         channel.force(true);
     }
 
@@ -405,30 +406,6 @@ public final class HeapFile implements AutoCloseable {
     /**
      * Writes a page to the file channel at the correct position.
      */
-    private static void writePageToChannel(FileChannel channel, Page page) throws IOException {
-        ByteBuffer buf = page.buffer().duplicate();
-        buf.clear();
-        long pos = (long) page.pageId() * Constants.PAGE_SIZE;
-        while (buf.hasRemaining()) {
-            pos += channel.write(buf, pos);
-        }
-    }
-
-    /**
-     * Reads a page from the file channel at the given page ID.
-     */
-    private static Page readPageFromChannel(FileChannel channel, int pageId) throws IOException {
-        ByteBuffer buf = ByteBuffer.allocate(Constants.PAGE_SIZE).order(ByteOrder.BIG_ENDIAN);
-        long pos = (long) pageId * Constants.PAGE_SIZE;
-        while (buf.hasRemaining()) {
-            int n = channel.read(buf, pos);
-            if (n == -1) {
-                throw new StorageException("Unexpected EOF reading page " + pageId);
-            }
-            pos += n;
-        }
-        return Page.Factory.wrap(pageId, buf);
-    }
 
     // Iterates pages sequentially, yielding live rows without materializing all into memory
     private final class LazyRowIterator implements Iterator<Row> {
