@@ -188,8 +188,7 @@ public final class BTree {
         propagateSplit(
             splitResult.separatorKey(),
             splitResult.newRightPageId(),
-            leaf.pageId(),  // left page
-            splitResult.newRightPageId()  // right page
+            leaf.pageId()  // left page
         );
     }
 
@@ -199,10 +198,9 @@ public final class BTree {
      * @param separatorKey the key that separates left and right children
      * @param rightPageId the new right child page ID
      * @param leftPageId the left child page ID (for root split detection)
-     @param actualRightPageId the actual right page ID to use in separator
      * @throws IOException if file operations fail
      */
-    private void propagateSplit(long separatorKey, int rightPageId, int leftPageId, int actualRightPageId) throws IOException {
+    private void propagateSplit(long separatorKey, int rightPageId, int leftPageId) throws IOException {
         // Walk up the path stack, inserting separators into parents
         while (pathDepth > 0) {
             pathDepth--;
