@@ -101,9 +101,9 @@ public class BTreeStorageEngine implements StorageEngine {
             RecordId oldRid = existing.get();
 
             RecordId newRid = heap.insert(row);
-            heap.delete(oldRid);
             pkIndex.delete(pk);
             pkIndex.insert(pk, newRid);
+            heap.delete(oldRid);
 
             log.debug("Updated row with pk={}: oldRid={} -> newRid={}", pk, oldRid, newRid);
         } else {
