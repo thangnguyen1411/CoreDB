@@ -273,6 +273,14 @@ public final class HeapFile implements AutoCloseable {
         return nextPageId;
     }
 
+    public void flush() throws IOException {
+        fsm.flush();
+        if (channel != null) {
+            updateMetaPage();
+            channel.force(true);
+        }
+    }
+
     @Override
     public void close() throws IOException {
         // Close FSM first (it has its own file channel)

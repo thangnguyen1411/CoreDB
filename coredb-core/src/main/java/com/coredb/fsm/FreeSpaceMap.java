@@ -323,6 +323,39 @@ public final class FreeSpaceMap {
      *
      * @throws IOException if write fails
      */
+    public void flush() throws IOException {
+        if (channel == null) {
+            return;
+        }
+        if (categories.length > 0) {
+            ByteBuffer body = ByteBuffer.wrap(categories);
+            long written = 0;
+            while (body.hasRemaining()) {
+                int w = channel.write(body, FSM_HEADER_SIZE + written);
+                if (w == 0) {
+                    throw new IOException("FSM body write returned 0 bytes");
+                }
+                written += w;
+            }
+        }
+        ByteBuffer header = ByteBuffer.allocate(FSM_HEADER_SIZE);
+        BinaryUtil.writeU32(header, 0, Constants.FSM_FILE_MAGIC);
+        BinaryUtil.writeU32(header, 4, FSM_VERSION);
+        BinaryUtil.writeU32(header, 8, categories.length);
+        BinaryUtil.writeU32(header, 12, 0);
+        header.position(FSM_HEADER_SIZE);
+        header.flip();
+        long headerWritten = 0;
+        while (header.hasRemaining()) {
+            int w = channel.write(header, headerWritten);
+            if (w == 0) {
+                throw new IOException("FSM header write returned 0 bytes");
+            }
+            headerWritten += w;
+        }
+        channel.force(true);
+    }
+
     public void close() throws IOException {
         if (channel == null) {
             return; // In-memory only FSM
