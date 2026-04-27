@@ -13,6 +13,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.AbstractMap;
 import java.util.Iterator;
@@ -35,6 +36,10 @@ public class BTreeStorageEngine implements StorageEngine {
 
     private static final Logger log = LoggerFactory.getLogger(BTreeStorageEngine.class);
 
+    // Index files use heap OID + this offset so their pages don't collide in the buffer pool.
+    // The offset is persisted in the index file's meta page and recovered on open.
+    private static final int INDEX_OID_OFFSET = 0x00100000;
+
     private final CoreDBConfig config;
 
     // Engine state (valid after open())
@@ -51,21 +56,19 @@ public class BTreeStorageEngine implements StorageEngine {
     @Override
     public void open(Path dataDir, TableMeta meta, BufferPool bufferPool) throws IOException {
         this.bufferPool = bufferPool;
-        // Resolve PK column index for extracting PK values from rows
         Schema schema = meta.schema();
         this.pkColumnIndex = schema.indexOf(meta.pkColumn());
         if (pkColumnIndex < 0) {
             throw new IllegalArgumentException("PK column '" + meta.pkColumn() + "' not found in schema");
         }
 
-        // Validate PK column is LONG type (our B+ tree only supports long keys for now)
         if (schema.column(pkColumnIndex).type() != com.coredb.api.ColumnType.LONG) {
             throw new IllegalArgumentException("BTreeStorageEngine only supports LONG primary keys.");
         }
 
         // Open or create heap file: base/1/<oid>
         Path heapPath = dataDir.resolve("base/1/" + meta.oid());
-        if (java.nio.file.Files.exists(heapPath)) {
+        if (Files.exists(heapPath)) {
             this.heap = HeapFile.open(heapPath, meta.oid(), schema, bufferPool);
         } else {
             this.heap = HeapFile.create(heapPath, meta.oid(), schema, bufferPool);
@@ -73,11 +76,14 @@ public class BTreeStorageEngine implements StorageEngine {
 
         // Open or create index file: base/1/<oid>_pk
         Path indexPath = dataDir.resolve("base/1/" + meta.oid() + "_pk");
-        if (java.nio.file.Files.exists(indexPath)) {
-            this.indexFile = IndexFile.open(indexPath, meta.oid(), bufferPool);
+        if (Files.exists(indexPath)) {
+            // Recover the file ID from the index file's meta page
+            this.indexFile = IndexFile.open(indexPath, bufferPool);
             this.pkIndex = BTree.open(indexFile);
         } else {
-            this.indexFile = IndexFile.create(indexPath, meta.oid(), bufferPool);
+            // Allocate a new file ID for the index file
+            int indexFileId = meta.oid() + INDEX_OID_OFFSET;
+            this.indexFile = IndexFile.create(indexPath, indexFileId, bufferPool);
             this.pkIndex = BTree.create(indexFile);
         }
 
@@ -110,7 +116,6 @@ public class BTreeStorageEngine implements StorageEngine {
 
             log.debug("Updated row with pk={}: oldRid={} -> newRid={}", pk, oldRid, newRid);
         } else {
-            // INSERT path
             RecordId rid = heap.insert(row);
             pkIndex.insert(pk, rid);
             log.debug("Inserted row with pk={} at rid={}", pk, rid);
@@ -119,31 +124,24 @@ public class BTreeStorageEngine implements StorageEngine {
 
     @Override
     public Optional<Row> get(long pk) throws IOException {
-        // Search index for RecordId
         Optional<RecordId> ridOpt = pkIndex.search(pk);
         if (ridOpt.isEmpty()) {
             return Optional.empty();
         }
 
-        // Fetch row from heap
         return heap.get(ridOpt.get());
     }
 
     @Override
     public void delete(long pk) throws IOException {
-        // Search index for RecordId
         Optional<RecordId> ridOpt = pkIndex.search(pk);
         if (ridOpt.isEmpty()) {
-            // PK not found, nothing to delete
             return;
         }
 
         RecordId rid = ridOpt.get();
 
-        // Delete from heap (sets t_xmax)
         heap.delete(rid);
-
-        // Delete from index
         pkIndex.delete(pk);
 
         log.debug("Deleted row with pk={} at rid={}", pk, rid);
@@ -151,7 +149,6 @@ public class BTreeStorageEngine implements StorageEngine {
 
     @Override
     public Iterator<Map.Entry<Long, Row>> rangeScan(long fromPk, long toPk) throws IOException {
-        // Use B+ tree range scan to get (pk, RecordId) pairs
         Iterator<Map.Entry<Long, RecordId>> indexIterator = pkIndex.rangeScan(fromPk, toPk);
 
         return new Iterator<>() {
@@ -166,7 +163,6 @@ public class BTreeStorageEngine implements StorageEngine {
                 try {
                     Optional<Row> rowOpt = heap.get(entry.getValue());
                     if (rowOpt.isEmpty()) {
-                        // This shouldn't happen if the engine is consistent
                         throw new IllegalStateException("Index points to missing row: " + entry.getValue());
                     }
                     return new AbstractMap.SimpleEntry<>(entry.getKey(), rowOpt.get());
@@ -179,7 +175,6 @@ public class BTreeStorageEngine implements StorageEngine {
 
     @Override
     public Iterator<Map.Entry<Long, Row>> fullScan() throws IOException {
-        // Scan heap and extract PK from each row
         Iterator<Row> heapIterator = heap.scan();
 
         return new Iterator<>() {
@@ -248,12 +243,6 @@ public class BTreeStorageEngine implements StorageEngine {
         }
     }
 
-    /**
-     * Extracts the primary key value from a row.
-     *
-     * @param row the row to extract from
-     * @return the PK value as Long, or null if extraction fails
-     */
     private Long extractPk(Row row) {
         if (pkColumnIndex >= row.size()) {
             return null;

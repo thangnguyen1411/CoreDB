@@ -7,14 +7,13 @@ import com.coredb.catalog.ControlFile;
 import com.coredb.catalog.TableMeta;
 import com.coredb.engine.StorageEngine;
 import com.coredb.engine.StorageEngineFactory;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public final class CoreDB implements AutoCloseable {
 
@@ -28,14 +27,25 @@ public final class CoreDB implements AutoCloseable {
     private final Map<Integer, StorageEngine> engineCache;
     private volatile boolean closed = false;
 
-    private CoreDB(Path dataPath, CoreDBConfig config, ControlFile controlFile, BufferPool bufferPool, Catalog catalog) {
+    private CoreDB(
+        Path dataPath,
+        CoreDBConfig config,
+        ControlFile controlFile,
+        BufferPool bufferPool,
+        Catalog catalog
+    ) {
         this.dataPath = dataPath;
         this.config = config;
         this.controlFile = controlFile;
         this.bufferPool = bufferPool;
         this.catalog = catalog;
         this.engineCache = new ConcurrentHashMap<>();
-        log.debug("CoreDB opened: path={} engine={} pageSize={}", dataPath, config.engineType(), config.pageSize());
+        log.debug(
+            "CoreDB opened: path={} engine={} pageSize={}",
+            dataPath,
+            config.engineType(),
+            config.pageSize()
+        );
     }
 
     public static CoreDB open(String dataPath) throws IOException {
@@ -46,11 +56,13 @@ public final class CoreDB implements AutoCloseable {
         return open(dataPath, CoreDBConfig.defaults());
     }
 
-    public static CoreDB open(String dataPath, CoreDBConfig config) throws IOException {
+    public static CoreDB open(String dataPath, CoreDBConfig config)
+        throws IOException {
         return open(Path.of(dataPath), config);
     }
 
-    public static CoreDB open(Path dataPath, CoreDBConfig config) throws IOException {
+    public static CoreDB open(Path dataPath, CoreDBConfig config)
+        throws IOException {
         // Ensure data directory exists
         Files.createDirectories(dataPath);
 
@@ -106,9 +118,16 @@ public final class CoreDB implements AutoCloseable {
         }
         return engineCache.computeIfAbsent(meta.oid(), oid -> {
             try {
-                StorageEngine engine = StorageEngineFactory.create(config.engineType(), config);
+                StorageEngine engine = StorageEngineFactory.create(
+                    config.engineType(),
+                    config
+                );
                 engine.open(dataPath, meta, bufferPool);
-                log.debug("Opened StorageEngine for table {} (oid={})", meta.name(), oid);
+                log.debug(
+                    "Opened StorageEngine for table {} (oid={})",
+                    meta.name(),
+                    oid
+                );
                 return engine;
             } catch (IOException e) {
                 throw new java.io.UncheckedIOException(e);
@@ -138,7 +157,10 @@ public final class CoreDB implements AutoCloseable {
                 try {
                     engine.close();
                 } catch (IOException e) {
-                    log.warn("Error closing storage engine: {}", e.getMessage());
+                    log.warn(
+                        "Error closing storage engine: {}",
+                        e.getMessage()
+                    );
                 }
             }
             engineCache.clear();

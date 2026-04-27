@@ -14,7 +14,7 @@ import java.nio.ByteBuffer;
 public final class BufferDescriptor {
 
     private final int frameId;
-    private int tableOid;
+    private int fileId;
     private int pageId;
     private int pinCount;
     private int usageCount;
@@ -25,7 +25,7 @@ public final class BufferDescriptor {
     BufferDescriptor(int frameId, ByteBuffer page) {
         this.frameId = frameId;
         this.page = page;
-        this.tableOid = 0;
+        this.fileId = 0;
         this.pageId = 0;
         this.pinCount = 0;
         this.usageCount = 0;
@@ -37,8 +37,8 @@ public final class BufferDescriptor {
         return frameId;
     }
 
-    public int tableOid() {
-        return tableOid;
+    public int fileId() {
+        return fileId;
     }
 
     public int pageId() {
@@ -66,11 +66,11 @@ public final class BufferDescriptor {
     }
 
     /**
-     * Binds this frame to a specific page from a table.
+     * Binds this frame to a specific page from a file.
      * Called when a page is loaded into this frame.
      */
-    void bind(int tableOid, int pageId) {
-        this.tableOid = tableOid;
+    void bind(int fileId, int pageId) {
+        this.fileId = fileId;
         this.pageId = pageId;
     }
 
@@ -161,7 +161,7 @@ public final class BufferDescriptor {
      * Resets all mutable state for reuse when frame is evicted.
      */
     void reset() {
-        tableOid = 0;
+        fileId = 0;
         pageId = 0;
         pinCount = 0;
         usageCount = 0;
@@ -171,18 +171,18 @@ public final class BufferDescriptor {
 
     /**
      * Returns a compact key for hash table lookups.
-     * Packs 2 int values (tableOid, pageId) into a long for use as HashMap key.
+     * Packs 2 int values (fileId, pageId) into a long for use as HashMap key.
      */
-    static long key(int tableOid, int pageId) {
-        return ((long) tableOid << 32) | (pageId & 0xFFFFFFFFL);
+    static long key(int fileId, int pageId) {
+        return ((long) fileId << 32) | (pageId & 0xFFFFFFFFL);
     }
 
     @Override
     public String toString() {
         return String.format(
-            "BufferDescriptor[frame=%d, oid=%d, page=%d, pins=%d, usage=%d, dirty=%s]",
+            "BufferDescriptor[frame=%d, fileId=%d, page=%d, pins=%d, usage=%d, dirty=%s]",
             frameId,
-            tableOid,
+            fileId,
             pageId,
             pinCount,
             usageCount,
