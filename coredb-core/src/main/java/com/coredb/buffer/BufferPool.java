@@ -9,6 +9,8 @@ import com.coredb.wal.XLogRecord;
 import com.coredb.wal.XLogResourceManager;
 import com.coredb.wal.XLogWriter;
 
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -386,8 +388,8 @@ public final class BufferPool implements AutoCloseable {
      * Format: (long redoLsn)
      */
     private byte[] buildCheckpointPayload(long redoLsn) throws IOException {
-        java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
-        java.io.DataOutputStream dos = new java.io.DataOutputStream(baos);
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        DataOutputStream dos = new DataOutputStream(baos);
         dos.writeLong(redoLsn);
         dos.flush();
         return baos.toByteArray();

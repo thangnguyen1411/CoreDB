@@ -454,7 +454,7 @@ public final class BTree {
 
     /**
      * Builds a full-page write WAL payload.
-     * Format: (byte[8192] pageImage, byte[] originalPayload)
+     * Format: (byte[Constants.PAGE_SIZE] pageImage, byte[] originalPayload)
      */
     private byte[] buildFullPageWritePayload(ByteBuffer pageBuffer, byte[] originalPayload) throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();

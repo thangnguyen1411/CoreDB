@@ -35,7 +35,8 @@ public final class BTreeResourceManager implements ResourceManager {
     public void redo(XLogRecord record, ByteBuffer targetPage) throws IOException {
         targetPage.order(ByteOrder.BIG_ENDIAN);
 
-        switch (record.info()) {
+        byte opCode = (byte) (record.info() & 0x7F);
+        switch (opCode) {
             case BTREE_INSERT:
                 redoLeafInsert(record, targetPage);
                 break;
