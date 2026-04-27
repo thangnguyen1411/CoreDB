@@ -171,8 +171,8 @@ class ClogManagerTest {
     void bitPackingCorrectlyIsolatesXidsInSameByte() throws Exception {
         ClogManager clog = ClogManager.create(tempDir);
 
-        // XIDs 3, 4, 5, 6 all fit in byte index 0 (XID/4 = 1 for 4-7, but XID 3 is index 1)
-        // Actually: XID 2,3,4,5 are in byte index 0
+        // XIDs 2,3 are in byte index 0 (2/4=0, 3/4=0)
+        // XIDs 4,5 are in byte index 1 (4/4=1, 5/4=1)
         clog.setCommitted(2);
         clog.setAborted(3);
         clog.setCommitted(4);

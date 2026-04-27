@@ -140,7 +140,13 @@ public final class ClogManager implements AutoCloseable {
 
         if (bodySize > 0) {
             ByteBuffer bodyBuffer = ByteBuffer.wrap(cache);
-            channel.read(bodyBuffer, HEADER_SIZE);
+            while (bodyBuffer.hasRemaining()) {
+                long position = HEADER_SIZE + bodyBuffer.position();
+                int n = channel.read(bodyBuffer, position);
+                if (n == -1) {
+                    break; // EOF reached unexpectedly
+                }
+            }
         }
 
         // Verify entry count matches body size
@@ -161,6 +167,9 @@ public final class ClogManager implements AutoCloseable {
      * @throws IllegalArgumentException if xid is 0 (INVALID_XID)
      */
     public synchronized Status getStatus(int xid) {
+        if (xid < 0) {
+            throw new IllegalArgumentException("Cannot query status of negative XID: " + xid);
+        }
         if (xid == XID_INVALID) {
             throw new IllegalArgumentException("Cannot query status of INVALID_XID (0)");
         }
@@ -190,7 +199,7 @@ public final class ClogManager implements AutoCloseable {
      * @throws IllegalArgumentException if xid is 0 or 1
      */
     public synchronized void setCommitted(int xid) {
-        if (xid == XID_INVALID || xid == XID_BOOTSTRAP) {
+        if (xid < 0 || xid == XID_INVALID || xid == XID_BOOTSTRAP) {
             throw new IllegalArgumentException("Cannot set status for INVALID_XID or BOOTSTRAP_XID");
         }
         setStatus(xid, STATUS_COMMITTED);
@@ -203,13 +212,13 @@ public final class ClogManager implements AutoCloseable {
      * @throws IllegalArgumentException if xid is 0 or 1
      */
     public synchronized void setAborted(int xid) {
-        if (xid == XID_INVALID || xid == XID_BOOTSTRAP) {
+        if (xid < 0 || xid == XID_INVALID || xid == XID_BOOTSTRAP) {
             throw new IllegalArgumentException("Cannot set status for INVALID_XID or BOOTSTRAP_XID");
         }
         setStatus(xid, STATUS_ABORTED);
     }
 
-    private void setStatus(int xid, int statusCode) {
+    private synchronized void setStatus(int xid, int statusCode) {
         int byteIndex = xid / 4;
 
         // Grow cache if needed
@@ -303,12 +312,12 @@ public final class ClogManager implements AutoCloseable {
     /**
      * Statistics about clog contents.
      */
-    public record Stats(int entries, int inProgress, int committed, int aborted, int fileSizeBytes) {
+    public record Stats(int entries, int inProgress, int committed, int aborted, int cacheBytes) {
         @Override
         public String toString() {
             return String.format(
                 "entries=%d  in-progress=%d  committed=%d  aborted=%d  file-size=%d bytes",
-                entries, inProgress, committed, aborted, fileSizeBytes + HEADER_SIZE);
+                entries, inProgress, committed, aborted, cacheBytes + HEADER_SIZE);
         }
     }
 }
