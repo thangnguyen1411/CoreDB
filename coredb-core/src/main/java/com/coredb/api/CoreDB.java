@@ -7,12 +7,16 @@ import com.coredb.catalog.ControlFile;
 import com.coredb.catalog.TableMeta;
 import com.coredb.engine.StorageEngine;
 import com.coredb.engine.StorageEngineFactory;
+import com.coredb.recovery.RecoveryManager;
+import com.coredb.recovery.RecoveryStats;
 import com.coredb.util.Constants;
 import com.coredb.wal.XLogWriter;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.Collections;
 import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,6 +32,7 @@ public final class CoreDB implements AutoCloseable {
     private final XLogWriter xlogWriter;
     private final Catalog catalog;
     private final Map<Integer, StorageEngine> engineCache;
+    private final RecoveryStats lastRecoveryStats;
     private volatile boolean closed = false;
 
     private CoreDB(
@@ -36,7 +41,8 @@ public final class CoreDB implements AutoCloseable {
         ControlFile controlFile,
         BufferPool bufferPool,
         XLogWriter xlogWriter,
-        Catalog catalog
+        Catalog catalog,
+        RecoveryStats lastRecoveryStats
     ) {
         this.dataPath = dataPath;
         this.config = config;
@@ -45,6 +51,7 @@ public final class CoreDB implements AutoCloseable {
         this.xlogWriter = xlogWriter;
         this.catalog = catalog;
         this.engineCache = new ConcurrentHashMap<>();
+        this.lastRecoveryStats = lastRecoveryStats;
         log.debug(
             "CoreDB opened: path={} engine={} pageSize={}",
             dataPath,
@@ -71,16 +78,25 @@ public final class CoreDB implements AutoCloseable {
         // Ensure data directory exists
         Files.createDirectories(dataPath);
 
+        RecoveryStats recoveryStats;
         ControlFile controlFile;
+
         if (Files.exists(dataPath.resolve("global/pg_control"))) {
-            // Existing database: load control file and validate
-            controlFile = ControlFile.load(dataPath);
+            // Existing database: run recovery then load control file
             log.info("Opened existing database: {}", dataPath);
+            recoveryStats = RecoveryManager.recover(dataPath);
+            controlFile = ControlFile.load(dataPath);
+            if (!recoveryStats.isNoRecovery()) {
+                log.info("Recovery complete: {} records redone, {} FPW restored, {} skipped",
+                         recoveryStats.redone(), recoveryStats.fpwRestored(),
+                         recoveryStats.skippedByPdLsn());
+            }
         } else {
             // Fresh database: run bootstrap to create system catalogs
             log.info("Initializing new database: {}", dataPath);
             BootstrapCatalog.initialize(dataPath, config);
             controlFile = ControlFile.load(dataPath);
+            recoveryStats = RecoveryStats.noRecoveryNeeded("fresh database");
             log.info("Database bootstrap complete");
         }
 
@@ -94,10 +110,21 @@ public final class CoreDB implements AutoCloseable {
         // Wire XLogWriter to BufferPool for WAL-before-data flush rule
         bufferPool.setXLogWriter(xlogWriter);
 
+        // Post-recovery checkpoint for existing databases
+        // This updates pg_control.checkpointLsn and resets needsFullPageWrite on frames
+        // Can be disabled via system property for testing idempotency
+        boolean skipPostRecoveryCheckpoint = Boolean.getBoolean("coredb.skip_post_recovery_checkpoint");
+        if (!skipPostRecoveryCheckpoint &&
+            Files.exists(dataPath.resolve("global/pg_control")) &&
+            !recoveryStats.isNoRecovery()) {
+            log.info("Performing post-recovery checkpoint...");
+            bufferPool.checkpoint(controlFile);
+        }
+
         // Create Catalog with WAL support (opens core_class and core_attribute heap files via buffer pool)
         Catalog catalog = new Catalog(dataPath, controlFile, bufferPool, xlogWriter, Constants.BOOTSTRAP_XID);
 
-        return new CoreDB(dataPath, config, controlFile, bufferPool, xlogWriter, catalog);
+        return new CoreDB(dataPath, config, controlFile, bufferPool, xlogWriter, catalog, recoveryStats);
     }
 
     public Path dataPath() {
@@ -114,6 +141,15 @@ public final class CoreDB implements AutoCloseable {
 
     public Catalog catalog() {
         return catalog;
+    }
+
+    /**
+     * Returns the recovery statistics from the last database open.
+     *
+     * @return RecoveryStats with counts from recovery, or null if no recovery was needed
+     */
+    public RecoveryStats lastRecoveryStats() {
+        return lastRecoveryStats;
     }
 
     /**
@@ -142,7 +178,7 @@ public final class CoreDB implements AutoCloseable {
                 );
                 return engine;
             } catch (IOException e) {
-                throw new java.io.UncheckedIOException(e);
+                throw new UncheckedIOException(e);
             }
         });
     }
@@ -165,13 +201,48 @@ public final class CoreDB implements AutoCloseable {
         return closed;
     }
 
+    /**
+     * Simulates a crash by flushing WAL but NOT dirty pages.
+     * Used for testing crash recovery scenarios.
+     *
+     * <p>This ensures WAL records are on disk but data pages are not,
+     * forcing recovery to replay WAL on next open.</p>
+     *
+     * @throws IOException if WAL flush fails
+     */
+    public void simulateCrash() throws IOException {
+        if (!closed) {
+            // Flush WAL to ensure records survive the "crash"
+            xlogWriter.flushUpTo(xlogWriter.currentLsn());
+
+            // Close without flushing dirty pages (simulates crash)
+            closed = true;
+            engineCache.clear();
+            try {
+                catalog.close();
+            } finally {
+                try {
+                    // Close buffer pool WITHOUT flushing dirty pages
+                    bufferPool.closeWithoutFlush();
+                } finally {
+                    try {
+                        xlogWriter.close();
+                    } finally {
+                        controlFile.close();
+                    }
+                }
+            }
+            log.debug("CoreDB crashed (simulated): path={}", dataPath);
+        }
+    }
+
     @Override
     public void close() throws IOException {
         if (!closed) {
             closed = true;
             // Close engines in reverse order of creation (newest first)
             var engines = engineCache.values().stream().toList();
-            java.util.Collections.reverse(engines);
+            Collections.reverse(engines);
             for (StorageEngine engine : engines) {
                 try {
                     engine.close();

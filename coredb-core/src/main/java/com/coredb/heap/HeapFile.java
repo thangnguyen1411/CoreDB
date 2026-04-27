@@ -289,6 +289,12 @@ public final class HeapFile implements AutoCloseable {
         int nextPageId = validateMetaPage(metaPage, tablePath, oid);
         bufferPool.unpinPage(metaFrame, false);
 
+        // After crash recovery, the meta page's nextPageId may be stale
+        // (updateMetaPage goes through the buffer pool, which may not have been flushed).
+        // Use the actual file size as the authoritative page count.
+        int pagesOnDisk = (int)(Files.size(tablePath) / Constants.PAGE_SIZE);
+        nextPageId = Math.max(nextPageId, pagesOnDisk);
+
         // Open or create FSM file
         Path fsmPath = tablePath.getParent().resolve(tablePath.getFileName() + "_fsm");
         FreeSpaceMap fsm;
@@ -704,7 +710,7 @@ public final class HeapFile implements AutoCloseable {
      * Holder for a pinned page and its buffer descriptor.
      * Callers must call unpin(dirty) when done to release the frame.
      */
-    public record PinnedPage(Page page, BufferDescriptor frame, BufferPool pool, java.nio.channels.FileChannel channel) {
+    public record PinnedPage(Page page, BufferDescriptor frame, BufferPool pool, FileChannel channel) {
         /**
          * Unpins this page. If frame is null (bootstrap mode), writes to disk if dirty.
          * @param dirty true if the page was modified

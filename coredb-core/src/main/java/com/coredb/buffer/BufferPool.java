@@ -416,6 +416,28 @@ public final class BufferPool implements AutoCloseable {
         pageTable.clear();
     }
 
+    /**
+     * Closes the buffer pool WITHOUT flushing dirty pages.
+     * Used for simulating crashes in tests.
+     *
+     * <p>File channels are still closed, but dirty pages are lost.
+     * On next startup, recovery must replay WAL to restore them.</p>
+     *
+     * @throws IOException if closing channels fails
+     */
+    public void closeWithoutFlush() throws IOException {
+        // Close all file channels without flushing dirty pages
+        for (FileChannel channel : channels.values()) {
+            try {
+                channel.close();
+            } catch (IOException e) {
+                // Continue closing others
+            }
+        }
+        channels.clear();
+        pageTable.clear();
+    }
+
     // ==================== Statistics ====================
 
     public int frameCount() {

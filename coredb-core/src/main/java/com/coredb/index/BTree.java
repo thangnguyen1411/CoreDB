@@ -17,6 +17,7 @@ import java.nio.ByteBuffer;
 import java.util.AbstractMap;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Collections;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 
@@ -147,7 +148,7 @@ public final class BTree {
      */
     public Iterator<Map.Entry<Long, RecordId>> rangeScan(long from, long to) throws IOException {
         if (from > to) {
-            return java.util.Collections.emptyIterator();
+            return Collections.emptyIterator();
         }
 
         return new RangeScanIterator(from, to);

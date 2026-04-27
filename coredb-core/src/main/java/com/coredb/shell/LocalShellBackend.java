@@ -20,12 +20,13 @@ import com.coredb.util.Constants;
 import com.coredb.wal.XLogReader;
 import com.coredb.wal.XLogRecord;
 import com.coredb.wal.XLogResourceManager;
-import com.coredb.wal.XLogWriter;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 public final class LocalShellBackend implements ShellBackend, AutoCloseable {
@@ -90,6 +91,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             case "range" -> handleRange(args);
             case "wal-dump" -> handleWalDump();
             case "checkpoint" -> handleCheckpoint();
+            case "recovery-status" -> handleRecoveryStatus();
             case "help" -> formatHelp();
             default -> "unknown command: " +
             command +
@@ -156,6 +158,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         WAL commands:
           wal-dump                   dump WAL file contents
           checkpoint                 perform database checkpoint (flush dirty pages, write CHECKPOINT record)
+          recovery-status            show last recovery statistics
         """;
     }
 
@@ -991,10 +994,10 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             StringBuilder sb = new StringBuilder();
             int count = 0;
 
-            java.util.Iterator<java.util.Map.Entry<Long, Row>> it =
+            Iterator<Map.Entry<Long, Row>> it =
                 engine.fullScan();
             while (it.hasNext()) {
-                java.util.Map.Entry<Long, Row> entry = it.next();
+                Map.Entry<Long, Row> entry = it.next();
                 sb
                     .append(entry.getKey())
                     .append(": ")
@@ -1050,10 +1053,10 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             StringBuilder sb = new StringBuilder();
             int count = 0;
 
-            java.util.Iterator<java.util.Map.Entry<Long, Row>> it =
+            Iterator<Map.Entry<Long, Row>> it =
                 engine.rangeScan(fromPk, toPk);
             while (it.hasNext()) {
-                java.util.Map.Entry<Long, Row> entry = it.next();
+                Map.Entry<Long, Row> entry = it.next();
                 sb
                     .append(entry.getKey())
                     .append(": ")
@@ -1097,7 +1100,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
                     long redoLsn = 0;
                     byte[] data = rec.data();
                     if (data.length >= 8) {
-                        java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(data);
+                        ByteBuffer bb = ByteBuffer.wrap(data);
                         bb.order(java.nio.ByteOrder.BIG_ENDIAN);
                         redoLsn = bb.getLong();
                     }
@@ -1142,6 +1145,13 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
      * Handles: checkpoint
      * Performs a database checkpoint - flushes dirty pages and writes CHECKPOINT record.
      */
+    private String handleRecoveryStatus() {
+        if (db.lastRecoveryStats() == null) {
+            return "no recovery stats available";
+        }
+        return db.lastRecoveryStats().format();
+    }
+
     private String handleCheckpoint() {
         try {
             BufferPool.CheckpointResult result = db.bufferPool().checkpoint(db.controlFile());
