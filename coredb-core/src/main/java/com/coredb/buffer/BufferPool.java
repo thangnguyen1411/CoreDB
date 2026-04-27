@@ -9,18 +9,21 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.HashMap;
 import java.util.Map;
 
 /**
  * BufferPool provides in-memory caching of database pages.
- * 
+ *
  * Core concepts:
  * - Frames: fixed number of 8KB buffers (default 1024 = 8MB)
  * - Pins: prevent eviction while a page is in use
  * - Dirty tracking: modified pages must be flushed to disk
  * - Usage count: for clock-sweep eviction
- * 
+ * - File registry: manages FileChannels for multiple table files
+ *
  * PostgreSQL parallel: bufmgr.c, freelist.c (StrategyGetBuffer)
  */
 public final class BufferPool implements AutoCloseable {
@@ -28,7 +31,8 @@ public final class BufferPool implements AutoCloseable {
     private final int frameCount;
     private final BufferDescriptor[] descriptors;
     private final Map<Long, Integer> pageTable; // (tableOid, pageId) -> frameId
-    
+    private final Map<Integer, FileChannel> channels; // tableOid -> FileChannel
+
     // Statistics
     private long hits;
     private long misses;
@@ -38,13 +42,14 @@ public final class BufferPool implements AutoCloseable {
 
     /**
      * Creates a buffer pool with the specified number of frames.
-     * 
+     *
      * @param frameCount number of 8KB frames (default: 1024 for 8MB pool)
      */
     public BufferPool(int frameCount) {
         this.frameCount = frameCount;
         this.descriptors = new BufferDescriptor[frameCount];
         this.pageTable = new HashMap<>(frameCount * 2);
+        this.channels = new HashMap<>();
         this.hits = 0;
         this.misses = 0;
 
@@ -74,21 +79,62 @@ public final class BufferPool implements AutoCloseable {
     }
 
     /**
+     * Registers a table file with the buffer pool.
+     * Opens a FileChannel that will be used for I/O operations.
+     *
+     * @param tableOid the table OID
+     * @param filePath the path to the table file
+     * @throws IOException if the file cannot be opened
+     */
+    public void registerFile(int tableOid, Path filePath) throws IOException {
+        if (channels.containsKey(tableOid)) {
+            return; // Already registered
+        }
+        FileChannel channel = FileChannel.open(filePath,
+                StandardOpenOption.READ, StandardOpenOption.WRITE);
+        channels.put(tableOid, channel);
+    }
+
+    /**
+     * Unregisters a table file and closes its channel.
+     * Flushes any dirty pages for this table before closing.
+     *
+     * @param tableOid the table OID
+     * @throws IOException if closing fails
+     */
+    public void unregisterFile(int tableOid) throws IOException {
+        flushAllForTable(tableOid);
+        FileChannel channel = channels.remove(tableOid);
+        if (channel != null) {
+            channel.close();
+        }
+        // Remove any pages for this table from the page table
+        pageTable.entrySet().removeIf(entry -> {
+            int oid = (int) (entry.getKey() >> 32);
+            return oid == tableOid;
+        });
+    }
+
+    /**
      * Fetches a page from the buffer pool.
-     * 
+     *
      * Hit: returns existing pinned buffer.
-     * Miss: allocates frame, reads from disk via FileChannel, pins it.
-     * 
+     * Miss: allocates frame, reads from disk via registered FileChannel, pins it.
+     *
      * @param tableOid the table OID (identifies which file)
      * @param pageId the page ID within the table
-     * @param channel FileChannel to read from on miss
      * @return BufferDescriptor for the page (already pinned)
      * @throws IOException if disk read fails
-     * @throws StorageException if pool is full or all frames pinned
+     * @throws StorageException if pool is full, all frames pinned, or file not registered
      */
-    public BufferDescriptor fetchPage(int tableOid, int pageId, FileChannel channel) throws IOException {
+    public BufferDescriptor fetchPage(int tableOid, int pageId) throws IOException {
+        FileChannel channel = channels.get(tableOid);
+        if (channel == null) {
+            throw new StorageException("File not registered for tableOid=" + tableOid);
+        }
+
         long key = BufferDescriptor.key(tableOid, pageId);
-        
+
         Integer frameId = pageTable.get(key);
         if (frameId != null) {
             // Hit: page already in pool — bump usage count (hot pages survive longer)
@@ -101,7 +147,7 @@ public final class BufferPool implements AutoCloseable {
 
         // Miss: need to load from disk
         misses++;
-        
+
         // Find a free frame (uses clock-sweep eviction if needed)
         BufferDescriptor victim = findFreeFrame(channel);
         if (victim == null) {
@@ -118,7 +164,7 @@ public final class BufferPool implements AutoCloseable {
         victim.bind(tableOid, pageId);
         victim.initUsageCount();
         victim.pin();
-        
+
         // Register in page table
         pageTable.put(key, victim.frameId());
 
@@ -128,17 +174,21 @@ public final class BufferPool implements AutoCloseable {
     /**
      * Fetches a page for a newly allocated page (no disk read needed).
      * Used when allocating a new page that doesn't exist on disk yet.
-     * 
+     *
      * @param tableOid the table OID
      * @param pageId the new page ID
-     * @param channel FileChannel for flushing dirty victims during eviction
      * @return BufferDescriptor for the new page (already pinned, dirty)
-     * @throws StorageException if pool is full
+     * @throws StorageException if pool is full or file not registered
      * @throws IOException if flushing a dirty victim fails
      */
-    public BufferDescriptor fetchNewPage(int tableOid, int pageId, FileChannel channel) throws IOException {
+    public BufferDescriptor fetchNewPage(int tableOid, int pageId) throws IOException {
+        FileChannel channel = channels.get(tableOid);
+        if (channel == null) {
+            throw new StorageException("File not registered for tableOid=" + tableOid);
+        }
+
         long key = BufferDescriptor.key(tableOid, pageId);
-        
+
         Integer frameId = pageTable.get(key);
         if (frameId != null) {
             // Shouldn't happen for new pages, but handle it
@@ -149,7 +199,7 @@ public final class BufferPool implements AutoCloseable {
         }
 
         misses++;
-        
+
         BufferDescriptor victim = findFreeFrame(channel);
         if (victim == null) {
             throw new StorageException("Buffer pool full (" + frameCount + " frames).");
@@ -158,13 +208,13 @@ public final class BufferPool implements AutoCloseable {
         // Clear the frame for the new page
         victim.page().clear();
         victim.page().limit(Constants.PAGE_SIZE);
-        
+
         victim.bind(tableOid, pageId);
         victim.pin();
         victim.markDirty(); // New pages are dirty by definition
-        
+
         pageTable.put(key, victim.frameId());
-        
+
         return victim;
     }
 
@@ -203,34 +253,59 @@ public final class BufferPool implements AutoCloseable {
     }
 
     /**
-     * Flushes all dirty frames to disk.
-     * 
-     * @param channel the FileChannel to write to
+     * Flushes all dirty frames for a specific table to disk.
+     *
+     * @param tableOid the table OID whose dirty pages should be flushed
      * @throws IOException if any write fails
      */
-    public void flushAllDirty(FileChannel channel) throws IOException {
+    public void flushAllForTable(int tableOid) throws IOException {
+        FileChannel channel = channels.get(tableOid);
+        if (channel == null) {
+            return; // No file registered for this table
+        }
         for (int i = 0; i < frameCount; i++) {
             BufferDescriptor frame = descriptors[i];
-            if (frame.dirty() && frame.tableOid() != 0) {
+            if (frame.dirty() && frame.tableOid() == tableOid) {
                 flushFrame(i, channel);
             }
         }
     }
 
     /**
-     * Closes the buffer pool.
-     * Note: caller is responsible for flushing dirty pages before close.
-     * This pool is file-agnostic and cannot flush without a channel.
+     * Flushes all dirty frames to disk across all registered files.
+     *
+     * @throws IOException if any write fails
+     */
+    public void flushAllDirty() throws IOException {
+        for (int i = 0; i < frameCount; i++) {
+            BufferDescriptor frame = descriptors[i];
+            if (frame.dirty() && frame.tableOid() != 0) {
+                FileChannel channel = channels.get(frame.tableOid());
+                if (channel != null) {
+                    flushFrame(i, channel);
+                }
+            }
+        }
+    }
+
+    /**
+     * Closes the buffer pool and all registered file channels.
+     * Flushes all dirty pages before closing.
      */
     @Override
-    public void close() {
-        int dirty = dirtyCount();
-        if (dirty > 0) {
-            throw new IllegalStateException(
-                "Buffer pool has " + dirty + " dirty frame(s). " +
-                "Call flushAllDirty(channel) before close()."
-            );
+    public void close() throws IOException {
+        // Flush all dirty pages first
+        flushAllDirty();
+
+        // Close all file channels
+        for (FileChannel channel : channels.values()) {
+            try {
+                channel.close();
+            } catch (IOException e) {
+                // Continue closing others
+            }
         }
+        channels.clear();
         pageTable.clear();
     }
 
@@ -317,27 +392,32 @@ public final class BufferPool implements AutoCloseable {
 
     /**
      * Clock-sweep eviction algorithm (PostgreSQL: StrategyGetBuffer/freelist.c).
-     * 
+     *
      * Sweeps through frames looking for an unpinned victim:
      * - If usageCount == 0: select as victim (flush if dirty)
      * - Otherwise: decrement usageCount and continue
-     * 
+     *
      * After frameCount * 2 attempts, throws if no evictable frame found.
-     * 
-     * @param channel FileChannel for flushing dirty victims
+     *
+     * @param newFileChannel FileChannel for the new file being loaded (fallback if victim's channel unknown)
      * @return evicted frame ready for reuse
      * @throws IOException if flushing fails
      * @throws StorageException if all frames are pinned
      */
-    private BufferDescriptor selectVictim(FileChannel channel) throws IOException {
+    private BufferDescriptor selectVictim(FileChannel newFileChannel) throws IOException {
         for (int attempts = 0; attempts < frameCount * 2; attempts++) {
             BufferDescriptor frame = descriptors[sweepHand];
-            
+
             if (frame.pinCount() == 0) {
                 if (frame.usageCount() == 0) {
                     // Found victim - evict it
                     if (frame.dirty()) {
-                        flushFrame(frame.frameId(), channel);
+                        // Use the correct channel for this frame's table
+                        FileChannel flushChannel = channels.get(frame.tableOid());
+                        if (flushChannel == null) {
+                            flushChannel = newFileChannel; // Fallback
+                        }
+                        flushFrame(frame.frameId(), flushChannel);
                     }
                     // Remove from page table
                     removeFromPageTable(frame.tableOid(), frame.pageId());
@@ -348,10 +428,10 @@ public final class BufferPool implements AutoCloseable {
                 // Decrement usage count (gives hot pages more chances)
                 frame.decrementUsage();
             }
-            
+
             sweepHand = (sweepHand + 1) % frameCount;
         }
-        
+
         throw new StorageException(
             "No evictable frame found - all " + frameCount + " frames pinned?"
         );

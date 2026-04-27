@@ -1,6 +1,7 @@
 package com.coredb.catalog;
 
 import com.coredb.api.CoreDBConfig;
+import com.coredb.buffer.BufferPool;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -24,7 +25,8 @@ class CatalogTest {
         BootstrapCatalog.initialize(tempDir, CoreDBConfig.defaults());
         ControlFile cf = ControlFile.load(tempDir);
 
-        try (Catalog catalog = new Catalog(tempDir, cf)) {
+        try (BufferPool pool = new BufferPool();
+             Catalog catalog = new Catalog(tempDir, cf, pool)) {
             // Initially no user tables (only system catalogs which are filtered)
             List<TableMeta> tables = catalog.listTables();
             assertThat(tables).isEmpty();
@@ -50,7 +52,8 @@ class CatalogTest {
         BootstrapCatalog.initialize(tempDir, CoreDBConfig.defaults());
         ControlFile cf = ControlFile.load(tempDir);
 
-        try (Catalog catalog = new Catalog(tempDir, cf)) {
+        try (BufferPool pool = new BufferPool();
+             Catalog catalog = new Catalog(tempDir, cf, pool)) {
             // Create a table
             ColumnDefParser.ParsedSchema parsed = parse("id:long name:string pk:id");
             catalog.createTable("products", parsed.schema(), parsed.pkColumn());
@@ -72,7 +75,8 @@ class CatalogTest {
         BootstrapCatalog.initialize(tempDir, CoreDBConfig.defaults());
         ControlFile cf = ControlFile.load(tempDir);
 
-        try (Catalog catalog = new Catalog(tempDir, cf)) {
+        try (BufferPool pool = new BufferPool();
+             Catalog catalog = new Catalog(tempDir, cf, pool)) {
             ColumnDefParser.ParsedSchema parsed = parse("id:long pk:id");
             catalog.createTable("items", parsed.schema(), parsed.pkColumn());
 
@@ -89,14 +93,16 @@ class CatalogTest {
         ControlFile cf = ControlFile.load(tempDir);
 
         // Create table in first session
-        try (Catalog catalog = new Catalog(tempDir, cf)) {
+        try (BufferPool pool = new BufferPool();
+             Catalog catalog = new Catalog(tempDir, cf, pool)) {
             ColumnDefParser.ParsedSchema parsed = parse("id:long name:string pk:id");
             catalog.createTable("customers", parsed.schema(), parsed.pkColumn());
         }
 
         // Reopen and verify
         ControlFile cf2 = ControlFile.load(tempDir);
-        try (Catalog catalog2 = new Catalog(tempDir, cf2)) {
+        try (BufferPool pool2 = new BufferPool();
+             Catalog catalog2 = new Catalog(tempDir, cf2, pool2)) {
             Optional<TableMeta> metaOpt = catalog2.openTable("customers");
             assertThat(metaOpt).isPresent();
             assertThat(metaOpt.get().name()).isEqualTo("customers");
@@ -109,7 +115,8 @@ class CatalogTest {
         BootstrapCatalog.initialize(tempDir, CoreDBConfig.defaults());
         ControlFile cf = ControlFile.load(tempDir);
 
-        try (Catalog catalog = new Catalog(tempDir, cf)) {
+        try (BufferPool pool = new BufferPool();
+             Catalog catalog = new Catalog(tempDir, cf, pool)) {
             // Create and drop a table
             ColumnDefParser.ParsedSchema parsed = parse("id:long name:string pk:id");
             catalog.createTable("temp", parsed.schema(), parsed.pkColumn());
@@ -134,7 +141,8 @@ class CatalogTest {
         BootstrapCatalog.initialize(tempDir, CoreDBConfig.defaults());
         ControlFile cf = ControlFile.load(tempDir);
 
-        try (Catalog catalog = new Catalog(tempDir, cf)) {
+        try (BufferPool pool = new BufferPool();
+             Catalog catalog = new Catalog(tempDir, cf, pool)) {
             // Create a table
             ColumnDefParser.ParsedSchema parsed = parse("id:long name:string pk:id");
             catalog.createTable("reusable", parsed.schema(), parsed.pkColumn());
@@ -159,7 +167,8 @@ class CatalogTest {
         BootstrapCatalog.initialize(tempDir, CoreDBConfig.defaults());
         ControlFile cf = ControlFile.load(tempDir);
 
-        try (Catalog catalog = new Catalog(tempDir, cf)) {
+        try (BufferPool pool = new BufferPool();
+             Catalog catalog = new Catalog(tempDir, cf, pool)) {
             // Create a table without PK
             ColumnDefParser.ParsedSchema parsed = parse("level:string message:string");
             catalog.createTable("logs", parsed.schema(), parsed.pkColumn());
@@ -182,7 +191,8 @@ class CatalogTest {
         BootstrapCatalog.initialize(tempDir, CoreDBConfig.defaults());
         ControlFile cf = ControlFile.load(tempDir);
 
-        try (Catalog catalog = new Catalog(tempDir, cf)) {
+        try (BufferPool pool = new BufferPool();
+             Catalog catalog = new Catalog(tempDir, cf, pool)) {
             assertThatThrownBy(() -> catalog.dropTable("nonexistent"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Table not found");

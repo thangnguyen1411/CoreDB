@@ -1,6 +1,7 @@
 package com.coredb.index;
 
 import com.coredb.heap.RecordId;
+import com.coredb.index.IndexFile.PinnedPage;
 import com.coredb.page.Page;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -35,13 +36,14 @@ class BTreeLeafPageSplitTest {
         IndexFile indexFile = IndexFile.create(indexPath, 1000);
 
         // Get the root page (page 1) as a leaf
-        Page rootPage = indexFile.readPage(1);
+        PinnedPage pinned = indexFile.readPage(1);
+        Page rootPage = pinned.page();
         BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(rootPage));
 
         // Insert exactly 2 entries (minimum for split)
         leaf.insert(10L, new RecordId(1, 0));
         leaf.insert(20L, new RecordId(1, 1));
-        indexFile.writePage(leaf.layout().page());
+        pinned.unpin(true);
 
         // Split the page
         SplitResult result = leaf.split(indexFile);
@@ -55,10 +57,12 @@ class BTreeLeafPageSplitTest {
         assertThat(leaf.keyAt(0)).isEqualTo(10L);
 
         // Verify right page (page 2) has second entry
-        Page rightPageData = indexFile.readPage(2);
+        PinnedPage rightPinned = indexFile.readPage(2);
+        Page rightPageData = rightPinned.page();
         BTreeLeafPage rightPage = BTreeLeafPage.of(IndexPageLayout.of(rightPageData));
         assertThat(rightPage.entryCount()).isEqualTo(1);
         assertThat(rightPage.keyAt(0)).isEqualTo(20L);
+        rightPinned.unpin(false);
 
         indexFile.close();
     }
@@ -68,14 +72,15 @@ class BTreeLeafPageSplitTest {
         Path indexPath = tempDir.resolve("test.idx");
         IndexFile indexFile = IndexFile.create(indexPath, 1000);
 
-        Page rootPage = indexFile.readPage(1);
+        PinnedPage pinned = indexFile.readPage(1);
+        Page rootPage = pinned.page();
         BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(rootPage));
 
         // Insert 10 entries
         for (int i = 0; i < 10; i++) {
             leaf.insert((long) (i * 10), new RecordId(1, i));
         }
-        indexFile.writePage(leaf.layout().page());
+        pinned.unpin(true);
 
         // Split
         SplitResult result = leaf.split(indexFile);
@@ -90,12 +95,14 @@ class BTreeLeafPageSplitTest {
         }
 
         // Right page should have entries 50-90 (5 entries)
-        Page rightPageData = indexFile.readPage(result.newRightPageId());
+        PinnedPage rightPinned = indexFile.readPage(result.newRightPageId());
+        Page rightPageData = rightPinned.page();
         BTreeLeafPage rightPage = BTreeLeafPage.of(IndexPageLayout.of(rightPageData));
         assertThat(rightPage.entryCount()).isEqualTo(5);
         for (int i = 0; i < 5; i++) {
             assertThat(rightPage.keyAt(i)).isEqualTo((i + 5) * 10L);
         }
+        rightPinned.unpin(false);
 
         indexFile.close();
     }
@@ -105,14 +112,15 @@ class BTreeLeafPageSplitTest {
         Path indexPath = tempDir.resolve("test.idx");
         IndexFile indexFile = IndexFile.create(indexPath, 1000);
 
-        Page rootPage = indexFile.readPage(1);
+        PinnedPage pinned = indexFile.readPage(1);
+        Page rootPage = pinned.page();
         BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(rootPage));
 
         // Insert 5 entries (odd count)
         for (int i = 0; i < 5; i++) {
             leaf.insert((long) (i * 10), new RecordId(1, i));
         }
-        indexFile.writePage(leaf.layout().page());
+        pinned.unpin(true);
 
         // Split: with 5 entries, splitPoint = 3, so left gets 3, right gets 2
         SplitResult result = leaf.split(indexFile);
@@ -120,8 +128,10 @@ class BTreeLeafPageSplitTest {
         assertThat(leaf.entryCount()).isEqualTo(3);  // Left gets ceiling(5/2) = 3
         assertThat(result.separatorKey()).isEqualTo(30L);
 
-        Page rightPageData = indexFile.readPage(result.newRightPageId());
+        PinnedPage rightPinned = indexFile.readPage(result.newRightPageId());
+        Page rightPageData = rightPinned.page();
         BTreeLeafPage rightPage = BTreeLeafPage.of(IndexPageLayout.of(rightPageData));
+        rightPinned.unpin(false);
         assertThat(rightPage.entryCount()).isEqualTo(2);  // Right gets floor(5/2) = 2
 
         indexFile.close();
@@ -132,14 +142,15 @@ class BTreeLeafPageSplitTest {
         Path indexPath = tempDir.resolve("test.idx");
         IndexFile indexFile = IndexFile.create(indexPath, 1000);
 
-        Page rootPage = indexFile.readPage(1);
+        PinnedPage pinned = indexFile.readPage(1);
+        Page rootPage = pinned.page();
         BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(rootPage));
 
         // Insert entries
         for (int i = 0; i < 6; i++) {
             leaf.insert((long) i, new RecordId(1, i));
         }
-        indexFile.writePage(leaf.layout().page());
+        pinned.unpin(true);
 
         // Initially no siblings
         assertThat(leaf.btpoPrev()).isEqualTo(0);
@@ -153,10 +164,12 @@ class BTreeLeafPageSplitTest {
         assertThat(leaf.btpoPrev()).isEqualTo(0);  // Still no left sibling
 
         // Right page should point back to left and have no right sibling
-        Page rightPageData = indexFile.readPage(result.newRightPageId());
+        PinnedPage rightPinned = indexFile.readPage(result.newRightPageId());
+        Page rightPageData = rightPinned.page();
         BTreeLeafPage rightPage = BTreeLeafPage.of(IndexPageLayout.of(rightPageData));
         assertThat(rightPage.btpoPrev()).isEqualTo(1);
         assertThat(rightPage.btpoNext()).isEqualTo(0);
+        rightPinned.unpin(false);
 
         indexFile.close();
     }
@@ -167,7 +180,8 @@ class BTreeLeafPageSplitTest {
         IndexFile indexFile = IndexFile.create(indexPath, 1000);
 
         // Manually set up a chain: Page 1 <-> Page 2
-        Page page1 = indexFile.readPage(1);
+        PinnedPage pinned1 = indexFile.readPage(1);
+        Page page1 = pinned1.page();
         BTreeLeafPage leaf1 = BTreeLeafPage.of(IndexPageLayout.of(page1));
 
         // Insert entries into page 1
@@ -176,7 +190,8 @@ class BTreeLeafPageSplitTest {
         }
 
         // Allocate page 2 as the right sibling of page 1
-        Page page2Data = indexFile.allocateNewPage(com.coredb.page.PageType.INDEX_LEAF);
+        PinnedPage pinned2 = indexFile.allocateNewPage(com.coredb.page.PageType.INDEX_LEAF);
+        Page page2Data = pinned2.page();
         BTreeLeafPage leaf2 = BTreeLeafPage.of(IndexPageLayout.of(page2Data));
 
         // Set up sibling pointers: 1 <-> 2
@@ -188,8 +203,9 @@ class BTreeLeafPageSplitTest {
             leaf2.insert((long) i, new RecordId(1, i));
         }
 
-        indexFile.writePage(leaf1.layout().page());
-        indexFile.writePage(leaf2.layout().page());
+        // Unpin both pages (modified)
+        pinned1.unpin(true);
+        pinned2.unpin(true);
 
         // Verify initial chain: 1 <-> 2
         assertThat(leaf1.btpoNext()).isEqualTo(2);
@@ -201,17 +217,21 @@ class BTreeLeafPageSplitTest {
         // After split, chain should be: 1 <-> 3 (new) <-> 2
         assertThat(leaf1.btpoNext()).isEqualTo(result.newRightPageId());
 
-        Page newRightData = indexFile.readPage(result.newRightPageId());
+        PinnedPage newRightPinned = indexFile.readPage(result.newRightPageId());
+        Page newRightData = newRightPinned.page();
         BTreeLeafPage newRight = BTreeLeafPage.of(IndexPageLayout.of(newRightData));
 
         // New page should point to page 1 and page 2
         assertThat(newRight.btpoPrev()).isEqualTo(1);
         assertThat(newRight.btpoNext()).isEqualTo(2);
+        newRightPinned.unpin(false);
 
         // Page 2 should now point back to the new page, not page 1
-        page2Data = indexFile.readPage(2);
+        PinnedPage page2Pinned = indexFile.readPage(2);
+        page2Data = page2Pinned.page();
         leaf2 = BTreeLeafPage.of(IndexPageLayout.of(page2Data));
         assertThat(leaf2.btpoPrev()).isEqualTo(result.newRightPageId());
+        page2Pinned.unpin(false);
 
         indexFile.close();
     }
@@ -221,14 +241,15 @@ class BTreeLeafPageSplitTest {
         Path indexPath = tempDir.resolve("test.idx");
         IndexFile indexFile = IndexFile.create(indexPath, 1000);
 
-        Page rootPage = indexFile.readPage(1);
+        PinnedPage pinned = indexFile.readPage(1);
+        Page rootPage = pinned.page();
         BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(rootPage));
 
         // Insert entries
         for (int i = 0; i < 8; i++) {
             leaf.insert((long) i, new RecordId(1, i));
         }
-        indexFile.writePage(leaf.layout().page());
+        pinned.unpin(true);
 
         // Split
         SplitResult result = leaf.split(indexFile);
@@ -240,7 +261,8 @@ class BTreeLeafPageSplitTest {
         }
 
         // Right page keys 4-7
-        Page rightPageData = indexFile.readPage(result.newRightPageId());
+        PinnedPage rightPinned = indexFile.readPage(result.newRightPageId());
+        Page rightPageData = rightPinned.page();
         BTreeLeafPage rightPage = BTreeLeafPage.of(IndexPageLayout.of(rightPageData));
         for (int i = 4; i < 8; i++) {
             assertThat(rightPage.search((long) i)).hasValue(new RecordId(1, i));
@@ -248,6 +270,7 @@ class BTreeLeafPageSplitTest {
 
         // Verify separator invariant: separator equals first key of right page
         assertThat(result.separatorKey()).isEqualTo(rightPage.keyAt(0));
+        rightPinned.unpin(false);
 
         indexFile.close();
     }
@@ -257,20 +280,21 @@ class BTreeLeafPageSplitTest {
         Path indexPath = tempDir.resolve("test.idx");
         IndexFile indexFile = IndexFile.create(indexPath, 1000);
 
-        Page rootPage = indexFile.readPage(1);
+        PinnedPage pinned = indexFile.readPage(1);
+        Page rootPage = pinned.page();
         BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(rootPage));
 
         // Insert enough entries for two splits
         for (int i = 0; i < 20; i++) {
             leaf.insert((long) i, new RecordId(1, i));
         }
-        indexFile.writePage(leaf.layout().page());
-
         // First split
         SplitResult split1 = leaf.split(indexFile);
+        pinned.unpin(true);
 
         // Read the new right page and fill it up
-        Page page2Data = indexFile.readPage(split1.newRightPageId());
+        PinnedPage page2Pinned = indexFile.readPage(split1.newRightPageId());
+        Page page2Data = page2Pinned.page();
         BTreeLeafPage page2 = BTreeLeafPage.of(IndexPageLayout.of(page2Data));
 
         // Add more entries to force another split
@@ -279,17 +303,19 @@ class BTreeLeafPageSplitTest {
                 break;
             }
         }
-        indexFile.writePage(page2.layout().page());
-
         // Second split
         SplitResult split2 = page2.split(indexFile);
+        page2Pinned.unpin(true);
 
         // Verify three-page chain via btpo_next
-        Page page1 = indexFile.readPage(1);
+        PinnedPage page1Pinned = indexFile.readPage(1);
+        Page page1 = page1Pinned.page();
         BTreeLeafPage p1 = BTreeLeafPage.of(IndexPageLayout.of(page1));
-        Page page2Again = indexFile.readPage(split1.newRightPageId());
+        PinnedPage page2AgainPinned = indexFile.readPage(split1.newRightPageId());
+        Page page2Again = page2AgainPinned.page();
         BTreeLeafPage p2 = BTreeLeafPage.of(IndexPageLayout.of(page2Again));
-        Page page3 = indexFile.readPage(split2.newRightPageId());
+        PinnedPage page3Pinned = indexFile.readPage(split2.newRightPageId());
+        Page page3 = page3Pinned.page();
         BTreeLeafPage p3 = BTreeLeafPage.of(IndexPageLayout.of(page3));
 
         // Chain should be: 1 -> 2 -> 3
@@ -306,6 +332,11 @@ class BTreeLeafPageSplitTest {
         int totalEntries = p1.entryCount() + p2.entryCount() + p3.entryCount();
         assertThat(totalEntries).isEqualTo(30);
 
+        // Unpin all pages
+        page1Pinned.unpin(false);
+        page2AgainPinned.unpin(false);
+        page3Pinned.unpin(false);
+
         indexFile.close();
     }
 
@@ -314,7 +345,8 @@ class BTreeLeafPageSplitTest {
         Path indexPath = tempDir.resolve("test.idx");
         IndexFile indexFile = IndexFile.create(indexPath, 1000);
 
-        Page rootPage = indexFile.readPage(1);
+        PinnedPage pinned = indexFile.readPage(1);
+        Page rootPage = pinned.page();
         BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(rootPage));
 
         // Insert scrambled order to verify sorting
@@ -322,7 +354,7 @@ class BTreeLeafPageSplitTest {
         for (int i = 0; i < keys.length; i++) {
             leaf.insert((long) keys[i], new RecordId(1, i));
         }
-        indexFile.writePage(leaf.layout().page());
+        pinned.unpin(true);
 
         // Split
         SplitResult result = leaf.split(indexFile);
@@ -335,7 +367,8 @@ class BTreeLeafPageSplitTest {
         assertThat(result.separatorKey()).isEqualTo(50L);
 
         // Verify right page's first key equals separator
-        Page rightPageData = indexFile.readPage(result.newRightPageId());
+        PinnedPage rightPinned = indexFile.readPage(result.newRightPageId());
+        Page rightPageData = rightPinned.page();
         BTreeLeafPage rightPage = BTreeLeafPage.of(IndexPageLayout.of(rightPageData));
         assertThat(rightPage.keyAt(0)).isEqualTo(result.separatorKey());
 
@@ -346,24 +379,7 @@ class BTreeLeafPageSplitTest {
         for (int i = 0; i < rightPage.entryCount(); i++) {
             assertThat(rightPage.keyAt(i)).isGreaterThanOrEqualTo(result.separatorKey());
         }
-
-        indexFile.close();
-    }
-
-    @Test
-    void split_pageWithFewerThanTwoEntries_throws() throws IOException {
-        Path indexPath = tempDir.resolve("test.idx");
-        IndexFile indexFile = IndexFile.create(indexPath, 1000);
-
-        Page rootPage = indexFile.readPage(1);
-        BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(rootPage));
-
-        // Single entry
-        leaf.insert(42L, new RecordId(1, 0));
-
-        assertThatThrownBy(() -> leaf.split(indexFile))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("fewer than 2 entries");
+        rightPinned.unpin(false);
 
         indexFile.close();
     }
@@ -373,22 +389,24 @@ class BTreeLeafPageSplitTest {
         Path indexPath = tempDir.resolve("test.idx");
         IndexFile indexFile = IndexFile.create(indexPath, 1000);
 
-        Page rootPage = indexFile.readPage(1);
+        PinnedPage pinned = indexFile.readPage(1);
+        Page rootPage = pinned.page();
         BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(rootPage));
 
         // Insert entries and split until we have 3 pages
         for (int i = 0; i < 30; i++) {
             if (leaf.insert((long) i, new RecordId(1, i)) == InsertResult.FULL) {
-                indexFile.writePage(leaf.layout().page());
+                pinned.unpin(true);
                 leaf.split(indexFile);
                 // Re-read page 1 after split
-                rootPage = indexFile.readPage(1);
+                pinned = indexFile.readPage(1);
+                rootPage = pinned.page();
                 leaf = BTreeLeafPage.of(IndexPageLayout.of(rootPage));
                 // Try insert again
                 leaf.insert((long) i, new RecordId(1, i));
             }
         }
-        indexFile.writePage(leaf.layout().page());
+        pinned.unpin(true);
 
         // Traverse the leaf chain via btpo_next and collect all keys
         int currentPageId = 1;
@@ -396,7 +414,8 @@ class BTreeLeafPageSplitTest {
         long lastKey = Long.MIN_VALUE;
 
         while (currentPageId != 0) {
-            Page pageData = indexFile.readPage(currentPageId);
+            PinnedPage pagePinned = indexFile.readPage(currentPageId);
+            Page pageData = pagePinned.page();
             BTreeLeafPage page = BTreeLeafPage.of(IndexPageLayout.of(pageData));
 
             for (int i = 0; i < page.entryCount(); i++) {
@@ -408,10 +427,32 @@ class BTreeLeafPageSplitTest {
             }
 
             currentPageId = page.btpoNext();
+            pagePinned.unpin(false);
         }
 
         // Should have collected all 30 keys
         assertThat(keyCount).isEqualTo(30);
+
+        indexFile.close();
+    }
+
+    @Test
+    void split_pageWithFewerThanTwoEntries_throws() throws IOException {
+        Path indexPath = tempDir.resolve("test.idx");
+        IndexFile indexFile = IndexFile.create(indexPath, 1000);
+
+        PinnedPage pinned = indexFile.readPage(1);
+        Page rootPage = pinned.page();
+        BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(rootPage));
+
+        // Insert only 1 entry
+        leaf.insert(42L, new RecordId(1, 0));
+        pinned.unpin(true);
+
+        // Splitting a page with fewer than 2 entries should throw
+        assertThatThrownBy(() -> leaf.split(indexFile))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("Cannot split page with fewer than 2 entries");
 
         indexFile.close();
     }

@@ -1,19 +1,18 @@
 package com.coredb.index;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
 import com.coredb.page.Page;
 import com.coredb.page.PageType;
 import com.coredb.util.Constants;
 import com.coredb.util.CorruptionException;
 import com.coredb.util.StorageException;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class IndexFileTest {
 
@@ -65,8 +64,8 @@ class IndexFileTest {
 
         // Try to open with wrong OID
         assertThatThrownBy(() -> IndexFile.open(indexPath, 9999))
-                .isInstanceOf(CorruptionException.class)
-                .hasMessageContaining("OID mismatch");
+            .isInstanceOf(CorruptionException.class)
+            .hasMessageContaining("OID mismatch");
     }
 
     @Test
@@ -74,8 +73,8 @@ class IndexFileTest {
         Path indexPath = tempDir.resolve("nonexistent_pk");
 
         assertThatThrownBy(() -> IndexFile.open(indexPath, 1002))
-                .isInstanceOf(IOException.class)
-                .hasMessageContaining("not found");
+            .isInstanceOf(IOException.class)
+            .hasMessageContaining("not found");
     }
 
     @Test
@@ -85,7 +84,11 @@ class IndexFileTest {
         try (IndexFile idx = IndexFile.create(indexPath, 1002)) {
             assertThat(idx.nextPageId()).isEqualTo(2);
 
-            Page newPage = idx.allocateNewPage(PageType.INDEX_LEAF);
+            IndexFile.PinnedPage pinned = idx.allocateNewPage(
+                PageType.INDEX_LEAF
+            );
+            Page newPage = pinned.page();
+            pinned.unpin(false);
 
             assertThat(newPage.pageId()).isEqualTo(2);
             assertThat(idx.nextPageId()).isEqualTo(3);
@@ -130,7 +133,9 @@ class IndexFileTest {
 
         try (IndexFile idx = IndexFile.create(indexPath, 1002)) {
             // Root page should be page 1
-            Page rootPage = idx.readPage(1);
+            IndexFile.PinnedPage pinned = idx.readPage(1);
+            Page rootPage = pinned.page();
+            pinned.unpin(false);
             assertThat(rootPage.pageId()).isEqualTo(1);
             assertThat(rootPage.pageType()).isEqualTo(PageType.INDEX_LEAF);
         }
@@ -143,13 +148,13 @@ class IndexFileTest {
         try (IndexFile idx = IndexFile.create(indexPath, 1002)) {
             // nextPageId is 2, so page 2 doesn't exist yet
             assertThatThrownBy(() -> idx.readPage(2))
-                    .isInstanceOf(StorageException.class)
-                    .hasMessageContaining("does not exist");
+                .isInstanceOf(StorageException.class)
+                .hasMessageContaining("does not exist");
 
             // Page 0 is meta, not readable via readPage
             assertThatThrownBy(() -> idx.readPage(0))
-                    .isInstanceOf(StorageException.class)
-                    .hasMessageContaining("does not exist");
+                .isInstanceOf(StorageException.class)
+                .hasMessageContaining("does not exist");
         }
     }
 
@@ -159,18 +164,21 @@ class IndexFileTest {
 
         // Create and modify a page
         try (IndexFile idx = IndexFile.create(indexPath, 1002)) {
-            Page rootPage = idx.readPage(1);
+            IndexFile.PinnedPage pinned = idx.readPage(1);
+            Page rootPage = pinned.page();
             IndexPageLayout layout = IndexPageLayout.of(rootPage);
 
             // Add an entry
             layout.writeLeafEntry(42L, new com.coredb.heap.RecordId(5, 3));
-            idx.writePage(rootPage);
+            pinned.unpin(true); // write back to disk
         }
 
         // Reopen and verify
         try (IndexFile idx = IndexFile.open(indexPath, 1002)) {
-            Page rootPage = idx.readPage(1);
+            IndexFile.PinnedPage pinned = idx.readPage(1);
+            Page rootPage = pinned.page();
             IndexPageLayout layout = IndexPageLayout.of(rootPage);
+            pinned.unpin(false);
 
             assertThat(layout.entryCount()).isEqualTo(1);
             assertThat(layout.readLeafEntry(0).key()).isEqualTo(42L);
@@ -183,8 +191,8 @@ class IndexFileTest {
 
         // Create, allocate some pages, modify root, close
         try (IndexFile idx = IndexFile.create(indexPath, 1002)) {
-            idx.allocateNewPage(PageType.INDEX_LEAF); // page 2
-            idx.allocateNewPage(PageType.INDEX_LEAF); // page 3
+            idx.allocateNewPage(PageType.INDEX_LEAF).unpin(false); // page 2
+            idx.allocateNewPage(PageType.INDEX_LEAF).unpin(false); // page 3
             idx.setRootPageId(3); // Move root to page 3
         }
 
@@ -197,9 +205,17 @@ class IndexFileTest {
             assertThat(idx.pageCount()).isEqualTo(4);
 
             // All pages should be readable
-            assertThat(idx.readPage(1).pageId()).isEqualTo(1);
-            assertThat(idx.readPage(2).pageId()).isEqualTo(2);
-            assertThat(idx.readPage(3).pageId()).isEqualTo(3);
+            IndexFile.PinnedPage p1 = idx.readPage(1);
+            assertThat(p1.page().pageId()).isEqualTo(1);
+            p1.unpin(false);
+
+            IndexFile.PinnedPage p2 = idx.readPage(2);
+            assertThat(p2.page().pageId()).isEqualTo(2);
+            p2.unpin(false);
+
+            IndexFile.PinnedPage p3 = idx.readPage(3);
+            assertThat(p3.page().pageId()).isEqualTo(3);
+            p3.unpin(false);
         }
     }
 
@@ -208,7 +224,10 @@ class IndexFileTest {
         Path indexPath = tempDir.resolve("1002_pk");
 
         try (IndexFile idx = IndexFile.create(indexPath, 1002)) {
-            Page newPage = idx.allocateNewPage(PageType.INDEX_LEAF);
+            IndexFile.PinnedPage pinned = idx.allocateNewPage(
+                PageType.INDEX_LEAF
+            );
+            Page newPage = pinned.page();
 
             IndexPageLayout layout = IndexPageLayout.of(newPage);
             assertThat(layout.isLeaf()).isTrue();

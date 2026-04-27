@@ -2,6 +2,7 @@ package com.coredb.engine;
 
 import com.coredb.api.Row;
 import com.coredb.api.Schema;
+import com.coredb.buffer.BufferPool;
 import com.coredb.catalog.TableMeta;
 import com.coredb.config.EngineType;
 import org.junit.jupiter.api.Test;
@@ -66,8 +67,9 @@ public abstract class StorageEngineContractTest {
     @Test
     void putOfNewKey_thenGet_returnsRow() throws IOException {
         TableMeta meta = createTestTableMeta();
-        try (StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta);
+        try (BufferPool pool = new BufferPool();
+             StorageEngine engine = createEngine(tempDir, meta)) {
+            engine.open(tempDir, meta, pool);
 
             Row row = Row.of(1L, "Alice", 30);
             engine.put(1L, row);
@@ -85,15 +87,17 @@ public abstract class StorageEngineContractTest {
         java.nio.file.Files.createDirectories(dataDir);
 
         // First put
-        try (StorageEngine engine = createEngine(dataDir, meta)) {
-            engine.open(dataDir, meta);
+        try (BufferPool pool = new BufferPool();
+             StorageEngine engine = createEngine(dataDir, meta)) {
+            engine.open(dataDir, meta, pool);
             Row original = Row.of(1L, "Alice", 30);
             engine.put(1L, original);
         }
 
         // Second put (upsert)
-        try (StorageEngine engine = createEngine(dataDir, meta)) {
-            engine.open(dataDir, meta);
+        try (BufferPool pool = new BufferPool();
+             StorageEngine engine = createEngine(dataDir, meta)) {
+            engine.open(dataDir, meta, pool);
             Row updated = Row.of(1L, "Bob", 31);
             engine.put(1L, updated);
 
@@ -110,8 +114,9 @@ public abstract class StorageEngineContractTest {
     @Test
     void delete_thenGet_returnsEmpty() throws IOException {
         TableMeta meta = createTestTableMeta();
-        try (StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta);
+        try (BufferPool pool = new BufferPool();
+             StorageEngine engine = createEngine(tempDir, meta)) {
+            engine.open(tempDir, meta, pool);
 
             Row row = Row.of(1L, "Alice", 30);
             engine.put(1L, row);
@@ -126,8 +131,9 @@ public abstract class StorageEngineContractTest {
     @Test
     void delete_nonExistentKey_isNoOp() throws IOException {
         TableMeta meta = createTestTableMeta();
-        try (StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta);
+        try (BufferPool pool = new BufferPool();
+             StorageEngine engine = createEngine(tempDir, meta)) {
+            engine.open(tempDir, meta, pool);
 
             // Should not throw
             engine.delete(999L);
@@ -139,8 +145,9 @@ public abstract class StorageEngineContractTest {
     @Test
     void rangeScan_returnsSortedAndInclusiveAtBothEnds() throws IOException {
         TableMeta meta = createTestTableMeta();
-        try (StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta);
+        try (BufferPool pool = new BufferPool();
+             StorageEngine engine = createEngine(tempDir, meta)) {
+            engine.open(tempDir, meta, pool);
 
             // Insert in scrambled order
             engine.put(5L, Row.of(5L, "Eve", 25));
@@ -171,8 +178,9 @@ public abstract class StorageEngineContractTest {
     @Test
     void rangeScan_emptyRange_returnsEmptyIterator() throws IOException {
         TableMeta meta = createTestTableMeta();
-        try (StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta);
+        try (BufferPool pool = new BufferPool();
+             StorageEngine engine = createEngine(tempDir, meta)) {
+            engine.open(tempDir, meta, pool);
 
             engine.put(1L, Row.of(1L, "Alice", 30));
             engine.put(5L, Row.of(5L, "Eve", 25));
@@ -186,8 +194,9 @@ public abstract class StorageEngineContractTest {
     @Test
     void rangeScan_fromGreaterThanMaxKey_returnsEmpty() throws IOException {
         TableMeta meta = createTestTableMeta();
-        try (StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta);
+        try (BufferPool pool = new BufferPool();
+             StorageEngine engine = createEngine(tempDir, meta)) {
+            engine.open(tempDir, meta, pool);
 
             engine.put(1L, Row.of(1L, "Alice", 30));
 
@@ -199,8 +208,9 @@ public abstract class StorageEngineContractTest {
     @Test
     void fullScan_returnsAllLiveRowsExactlyOnce() throws IOException {
         TableMeta meta = createTestTableMeta();
-        try (StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta);
+        try (BufferPool pool = new BufferPool();
+             StorageEngine engine = createEngine(tempDir, meta)) {
+            engine.open(tempDir, meta, pool);
 
             engine.put(1L, Row.of(1L, "Alice", 30));
             engine.put(2L, Row.of(2L, "Bob", 25));
@@ -220,8 +230,9 @@ public abstract class StorageEngineContractTest {
     @Test
     void fullScan_afterDelete_excludesDeletedRows() throws IOException {
         TableMeta meta = createTestTableMeta();
-        try (StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta);
+        try (BufferPool pool = new BufferPool();
+             StorageEngine engine = createEngine(tempDir, meta)) {
+            engine.open(tempDir, meta, pool);
 
             engine.put(1L, Row.of(1L, "Alice", 30));
             engine.put(2L, Row.of(2L, "Bob", 25));
@@ -247,16 +258,18 @@ public abstract class StorageEngineContractTest {
         java.nio.file.Files.createDirectories(dataDir);
 
         // First session: insert rows
-        try (StorageEngine engine = createEngine(dataDir, meta)) {
-            engine.open(dataDir, meta);
+        try (BufferPool pool = new BufferPool();
+             StorageEngine engine = createEngine(dataDir, meta)) {
+            engine.open(dataDir, meta, pool);
             engine.put(1L, Row.of(1L, "Alice", 30));
             engine.put(2L, Row.of(2L, "Bob", 25));
             engine.flush();
         }
 
         // Second session: verify persistence
-        try (StorageEngine engine = createEngine(dataDir, meta)) {
-            engine.open(dataDir, meta);
+        try (BufferPool pool = new BufferPool();
+             StorageEngine engine = createEngine(dataDir, meta)) {
+            engine.open(dataDir, meta, pool);
 
             Optional<Row> alice = engine.get(1L);
             assertThat(alice).isPresent();
@@ -271,8 +284,9 @@ public abstract class StorageEngineContractTest {
     @Test
     void putAfterDelete_reusesKey() throws IOException {
         TableMeta meta = createTestTableMeta();
-        try (StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta);
+        try (BufferPool pool = new BufferPool();
+             StorageEngine engine = createEngine(tempDir, meta)) {
+            engine.open(tempDir, meta, pool);
 
             // Insert, delete, re-insert with same PK
             Row original = Row.of(1L, "Alice", 30);

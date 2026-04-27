@@ -42,8 +42,10 @@ class BTreeStorageEngineTest extends StorageEngineContractTest {
 
             // Scan all pages and count tuple versions
             for (int pageId = 1; pageId < hf.pageCount(); pageId++) {
-                com.coredb.page.Page page = hf.readPage(pageId);
+                HeapFile.PinnedPage pinned = hf.readPage(pageId);
+                com.coredb.page.Page page = pinned.page();
                 if (page.pageType() != com.coredb.page.PageType.HEAP) {
+                    pinned.unpin(false);
                     continue;
                 }
                 com.coredb.heap.HeapPage heapPage = new com.coredb.heap.HeapPage(page);
@@ -79,6 +81,7 @@ class BTreeStorageEngineTest extends StorageEngineContractTest {
                         // Skip invalid slots
                     }
                 }
+                pinned.unpin(false);
             }
 
             // After upsert: should have 1 live (new version) + 1 dead (old version) = 2 total

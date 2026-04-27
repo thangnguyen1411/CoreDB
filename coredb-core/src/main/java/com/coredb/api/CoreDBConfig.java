@@ -7,10 +7,12 @@ public final class CoreDBConfig {
 
     private final EngineType engineType;
     private final int pageSize;
+    private final int bufferPoolSize;
 
     private CoreDBConfig(Builder builder) {
         this.engineType = builder.engineType;
         this.pageSize = builder.pageSize;
+        this.bufferPoolSize = builder.bufferPoolSize;
     }
 
     public EngineType engineType() {
@@ -19,6 +21,10 @@ public final class CoreDBConfig {
 
     public int pageSize() {
         return pageSize;
+    }
+
+    public int bufferPoolSize() {
+        return bufferPoolSize;
     }
 
     public static Builder builder() {
@@ -33,6 +39,7 @@ public final class CoreDBConfig {
 
         private EngineType engineType = EngineType.BTREE;
         private int pageSize = Constants.PAGE_SIZE;
+        private int bufferPoolSize = 1024; // Default 1024 frames = 8MB
 
         public Builder engineType(EngineType engineType) {
             this.engineType = engineType;
@@ -41,6 +48,11 @@ public final class CoreDBConfig {
 
         public Builder pageSize(int pageSize) {
             this.pageSize = pageSize;
+            return this;
+        }
+
+        public Builder bufferPoolSize(int bufferPoolSize) {
+            this.bufferPoolSize = bufferPoolSize;
             return this;
         }
 

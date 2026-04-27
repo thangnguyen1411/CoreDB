@@ -1,5 +1,7 @@
 package com.coredb.index;
 
+import com.coredb.page.Page;
+import com.coredb.page.PageType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -212,7 +214,8 @@ class BTreeInternalPageTest {
 
         // Setup: leftmost=1, entries=[(10,2), (20,3), (30,4), (40,5)]
         // Split should promote key 20, child 3
-        com.coredb.page.Page rootPage = indexFile.readPage(1);
+        IndexFile.PinnedPage pinned = indexFile.readPage(1);
+        Page rootPage = pinned.page();
         BTreeInternalPage page = BTreeInternalPage.of(IndexPageLayout.of(rootPage));
         page.setBtpoLevel(1);
         page.setLeftmostChild(1);
@@ -220,7 +223,7 @@ class BTreeInternalPageTest {
         page.insertSeparator(20L, 3);
         page.insertSeparator(30L, 4);
         page.insertSeparator(40L, 5);
-        indexFile.writePage(page.layout().page());
+        pinned.unpin(true);
 
         // Split
 
@@ -242,8 +245,10 @@ class BTreeInternalPageTest {
         assertThat(page.btpoLevel()).isEqualTo(1);  // CRITICAL: level must survive split
 
         // Right page: leftmost=4 (promoted child), entry=[(40,5)]
-        com.coredb.page.Page rightPageData = indexFile.readPage(result.rightPageId());
+        IndexFile.PinnedPage rightPinned = indexFile.readPage(result.rightPageId());
+        Page rightPageData = rightPinned.page();
         BTreeInternalPage rightPage = BTreeInternalPage.of(IndexPageLayout.of(rightPageData));
+        rightPinned.unpin(false);
         assertThat(rightPage.leftmostChild()).isEqualTo(4); // Child of promoted key 30
         assertThat(rightPage.entryCount()).isEqualTo(1);
         assertThat(rightPage.keyAt(0)).isEqualTo(40L);
@@ -260,7 +265,8 @@ class BTreeInternalPageTest {
         Path indexPath = tempDir.resolve("test.idx");
         IndexFile indexFile = IndexFile.create(indexPath, 1000);
 
-        com.coredb.page.Page rootPage = indexFile.readPage(1);
+        IndexFile.PinnedPage pinned = indexFile.readPage(1);
+        Page rootPage = pinned.page();
         BTreeInternalPage page = BTreeInternalPage.of(IndexPageLayout.of(rootPage));
         page.setBtpoLevel(1);
         page.setLeftmostChild(1);
@@ -271,7 +277,7 @@ class BTreeInternalPageTest {
         page.insertSeparator(30L, 4);
         page.insertSeparator(40L, 5);
         page.insertSeparator(50L, 6);
-        indexFile.writePage(page.layout().page());
+        pinned.unpin(true);
 
         // Split: splitPoint = 5/2 = 2, promoted key = entries[2].key = 30, child = 4
         BTreeInternalPage.InternalSplitResult result = page.split(indexFile);
@@ -284,8 +290,10 @@ class BTreeInternalPageTest {
         assertThat(page.entryCount()).isEqualTo(2);
 
         // Right page: leftmost=4 (promoted child), entries [(40,5), (50,6)]
-        com.coredb.page.Page rightPageData = indexFile.readPage(result.rightPageId());
+        IndexFile.PinnedPage rightPinned = indexFile.readPage(result.rightPageId());
+        Page rightPageData = rightPinned.page();
         BTreeInternalPage rightPage = BTreeInternalPage.of(IndexPageLayout.of(rightPageData));
+        rightPinned.unpin(false);
         assertThat(rightPage.leftmostChild()).isEqualTo(4);
         assertThat(rightPage.entryCount()).isEqualTo(2);
         assertThat(rightPage.keyAt(0)).isEqualTo(40L);
@@ -299,16 +307,17 @@ class BTreeInternalPageTest {
         Path indexPath = tempDir.resolve("test.idx");
         IndexFile indexFile = IndexFile.create(indexPath, 1000);
 
-        com.coredb.page.Page rootPage = indexFile.readPage(1);
+        IndexFile.PinnedPage pinned = indexFile.readPage(1);
+        Page rootPage = pinned.page();
         BTreeInternalPage page = BTreeInternalPage.of(IndexPageLayout.of(rootPage));
         page.setBtpoLevel(1);
         page.setLeftmostChild(1);
 
-        // Insert entries: leftmost=1, [(10,2), (20,3), (30,4), (40,5), (50,6), (60,7)]
+        // Insert entries: 10, 20, 30, 40, 50, 60
         for (int i = 1; i <= 6; i++) {
             page.insertSeparator((long) (i * 10), i + 1);
         }
-        indexFile.writePage(page.layout().page());
+        pinned.unpin(true);
 
         // Split
         BTreeInternalPage.InternalSplitResult result = page.split(indexFile);
@@ -319,8 +328,10 @@ class BTreeInternalPageTest {
         }
 
         // All right keys must be > promoted key
-        com.coredb.page.Page rightPageData = indexFile.readPage(result.rightPageId());
+        IndexFile.PinnedPage rightPinned = indexFile.readPage(result.rightPageId());
+        Page rightPageData = rightPinned.page();
         BTreeInternalPage rightPage = BTreeInternalPage.of(IndexPageLayout.of(rightPageData));
+        rightPinned.unpin(false);
         for (int i = 0; i < rightPage.entryCount(); i++) {
             assertThat(rightPage.keyAt(i)).isGreaterThan(result.promotedKey());
         }
@@ -333,12 +344,14 @@ class BTreeInternalPageTest {
         Path indexPath = tempDir.resolve("test.idx");
         IndexFile indexFile = IndexFile.create(indexPath, 1000);
 
-        com.coredb.page.Page rootPage = indexFile.readPage(1);
+        IndexFile.PinnedPage pinned = indexFile.readPage(1);
+        Page rootPage = pinned.page();
         BTreeInternalPage page = BTreeInternalPage.of(IndexPageLayout.of(rootPage));
         page.setBtpoLevel(1);
 
         page.insertSeparator(42L, 100);
         // leftmostChild is 1, only one entry
+        pinned.unpin(true);
 
         assertThatThrownBy(() -> page.split(indexFile))
                 .isInstanceOf(IllegalStateException.class)
@@ -349,7 +362,7 @@ class BTreeInternalPageTest {
 
     @Test
     void of_existingLayout_wrapsCorrectly() {
-        IndexPageLayout layout = IndexPageLayout.createEmpty(5, com.coredb.page.PageType.INDEX_INTERNAL);
+        IndexPageLayout layout = IndexPageLayout.createEmpty(5, PageType.INDEX_INTERNAL);
         layout.setBtpoLevel(2);
         layout.setBtpoPrev(999); // leftmost child
         layout.writeInternalEntry(42L, 100);
@@ -371,7 +384,8 @@ class BTreeInternalPageTest {
 
         // Setup: leftmost=10, entries=[(50,20), (100,30), (150,40), (200,50)]
         // 5 children total: 10, 20, 30, 40, 50
-        com.coredb.page.Page rootPage = indexFile.readPage(1);
+        IndexFile.PinnedPage pinned = indexFile.readPage(1);
+        Page rootPage = pinned.page();
         BTreeInternalPage page = BTreeInternalPage.of(IndexPageLayout.of(rootPage));
         page.setBtpoLevel(1);
         page.setLeftmostChild(10);
@@ -379,7 +393,7 @@ class BTreeInternalPageTest {
         page.insertSeparator(100L, 30);
         page.insertSeparator(150L, 40);
         page.insertSeparator(200L, 50);
-        indexFile.writePage(page.layout().page());
+        pinned.unpin(true);
 
         assertThat(page.childCount()).isEqualTo(5);
 
@@ -406,8 +420,10 @@ class BTreeInternalPageTest {
 
         // Right page: leftmost=40 (promoted child), entry [(200,50)]
         // Children: 40 (keys >= 150 and < 200), 50 (keys >= 200)
-        com.coredb.page.Page rightPageData = indexFile.readPage(result.rightPageId());
+        IndexFile.PinnedPage rightPinned = indexFile.readPage(result.rightPageId());
+        Page rightPageData = rightPinned.page();
         BTreeInternalPage rightPage = BTreeInternalPage.of(IndexPageLayout.of(rightPageData));
+        rightPinned.unpin(false);
         assertThat(rightPage.leftmostChild()).isEqualTo(40);  // child of promoted key 150
         assertThat(rightPage.entryCount()).isEqualTo(1);
         assertThat(rightPage.keyAt(0)).isEqualTo(200L);

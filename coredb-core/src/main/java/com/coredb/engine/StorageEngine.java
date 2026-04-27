@@ -1,6 +1,7 @@
 package com.coredb.engine;
 
 import com.coredb.api.Row;
+import com.coredb.buffer.BufferPool;
 import com.coredb.catalog.TableMeta;
 
 import java.io.IOException;
@@ -31,9 +32,10 @@ public interface StorageEngine extends AutoCloseable {
      *
      * @param dataDir the data directory path
      * @param meta    table metadata including OID, schema, and engine type
+     * @param bufferPool the buffer pool for caching pages
      * @throws IOException if opening fails
      */
-    void open(Path dataDir, TableMeta meta) throws IOException;
+    void open(Path dataDir, TableMeta meta, BufferPool bufferPool) throws IOException;
 
     /**
      * Closes the storage engine, releasing all resources.
