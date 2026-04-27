@@ -20,6 +20,7 @@ import com.coredb.util.Constants;
 import com.coredb.wal.XLogReader;
 import com.coredb.wal.XLogRecord;
 import com.coredb.wal.XLogResourceManager;
+import com.coredb.txn.ClogManager;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
@@ -92,6 +93,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             case "wal-dump" -> handleWalDump();
             case "checkpoint" -> handleCheckpoint();
             case "recovery-status" -> handleRecoveryStatus();
+            case "clog-status" -> handleClogStatus(args);
             case "help" -> formatHelp();
             default -> "unknown command: " +
             command +
@@ -159,6 +161,9 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
           wal-dump                   dump WAL file contents
           checkpoint                 perform database checkpoint (flush dirty pages, write CHECKPOINT record)
           recovery-status            show last recovery statistics
+
+        Transaction commands:
+          clog-status [xid]          show transaction status log summary or specific XID status
         """;
     }
 
@@ -1156,6 +1161,36 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         try {
             BufferPool.CheckpointResult result = db.bufferPool().checkpoint(db.controlFile());
             return String.format("flushed %d dirty pages  checkpoint-lsn=%d", result.flushedPages(), result.checkpointLsn());
+        } catch (Exception e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Handles: clog-status [xid]
+     * Shows transaction status log summary or specific XID status.
+     */
+    private String handleClogStatus(String args) {
+        Path pgXactPath = db.dataPath().resolve("global/pg_xact");
+        if (!Files.exists(pgXactPath)) {
+            return "pg_xact file does not exist (database may not be initialized)";
+        }
+
+        try (ClogManager clog = ClogManager.open(db.dataPath())) {
+            String trimmed = args.trim();
+            if (trimmed.isEmpty()) {
+                // Summary mode
+                return clog.getStats().toString();
+            } else {
+                // Specific XID mode
+                try {
+                    int xid = Integer.parseInt(trimmed);
+                    ClogManager.Status status = clog.getStatus(xid);
+                    return String.format("xid=%d status=%s", xid, status);
+                } catch (NumberFormatException e) {
+                    return "usage: clog-status [xid]  (xid must be a number)";
+                }
+            }
         } catch (Exception e) {
             return "error: " + e.getMessage();
         }
