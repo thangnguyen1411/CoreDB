@@ -9,6 +9,7 @@ import com.coredb.util.BinaryUtil;
 import com.coredb.util.Constants;
 import com.coredb.util.CorruptionException;
 import com.coredb.util.StorageException;
+import com.coredb.wal.XLogWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -55,17 +56,22 @@ public final class IndexFile implements AutoCloseable {
     private final int oid;
     private final BufferPool bufferPool;
     private final FileChannel channel; // Used for bootstrap/test mode when bufferPool is null
+    private final XLogWriter xlogWriter; // May be null during early startup
+    private final int xid; // Transaction ID for WAL records
     private Page metaPage;
     private int nextPageId;
     private int rootPageId;
     private int treeHeight;
 
     private IndexFile(Path indexPath, int oid, BufferPool bufferPool, Page metaPage,
-                      int rootPageId, int treeHeight, int nextPageId, FileChannel channel) {
+                      int rootPageId, int treeHeight, int nextPageId, FileChannel channel,
+                      XLogWriter xlogWriter, int xid) {
         this.indexPath = indexPath;
         this.oid = oid;
         this.bufferPool = bufferPool;
         this.channel = channel;
+        this.xlogWriter = xlogWriter;
+        this.xid = xid;
         this.metaPage = metaPage;
         this.rootPageId = rootPageId;
         this.treeHeight = treeHeight;
@@ -104,7 +110,7 @@ public final class IndexFile implements AutoCloseable {
         int nextPageId = 2; // Next available page
 
         log.info("Created index file: {} (oid={})", indexPath.toAbsolutePath(), oid);
-        return new IndexFile(indexPath, oid, null, metaPage, rootPageId, treeHeight, nextPageId, channel);
+        return new IndexFile(indexPath, oid, null, metaPage, rootPageId, treeHeight, nextPageId, channel, null, Constants.BOOTSTRAP_XID);
     }
 
     /**
@@ -146,7 +152,7 @@ public final class IndexFile implements AutoCloseable {
         int nextPageId = 2; // Next available page
 
         log.info("Created index file: {} (oid={})", indexPath.toAbsolutePath(), oid);
-        return new IndexFile(indexPath, oid, bufferPool, metaPage, rootPageId, treeHeight, nextPageId, null);
+        return new IndexFile(indexPath, oid, bufferPool, metaPage, rootPageId, treeHeight, nextPageId, null, null, Constants.BOOTSTRAP_XID);
     }
 
     /**
@@ -176,7 +182,7 @@ public final class IndexFile implements AutoCloseable {
                 metaInfo.treeHeight, metaInfo.nextPageId);
 
         return new IndexFile(indexPath, oid, null, metaPage,
-                metaInfo.rootPageId, metaInfo.treeHeight, metaInfo.nextPageId, channel);
+                metaInfo.rootPageId, metaInfo.treeHeight, metaInfo.nextPageId, channel, null, Constants.BOOTSTRAP_XID);
     }
 
     /**
@@ -208,7 +214,7 @@ public final class IndexFile implements AutoCloseable {
                 metaInfo.treeHeight, metaInfo.nextPageId);
 
         return new IndexFile(indexPath, oid, bufferPool, metaPage,
-                metaInfo.rootPageId, metaInfo.treeHeight, metaInfo.nextPageId, null);
+                metaInfo.rootPageId, metaInfo.treeHeight, metaInfo.nextPageId, null, null, Constants.BOOTSTRAP_XID);
     }
 
     /**
@@ -250,7 +256,7 @@ public final class IndexFile implements AutoCloseable {
                 metaInfo.treeHeight, metaInfo.nextPageId);
 
         return new IndexFile(indexPath, storedOid, bufferPool, metaPage,
-                metaInfo.rootPageId, metaInfo.treeHeight, metaInfo.nextPageId, null);
+                metaInfo.rootPageId, metaInfo.treeHeight, metaInfo.nextPageId, null, null, Constants.BOOTSTRAP_XID);
     }
 
     // === Public accessors ===

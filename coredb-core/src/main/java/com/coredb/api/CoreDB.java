@@ -7,6 +7,8 @@ import com.coredb.catalog.ControlFile;
 import com.coredb.catalog.TableMeta;
 import com.coredb.engine.StorageEngine;
 import com.coredb.engine.StorageEngineFactory;
+import com.coredb.util.Constants;
+import com.coredb.wal.XLogWriter;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -23,6 +25,7 @@ public final class CoreDB implements AutoCloseable {
     private final CoreDBConfig config;
     private final ControlFile controlFile;
     private final BufferPool bufferPool;
+    private final XLogWriter xlogWriter;
     private final Catalog catalog;
     private final Map<Integer, StorageEngine> engineCache;
     private volatile boolean closed = false;
@@ -32,12 +35,14 @@ public final class CoreDB implements AutoCloseable {
         CoreDBConfig config,
         ControlFile controlFile,
         BufferPool bufferPool,
+        XLogWriter xlogWriter,
         Catalog catalog
     ) {
         this.dataPath = dataPath;
         this.config = config;
         this.controlFile = controlFile;
         this.bufferPool = bufferPool;
+        this.xlogWriter = xlogWriter;
         this.catalog = catalog;
         this.engineCache = new ConcurrentHashMap<>();
         log.debug(
@@ -82,10 +87,17 @@ public final class CoreDB implements AutoCloseable {
         // Create BufferPool first (before Catalog, which needs it)
         BufferPool bufferPool = new BufferPool(config.bufferPoolSize());
 
-        // Create Catalog (opens core_class and core_attribute heap files via buffer pool)
-        Catalog catalog = new Catalog(dataPath, controlFile, bufferPool);
+        // Create XLogWriter for WAL durability (after control file is loaded/created)
+        Path walPath = dataPath.resolve("global").resolve("pg_wal");
+        XLogWriter xlogWriter = XLogWriter.open(walPath);
 
-        return new CoreDB(dataPath, config, controlFile, bufferPool, catalog);
+        // Wire XLogWriter to BufferPool for WAL-before-data flush rule
+        bufferPool.setXLogWriter(xlogWriter);
+
+        // Create Catalog with WAL support (opens core_class and core_attribute heap files via buffer pool)
+        Catalog catalog = new Catalog(dataPath, controlFile, bufferPool, xlogWriter, Constants.BOOTSTRAP_XID);
+
+        return new CoreDB(dataPath, config, controlFile, bufferPool, xlogWriter, catalog);
     }
 
     public Path dataPath() {
@@ -122,7 +134,7 @@ public final class CoreDB implements AutoCloseable {
                     config.engineType(),
                     config
                 );
-                engine.open(dataPath, meta, bufferPool);
+                engine.open(dataPath, meta, bufferPool, xlogWriter);
                 log.debug(
                     "Opened StorageEngine for table {} (oid={})",
                     meta.name(),
@@ -140,6 +152,13 @@ public final class CoreDB implements AutoCloseable {
      */
     public BufferPool bufferPool() {
         return bufferPool;
+    }
+
+    /**
+     * Returns the WAL writer for this database instance.
+     */
+    public XLogWriter xlogWriter() {
+        return xlogWriter;
     }
 
     public boolean isClosed() {
@@ -170,7 +189,11 @@ public final class CoreDB implements AutoCloseable {
                 try {
                     bufferPool.close();
                 } finally {
-                    controlFile.close();
+                    try {
+                        xlogWriter.close();
+                    } finally {
+                        controlFile.close();
+                    }
                 }
             }
             log.debug("CoreDB closed: path={}", dataPath);

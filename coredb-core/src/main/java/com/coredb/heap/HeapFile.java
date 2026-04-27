@@ -13,9 +13,14 @@ import com.coredb.util.BinaryUtil;
 import com.coredb.util.Constants;
 import com.coredb.util.CorruptionException;
 import com.coredb.util.StorageException;
+import com.coredb.wal.HeapResourceManager;
+import com.coredb.wal.XLogRecord;
+import com.coredb.wal.XLogWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -43,6 +48,8 @@ public final class HeapFile implements AutoCloseable {
     private final Schema schema;
     private final BufferPool bufferPool;
     private final FileChannel channel; // Used for bootstrap mode when bufferPool is null
+    private final XLogWriter xlogWriter; // May be null during bootstrap
+    private final int xid; // Transaction ID for WAL records (BOOTSTRAP_XID for now)
     private int nextPageId;
     private Page metaPage;
     private final FreeSpaceMap fsm;
@@ -50,12 +57,14 @@ public final class HeapFile implements AutoCloseable {
     /**
      * Private constructor for per-table file mode.
      */
-    private HeapFile(Path tablePath, int oid, Schema schema, BufferPool bufferPool, int nextPageId, Page metaPage, FreeSpaceMap fsm, FileChannel channel) {
+    private HeapFile(Path tablePath, int oid, Schema schema, BufferPool bufferPool, int nextPageId, Page metaPage, FreeSpaceMap fsm, FileChannel channel, XLogWriter xlogWriter, int xid) {
         this.schema = schema;
         this.tablePath = tablePath;
         this.oid = oid;
         this.bufferPool = bufferPool;
         this.channel = channel;
+        this.xlogWriter = xlogWriter;
+        this.xid = xid;
         this.nextPageId = nextPageId;
         this.metaPage = metaPage;
         this.fsm = fsm;
@@ -91,7 +100,7 @@ public final class HeapFile implements AutoCloseable {
         FreeSpaceMap fsm = FreeSpaceMap.create(fsmPath, 0);
 
         log.info("Created heap file: {} (oid={})", tablePath.toAbsolutePath(), oid);
-        return new HeapFile(tablePath, oid, schema, null, nextPageId, metaPage, fsm, channel);
+        return new HeapFile(tablePath, oid, schema, null, nextPageId, metaPage, fsm, channel, null, Constants.BOOTSTRAP_XID);
     }
 
     /**
@@ -130,7 +139,7 @@ public final class HeapFile implements AutoCloseable {
         FreeSpaceMap fsm = FreeSpaceMap.create(fsmPath, 0);
 
         log.info("Created heap file: {} (oid={})", tablePath.toAbsolutePath(), oid);
-        return new HeapFile(tablePath, oid, schema, bufferPool, nextPageId, metaPage, fsm, null);
+        return new HeapFile(tablePath, oid, schema, bufferPool, nextPageId, metaPage, fsm, null, null, Constants.BOOTSTRAP_XID);
     }
 
     /**
@@ -169,7 +178,7 @@ public final class HeapFile implements AutoCloseable {
         }
 
         log.info("Opened heap file: {} (oid={}, pages={})", tablePath.toAbsolutePath(), oid, nextPageId);
-        return new HeapFile(tablePath, oid, schema, null, nextPageId, metaPage, fsm, channel);
+        return new HeapFile(tablePath, oid, schema, null, nextPageId, metaPage, fsm, channel, null, Constants.BOOTSTRAP_XID);
     }
 
     /**
@@ -210,9 +219,90 @@ public final class HeapFile implements AutoCloseable {
         }
 
         log.info("Opened heap file: {} (oid={}, pages={})", tablePath.toAbsolutePath(), oid, nextPageId);
-        return new HeapFile(tablePath, oid, schema, bufferPool, nextPageId, metaPage, fsm, null);
+        return new HeapFile(tablePath, oid, schema, bufferPool, nextPageId, metaPage, fsm, null, null, Constants.BOOTSTRAP_XID);
     }
 
+    /**
+     * Creates a new per-table heap file with WAL support.
+     *
+     * @param tablePath path to the table file (e.g., dataDir/base/1/1002)
+     * @param oid       the table OID
+     * @param schema    the table schema
+     * @param bufferPool the buffer pool for caching pages
+     * @param xlogWriter the WAL writer for durability
+     * @param xid       the transaction ID for WAL records
+     * @return a new HeapFile instance
+     * @throws IOException if creation fails
+     */
+    public static HeapFile create(Path tablePath, int oid, Schema schema, BufferPool bufferPool,
+                                  XLogWriter xlogWriter, int xid) throws IOException {
+        Path parent = tablePath.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+
+        FileChannel channel = FileChannel.open(tablePath,
+                StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+
+        Page metaPage = buildInitialMetaPage(oid);
+        PageIO.writePage(channel, metaPage);
+        channel.force(true);
+        channel.close();
+
+        bufferPool.registerFile(oid, tablePath);
+
+        int nextPageId = 1;
+
+        Path fsmPath = tablePath.getParent().resolve(tablePath.getFileName() + "_fsm");
+        FreeSpaceMap fsm = FreeSpaceMap.create(fsmPath, 0);
+
+        log.info("Created heap file with WAL: {} (oid={})", tablePath.toAbsolutePath(), oid);
+        return new HeapFile(tablePath, oid, schema, bufferPool, nextPageId, metaPage, fsm, null, xlogWriter, xid);
+    }
+
+    /**
+     * Opens an existing per-table heap file with WAL support.
+     * This is the main entry point for normal database operation.
+     *
+     * @param tablePath path to the table file
+     * @param oid       expected table OID
+     * @param schema    the table schema
+     * @param bufferPool the buffer pool for caching pages
+     * @param xlogWriter the WAL writer for durability
+     * @param xid       the transaction ID for WAL records
+     * @return a HeapFile instance
+     * @throws IOException         if file cannot be read
+     * @throws CorruptionException if meta page validation fails
+     */
+    public static HeapFile open(Path tablePath, int oid, Schema schema, BufferPool bufferPool,
+                                XLogWriter xlogWriter, int xid) throws IOException {
+        if (!Files.exists(tablePath)) {
+            throw new IOException("Heap file not found: " + tablePath);
+        }
+
+        // Register with buffer pool (opens the channel)
+        bufferPool.registerFile(oid, tablePath);
+
+        // Read and validate meta page via buffer pool
+        BufferDescriptor metaFrame = bufferPool.fetchPage(oid, 0);
+        Page metaPage = Page.Factory.wrap(0, metaFrame.page().duplicate());
+        int nextPageId = validateMetaPage(metaPage, tablePath, oid);
+        bufferPool.unpinPage(metaFrame, false);
+
+        // Open or create FSM file
+        Path fsmPath = tablePath.getParent().resolve(tablePath.getFileName() + "_fsm");
+        FreeSpaceMap fsm;
+        if (Files.exists(fsmPath)) {
+            fsm = FreeSpaceMap.open(fsmPath);
+        } else {
+            log.warn("FSM file missing for oid={}, creating fresh: {}", oid, fsmPath);
+            int dataPageCount = Math.max(0, nextPageId - 1);
+            fsm = FreeSpaceMap.create(fsmPath, dataPageCount);
+        }
+
+        log.info("Opened heap file with WAL: {} (oid={}, pages={})", tablePath.toAbsolutePath(), oid, nextPageId);
+        return new HeapFile(tablePath, oid, schema, bufferPool, nextPageId, metaPage, fsm, null, xlogWriter, xid);
+    }
 
     /**
      * Returns the table path (per-table mode only).
@@ -271,7 +361,22 @@ public final class HeapFile implements AutoCloseable {
             int actualFree = heapPage.freeBytes();
 
             if (actualFree >= spaceNeeded) {
-                // FSM was correct — insert and update FSM
+                // WAL-before-data: emit WAL first, then mutate, then mark dirty
+                int slotNo = heapPage.slotCount(); // slot that will be assigned
+
+                if (xlogWriter != null && pinned.frame() != null) {
+                    byte[] walPayload = buildInsertWalPayload(slotNo, natts, nullBitmap, dataBytes);
+                    long lsn = xlogWriter.append(
+                        XLogRecord.RMGR_HEAP,
+                        HeapResourceManager.HEAP_INSERT,
+                        xid,
+                        oid,
+                        pageId,
+                        walPayload
+                    );
+                    pinned.frame().setPdLsn(lsn);
+                }
+
                 RecordId rid = heapPage.insert(dataBytes, natts, nullBitmap);
                 pinned.unpin(true); // Mark dirty since we modified the page
                 fsm.updatePage(pageId, heapPage.freeBytes());
@@ -292,11 +397,42 @@ public final class HeapFile implements AutoCloseable {
         PinnedPage newPinned = allocateNewPage();
         Page newPage = newPinned.page();
         HeapPage heapPage = new HeapPage(newPage);
+        int slotNo = heapPage.slotCount();
+
+        // WAL-before-data: emit WAL first, then mutate, then mark dirty
+        if (xlogWriter != null && newPinned.frame() != null) {
+            byte[] walPayload = buildInsertWalPayload(slotNo, natts, nullBitmap, dataBytes);
+            long lsn = xlogWriter.append(
+                XLogRecord.RMGR_HEAP,
+                HeapResourceManager.HEAP_INSERT,
+                xid,
+                oid,
+                newPage.pageId(),
+                walPayload
+            );
+            newPinned.frame().setPdLsn(lsn);
+        }
+
         RecordId rid = heapPage.insert(dataBytes, natts, nullBitmap);
         // Unpin the new page (dirty since we inserted data)
         newPinned.unpin(true);
         fsm.updatePage(newPage.pageId(), heapPage.freeBytes());
         return rid;
+    }
+
+    /**
+     * Builds the WAL payload for a HEAP_INSERT record.
+     * Format: (int slotNo, short natts, byte[] bitmap, byte[] tupleBytes)
+     */
+    private byte[] buildInsertWalPayload(int slotNo, short natts, byte[] nullBitmap, byte[] dataBytes) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        DataOutputStream dos = new DataOutputStream(baos);
+        dos.writeInt(slotNo);
+        dos.writeShort(natts);
+        dos.write(nullBitmap);
+        dos.write(dataBytes);
+        dos.flush();
+        return baos.toByteArray();
     }
 
     public Optional<Row> get(RecordId recordId) throws IOException {
@@ -355,11 +491,38 @@ public final class HeapFile implements AutoCloseable {
             throw new StorageException("page " + rid.pageId() + " is not a heap page");
         }
         HeapPage heapPage = new HeapPage(page);
+
+        // WAL-before-data: emit WAL first, then mutate, then mark dirty
+        if (xlogWriter != null && pinned.frame() != null) {
+            byte[] walPayload = buildDeleteWalPayload(rid.slotNo());
+            long lsn = xlogWriter.append(
+                XLogRecord.RMGR_HEAP,
+                HeapResourceManager.HEAP_DELETE,
+                xid,
+                oid,
+                rid.pageId(),
+                walPayload
+            );
+            pinned.frame().setPdLsn(lsn);
+        }
+
         heapPage.delete(rid.slotNo());
         pinned.unpin(true); // Mark dirty since we modified the page
 
         // Update FSM to reflect freed space
         fsm.updatePage(rid.pageId(), heapPage.freeBytes());
+    }
+
+    /**
+     * Builds the WAL payload for a HEAP_DELETE record.
+     * Format: (int slotNo)
+     */
+    private byte[] buildDeleteWalPayload(int slotNo) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        DataOutputStream dos = new DataOutputStream(baos);
+        dos.writeInt(slotNo);
+        dos.flush();
+        return baos.toByteArray();
     }
 
     public Iterator<Row> scan() throws IOException {

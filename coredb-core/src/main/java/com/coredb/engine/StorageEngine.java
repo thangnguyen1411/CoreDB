@@ -3,6 +3,7 @@ package com.coredb.engine;
 import com.coredb.api.Row;
 import com.coredb.buffer.BufferPool;
 import com.coredb.catalog.TableMeta;
+import com.coredb.wal.XLogWriter;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Iterator;
@@ -33,7 +34,7 @@ public interface StorageEngine extends AutoCloseable {
      * @param bufferPool the buffer pool for caching pages
      * @throws IOException if opening fails
      */
-    void open(Path dataDir, TableMeta meta, BufferPool bufferPool)
+    void open(Path dataDir, TableMeta meta, BufferPool bufferPool, XLogWriter xlogWriter)
         throws IOException;
 
     /**
