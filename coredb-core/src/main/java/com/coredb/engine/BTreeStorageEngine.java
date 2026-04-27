@@ -9,6 +9,8 @@ import com.coredb.heap.HeapFile;
 import com.coredb.heap.RecordId;
 import com.coredb.index.BTree;
 import com.coredb.index.IndexFile;
+import com.coredb.util.Constants;
+import com.coredb.wal.XLogWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,6 +46,7 @@ public class BTreeStorageEngine implements StorageEngine {
 
     // Engine state (valid after open())
     private BufferPool bufferPool;
+    private XLogWriter xlogWriter;
     private HeapFile heap;
     private IndexFile indexFile;
     private BTree pkIndex;
@@ -54,8 +57,9 @@ public class BTreeStorageEngine implements StorageEngine {
     }
 
     @Override
-    public void open(Path dataDir, TableMeta meta, BufferPool bufferPool) throws IOException {
+    public void open(Path dataDir, TableMeta meta, BufferPool bufferPool, XLogWriter xlogWriter) throws IOException {
         this.bufferPool = bufferPool;
+        this.xlogWriter = xlogWriter;
         Schema schema = meta.schema();
         this.pkColumnIndex = schema.indexOf(meta.pkColumn());
         if (pkColumnIndex < 0) {
@@ -69,9 +73,9 @@ public class BTreeStorageEngine implements StorageEngine {
         // Open or create heap file: base/1/<oid>
         Path heapPath = dataDir.resolve("base/1/" + meta.oid());
         if (Files.exists(heapPath)) {
-            this.heap = HeapFile.open(heapPath, meta.oid(), schema, bufferPool);
+            this.heap = HeapFile.open(heapPath, meta.oid(), schema, bufferPool, xlogWriter, Constants.BOOTSTRAP_XID);
         } else {
-            this.heap = HeapFile.create(heapPath, meta.oid(), schema, bufferPool);
+            this.heap = HeapFile.create(heapPath, meta.oid(), schema, bufferPool, xlogWriter, Constants.BOOTSTRAP_XID);
         }
 
         // Open or create index file: base/1/<oid>_pk
@@ -79,12 +83,12 @@ public class BTreeStorageEngine implements StorageEngine {
         if (Files.exists(indexPath)) {
             // Recover the file ID from the index file's meta page
             this.indexFile = IndexFile.open(indexPath, bufferPool);
-            this.pkIndex = BTree.open(indexFile);
+            this.pkIndex = BTree.open(indexFile, xlogWriter, Constants.BOOTSTRAP_XID);
         } else {
             // Allocate a new file ID for the index file
             int indexFileId = meta.oid() + INDEX_OID_OFFSET;
             this.indexFile = IndexFile.create(indexPath, indexFileId, bufferPool);
-            this.pkIndex = BTree.create(indexFile);
+            this.pkIndex = BTree.create(indexFile, xlogWriter, Constants.BOOTSTRAP_XID);
         }
 
         log.debug("Opened BTreeStorageEngine for table {} (oid={})", meta.name(), meta.oid());

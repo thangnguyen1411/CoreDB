@@ -336,42 +336,42 @@ public final class BTree {
         // Descend to leaf, tracking the path
         int leafPageId = descendToLeafWithPath(key);
 
-        // Try to insert into the leaf
         IndexFile.PinnedPage pinned = indexFile.readPage(leafPageId);
         Page page = pinned.page();
         BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(page));
 
-        // Determine insertion slot BEFORE mutating
-        int slotNo = leaf.layout().findInsertionPoint(key);
-
-        InsertResult result = leaf.insert(key, rid);
-
-        if (result == InsertResult.OK) {
-            // WAL-before-data: emit BTREE_INSERT after successful insert
-            if (xlogWriter != null && pinned.frame() != null) {
-                byte[] walPayload = buildBtreeInsertPayload(slotNo, key, rid);
-                long lsn = xlogWriter.append(
-                    XLogRecord.RMGR_BTREE,
-                    BTreeResourceManager.BTREE_INSERT,
-                    xid,
-                    indexFile.oid(),
-                    leafPageId,
-                    walPayload
-                );
-                pinned.frame().setPdLsn(lsn);
-            }
-            pinned.unpin(true);
-            return;
-        }
-
-        if (result == InsertResult.DUPLICATE_KEY) {
+        // Pre-check duplicate
+        if (leaf.search(key).isPresent()) {
             pinned.unpin(false);
             throw new IllegalStateException("Duplicate key: " + key);
         }
 
-        // result == InsertResult.FULL: need to split
-        // Note: handleLeafSplit will unpin the page
-        handleLeafSplit(leaf, pinned, key, rid);
+        // Pre-check full: 14 bytes leaf entry + 4 bytes ItemId
+        if (leaf.freeBytes() < 18) {
+            handleLeafSplit(leaf, pinned, key, rid);
+            return;
+        }
+
+        // WAL-before-data: emit record before mutating the page
+        int slotNo = leaf.layout().findInsertionPoint(key);
+        if (xlogWriter != null && pinned.frame() != null) {
+            byte[] walPayload = buildBtreeInsertPayload(slotNo, key, rid);
+            long lsn = xlogWriter.append(
+                XLogRecord.RMGR_BTREE,
+                BTreeResourceManager.BTREE_INSERT,
+                xid,
+                indexFile.oid(),
+                leafPageId,
+                walPayload
+            );
+            pinned.frame().setPdLsn(lsn);
+        }
+        InsertResult result = leaf.insert(key, rid);
+        if (result != InsertResult.OK) {
+            pinned.unpin(false);
+            throw new IllegalStateException("Unexpected insert result after pre-check: " + result);
+        }
+        pinned.unpin(true);
     }
 
     /**
@@ -390,6 +390,69 @@ public final class BTree {
     }
 
     /**
+     * Builds the WAL payload for a BTREE_SPLIT record on the left (original) page.
+     * Format: (int newRightPageId, int oldRightSibling, long separatorKey)
+     */
+    private byte[] buildBtreeSplitPayload(int newRightPageId, int oldRightSibling, long separatorKey) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        DataOutputStream dos = new DataOutputStream(baos);
+        dos.writeInt(newRightPageId);
+        dos.writeInt(oldRightSibling);
+        dos.writeLong(separatorKey);
+        dos.flush();
+        return baos.toByteArray();
+    }
+
+    /**
+     * Builds the WAL payload for a BTREE_SPLIT record on the right (new) page.
+     * Format: (int leftPageId, int unused, long separatorKey, int entryCount, entries...)
+     */
+    private byte[] buildBtreeSplitRightPayload(BTreeLeafPage rightPage, int leftPageId, long separatorKey) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        DataOutputStream dos = new DataOutputStream(baos);
+        dos.writeInt(leftPageId);
+        dos.writeInt(0); // unused
+        dos.writeLong(separatorKey);
+        int count = rightPage.entryCount();
+        dos.writeInt(count);
+        for (int i = 0; i < count; i++) {
+            dos.writeLong(rightPage.keyAt(i));
+            RecordId rid = rightPage.ridAt(i);
+            dos.writeInt(rid.pageId());
+            dos.writeShort((short) rid.slotNo());
+        }
+        dos.flush();
+        return baos.toByteArray();
+    }
+
+    /**
+     * Builds the WAL payload for a BTREE_INTERNAL_INSERT record.
+     * Format: (int slotNo, long key, int childPageId)
+     */
+    private byte[] buildBtreeInternalInsertPayload(int slotNo, long key, int childPageId) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        DataOutputStream dos = new DataOutputStream(baos);
+        dos.writeInt(slotNo);
+        dos.writeLong(key);
+        dos.writeInt(childPageId);
+        dos.flush();
+        return baos.toByteArray();
+    }
+
+    /**
+     * Builds the WAL payload for a BTREE_INTERNAL_SPLIT record.
+     * Format: (int newRightPageId, long promotedKey)
+     */
+    private byte[] buildBtreeInternalSplitPayload(int newRightPageId, long promotedKey) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        DataOutputStream dos = new DataOutputStream(baos);
+        dos.writeInt(newRightPageId);
+        dos.writeLong(promotedKey);
+        dos.flush();
+        return baos.toByteArray();
+    }
+
+    /**
      * Handles a leaf page split and propagates the split upward.
      *
      * @param leaf the full leaf page that needs splitting
@@ -399,45 +462,91 @@ public final class BTree {
      * @throws IOException if file operations fail
      */
     private void handleLeafSplit(BTreeLeafPage leaf, IndexFile.PinnedPage leafPinned, long key, RecordId rid) throws IOException {
-        // Split the leaf page
+        // Capture old right sibling before split changes sibling pointers
+        int oldRightSibling = leaf.btpoNext();
+
+        // Split the leaf page (mutates left and right pages in memory)
         SplitResult splitResult = leaf.split(indexFile);
+
+        // WAL-before-data for the left (original) page
+        if (xlogWriter != null && leafPinned.frame() != null) {
+            byte[] leftPayload = buildBtreeSplitPayload(splitResult.newRightPageId(), oldRightSibling, splitResult.separatorKey());
+            long leftLsn = xlogWriter.append(
+                XLogRecord.RMGR_BTREE,
+                BTreeResourceManager.BTREE_SPLIT,
+                xid,
+                indexFile.oid(),
+                leaf.pageId(),
+                leftPayload
+            );
+            leafPinned.frame().setPdLsn(leftLsn);
+        }
+
+        // WAL-before-data for the right (new) page: re-fetch to set pdLsn
+        if (xlogWriter != null) {
+            IndexFile.PinnedPage rightRefetch = indexFile.readPage(splitResult.newRightPageId());
+            if (rightRefetch.frame() != null) {
+                byte[] rightPayload = buildBtreeSplitRightPayload(
+                    BTreeLeafPage.of(IndexPageLayout.of(rightRefetch.page())),
+                    leaf.pageId(),
+                    splitResult.separatorKey()
+                );
+                long rightLsn = xlogWriter.append(
+                    XLogRecord.RMGR_BTREE,
+                    BTreeResourceManager.BTREE_SPLIT,
+                    xid,
+                    indexFile.oid(),
+                    splitResult.newRightPageId(),
+                    rightPayload
+                );
+                rightRefetch.frame().setPdLsn(rightLsn);
+            }
+            rightRefetch.unpin(false); // already dirty from split
+        }
 
         // Determine which page to insert into
         int targetPageId;
         BTreeLeafPage targetPage;
-        IndexFile.PinnedPage targetPinned = null;
+        IndexFile.PinnedPage targetPinned;
 
         if (key < splitResult.separatorKey()) {
-            // Insert into left (original) page
             targetPageId = leaf.pageId();
             targetPage = leaf;
-            targetPinned = leafPinned; // Reuse the same pinned page
+            targetPinned = leafPinned;
         } else {
-            // Insert into right (new) page
             targetPageId = splitResult.newRightPageId();
             targetPinned = indexFile.readPage(targetPageId);
             Page rightPageData = targetPinned.page();
             targetPage = BTreeLeafPage.of(IndexPageLayout.of(rightPageData));
-            // Unpin the original leaf since we're not using it
             leafPinned.unpin(true);
         }
 
-        // Insert the key into the appropriate page
+        // WAL-before-data: emit BTREE_INSERT for the target page before inserting
+        int slotNo = targetPage.layout().findInsertionPoint(key);
+        if (xlogWriter != null && targetPinned.frame() != null) {
+            byte[] insertPayload = buildBtreeInsertPayload(slotNo, key, rid);
+            long insertLsn = xlogWriter.append(
+                XLogRecord.RMGR_BTREE,
+                BTreeResourceManager.BTREE_INSERT,
+                xid,
+                indexFile.oid(),
+                targetPageId,
+                insertPayload
+            );
+            targetPinned.frame().setPdLsn(insertLsn);
+        }
         InsertResult insertResult = targetPage.insert(key, rid);
         if (insertResult != InsertResult.OK) {
-            // This should not happen - new page should have room
             targetPinned.unpin(true);
             throw new IllegalStateException("Failed to insert into split page: " + insertResult);
         }
-
-        // Unpin the target page (dirty)
         targetPinned.unpin(true);
 
         // Propagate the split upward
         propagateSplit(
             splitResult.separatorKey(),
             splitResult.newRightPageId(),
-            leaf.pageId()  // left page
+            leaf.pageId()
         );
     }
 
@@ -450,7 +559,6 @@ public final class BTree {
      * @throws IOException if file operations fail
      */
     private void propagateSplit(long separatorKey, int rightPageId, int leftPageId) throws IOException {
-        // Walk up the path stack, inserting separators into parents
         while (pathDepth > 0) {
             pathDepth--;
             int parentPageId = pathStack[pathDepth];
@@ -459,66 +567,127 @@ public final class BTree {
             Page parentPageData = parentPinned.page();
             BTreeInternalPage parent = BTreeInternalPage.of(IndexPageLayout.of(parentPageData));
 
-            // Try to insert the separator into the parent
-            InsertResult result = parent.insertSeparator(separatorKey, rightPageId);
-
-            if (result == InsertResult.OK) {
-                // Parent had room, unpin dirty and we're done
+            // 12 bytes internal entry + 4 bytes ItemId
+            if (parent.freeBytes() >= 16) {
+                // Parent has room: WAL-before-data, then insert
+                int slotNo = parent.layout().findInternalInsertionPoint(separatorKey);
+                if (xlogWriter != null && parentPinned.frame() != null) {
+                    byte[] walPayload = buildBtreeInternalInsertPayload(slotNo, separatorKey, rightPageId);
+                    long lsn = xlogWriter.append(
+                        XLogRecord.RMGR_BTREE,
+                        BTreeResourceManager.BTREE_INTERNAL_INSERT,
+                        xid,
+                        indexFile.oid(),
+                        parentPageId,
+                        walPayload
+                    );
+                    parentPinned.frame().setPdLsn(lsn);
+                }
+                InsertResult result = parent.insertSeparator(separatorKey, rightPageId);
+                if (result == InsertResult.DUPLICATE_KEY) {
+                    parentPinned.unpin(false);
+                    throw new IllegalStateException("Duplicate separator key during split propagation: " + separatorKey);
+                }
+                if (result != InsertResult.OK) {
+                    parentPinned.unpin(false);
+                    throw new IllegalStateException("Unexpected insert result after pre-check: " + result);
+                }
                 parentPinned.unpin(true);
                 return;
-            }
-
-            if (result == InsertResult.DUPLICATE_KEY) {
-                // This shouldn't happen during normal split propagation
-                parentPinned.unpin(false);
-                throw new IllegalStateException("Duplicate separator key during split propagation: " + separatorKey);
             }
 
             // Parent is full, need to split it
             BTreeInternalPage.InternalSplitResult internalSplit = parent.split(indexFile);
 
-            // Determine which child gets the new separator
-            // The separator key tells us: keys < separator go left, keys >= go right
+            // WAL-before-data for the left (original) parent page
+            if (xlogWriter != null && parentPinned.frame() != null) {
+                byte[] leftPayload = buildBtreeInternalSplitPayload(internalSplit.rightPageId(), internalSplit.promotedKey());
+                long leftLsn = xlogWriter.append(
+                    XLogRecord.RMGR_BTREE,
+                    BTreeResourceManager.BTREE_INTERNAL_SPLIT,
+                    xid,
+                    indexFile.oid(),
+                    parentPageId,
+                    leftPayload
+                );
+                parentPinned.frame().setPdLsn(leftLsn);
+            }
+
+            // WAL-before-data for the right (new) internal page
+            if (xlogWriter != null) {
+                IndexFile.PinnedPage rightRefetch = indexFile.readPage(internalSplit.rightPageId());
+                if (rightRefetch.frame() != null) {
+                    byte[] rightPayload = buildBtreeInternalSplitPayload(parentPageId, internalSplit.promotedKey());
+                    long rightLsn = xlogWriter.append(
+                        XLogRecord.RMGR_BTREE,
+                        BTreeResourceManager.BTREE_INTERNAL_SPLIT,
+                        xid,
+                        indexFile.oid(),
+                        internalSplit.rightPageId(),
+                        rightPayload
+                    );
+                    rightRefetch.frame().setPdLsn(rightLsn);
+                }
+                rightRefetch.unpin(false); // already dirty from split
+            }
+
             long newSeparator = internalSplit.promotedKey();
             int newRightPageId = internalSplit.rightPageId();
 
-            // The new separator we were trying to insert
-            // Compare with promoted key to decide which page gets it
             if (separatorKey < newSeparator) {
-                // Insert into left page (original)
-                BTreeInternalPage leftPage = parent;
-                InsertResult insertResult = leftPage.insertSeparator(separatorKey, rightPageId);
+                // Insert into left page (original parent): WAL-before-data
+                int slotNo = parent.layout().findInternalInsertionPoint(separatorKey);
+                if (xlogWriter != null && parentPinned.frame() != null) {
+                    byte[] walPayload = buildBtreeInternalInsertPayload(slotNo, separatorKey, rightPageId);
+                    long lsn = xlogWriter.append(
+                        XLogRecord.RMGR_BTREE,
+                        BTreeResourceManager.BTREE_INTERNAL_INSERT,
+                        xid,
+                        indexFile.oid(),
+                        parentPageId,
+                        walPayload
+                    );
+                    parentPinned.frame().setPdLsn(lsn);
+                }
+                InsertResult insertResult = parent.insertSeparator(separatorKey, rightPageId);
                 if (insertResult != InsertResult.OK) {
                     parentPinned.unpin(true);
                     throw new IllegalStateException("Failed to insert into split internal page: " + insertResult);
                 }
-                // Unpin left page (original parent, modified)
                 parentPinned.unpin(true);
             } else {
-                // Insert into right page (new)
+                // Insert into right page (new): WAL-before-data
                 IndexFile.PinnedPage rightPinned = indexFile.readPage(newRightPageId);
                 Page rightPageData = rightPinned.page();
                 BTreeInternalPage rightPage = BTreeInternalPage.of(IndexPageLayout.of(rightPageData));
+                int slotNo = rightPage.layout().findInternalInsertionPoint(separatorKey);
+                if (xlogWriter != null && rightPinned.frame() != null) {
+                    byte[] walPayload = buildBtreeInternalInsertPayload(slotNo, separatorKey, rightPageId);
+                    long lsn = xlogWriter.append(
+                        XLogRecord.RMGR_BTREE,
+                        BTreeResourceManager.BTREE_INTERNAL_INSERT,
+                        xid,
+                        indexFile.oid(),
+                        newRightPageId,
+                        walPayload
+                    );
+                    rightPinned.frame().setPdLsn(lsn);
+                }
                 InsertResult insertResult = rightPage.insertSeparator(separatorKey, rightPageId);
                 if (insertResult != InsertResult.OK) {
                     rightPinned.unpin(true);
                     parentPinned.unpin(true);
                     throw new IllegalStateException("Failed to insert into new internal page: " + insertResult);
                 }
-                // Unpin both pages
                 rightPinned.unpin(true);
                 parentPinned.unpin(true);
             }
 
-            // Continue propagating with the promoted key
             separatorKey = newSeparator;
             rightPageId = newRightPageId;
             leftPageId = internalSplit.leftPageId();
-            // Loop continues to next parent level
         }
 
-        // If we exit the loop, we've propagated all the way to above the root
-        // This means the root split and we need a new root
         createNewRoot(separatorKey, leftPageId, rightPageId);
     }
 
@@ -531,20 +700,30 @@ public final class BTree {
      * @throws IOException if file operations fail
      */
     private void createNewRoot(long separatorKey, int leftChild, int rightChild) throws IOException {
-        // Allocate a new internal page at the new level
         int newLevel = treeHeight() + 1;
         IndexFile.PinnedPage newRootPinned = indexFile.allocateNewPage(PageType.INDEX_INTERNAL);
         Page newRootPage = newRootPinned.page();
         BTreeInternalPage newRoot = BTreeInternalPage.of(IndexPageLayout.of(newRootPage));
         newRoot.setBtpoLevel(newLevel);
 
-        // Initialize with the two children
+        // WAL-before-data: emit record before populating the new root
+        if (xlogWriter != null && newRootPinned.frame() != null) {
+            byte[] walPayload = buildBtreeInternalInsertPayload(0, separatorKey, rightChild);
+            long lsn = xlogWriter.append(
+                XLogRecord.RMGR_BTREE,
+                BTreeResourceManager.BTREE_INTERNAL_INSERT,
+                xid,
+                indexFile.oid(),
+                newRoot.pageId(),
+                walPayload
+            );
+            newRootPinned.frame().setPdLsn(lsn);
+        }
+
         newRoot.initializeWithChildren(leftChild, separatorKey, rightChild);
 
-        // Unpin the new root (dirty) - modifications are in the buffer pool frame
         newRootPinned.unpin(true);
 
-        // Update the index file metadata
         indexFile.setRootPageId(newRoot.pageId());
 
         log.debug("Created new root page {} at level {}, tree height now {}",

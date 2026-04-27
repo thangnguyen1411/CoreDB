@@ -134,7 +134,7 @@ public final class CoreDB implements AutoCloseable {
                     config.engineType(),
                     config
                 );
-                engine.open(dataPath, meta, bufferPool);
+                engine.open(dataPath, meta, bufferPool, xlogWriter);
                 log.debug(
                     "Opened StorageEngine for table {} (oid={})",
                     meta.name(),

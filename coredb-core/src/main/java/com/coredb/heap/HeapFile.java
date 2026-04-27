@@ -223,6 +223,44 @@ public final class HeapFile implements AutoCloseable {
     }
 
     /**
+     * Creates a new per-table heap file with WAL support.
+     *
+     * @param tablePath path to the table file (e.g., dataDir/base/1/1002)
+     * @param oid       the table OID
+     * @param schema    the table schema
+     * @param bufferPool the buffer pool for caching pages
+     * @param xlogWriter the WAL writer for durability
+     * @param xid       the transaction ID for WAL records
+     * @return a new HeapFile instance
+     * @throws IOException if creation fails
+     */
+    public static HeapFile create(Path tablePath, int oid, Schema schema, BufferPool bufferPool,
+                                  XLogWriter xlogWriter, int xid) throws IOException {
+        Path parent = tablePath.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+
+        FileChannel channel = FileChannel.open(tablePath,
+                StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+
+        Page metaPage = buildInitialMetaPage(oid);
+        PageIO.writePage(channel, metaPage);
+        channel.force(true);
+        channel.close();
+
+        bufferPool.registerFile(oid, tablePath);
+
+        int nextPageId = 1;
+
+        Path fsmPath = tablePath.getParent().resolve(tablePath.getFileName() + "_fsm");
+        FreeSpaceMap fsm = FreeSpaceMap.create(fsmPath, 0);
+
+        log.info("Created heap file with WAL: {} (oid={})", tablePath.toAbsolutePath(), oid);
+        return new HeapFile(tablePath, oid, schema, bufferPool, nextPageId, metaPage, fsm, null, xlogWriter, xid);
+    }
+
+    /**
      * Opens an existing per-table heap file with WAL support.
      * This is the main entry point for normal database operation.
      *
