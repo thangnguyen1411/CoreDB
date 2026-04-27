@@ -626,15 +626,14 @@ public final class BTree {
                 int slotNo = parent.layout().findInternalInsertionPoint(separatorKey);
                 if (xlogWriter != null && parentPinned.frame() != null) {
                     byte[] walPayload = buildBtreeInternalInsertPayload(slotNo, separatorKey, rightPageId);
-                    long lsn = xlogWriter.append(
+                    appendWalWithFPW(
+                        parentPinned.frame(),
+                        parentPageData.buffer(),
                         XLogRecord.RMGR_BTREE,
                         BTreeResourceManager.BTREE_INTERNAL_INSERT,
-                        xid,
-                        indexFile.oid(),
                         parentPageId,
                         walPayload
                     );
-                    parentPinned.frame().setPdLsn(lsn);
                 }
                 InsertResult result = parent.insertSeparator(separatorKey, rightPageId);
                 if (result == InsertResult.DUPLICATE_KEY) {
@@ -655,15 +654,14 @@ public final class BTree {
             // WAL-before-data for the left (original) parent page
             if (xlogWriter != null && parentPinned.frame() != null) {
                 byte[] leftPayload = buildBtreeInternalSplitPayload(internalSplit.rightPageId(), internalSplit.promotedKey());
-                long leftLsn = xlogWriter.append(
+                appendWalWithFPW(
+                    parentPinned.frame(),
+                    parentPageData.buffer(),
                     XLogRecord.RMGR_BTREE,
                     BTreeResourceManager.BTREE_INTERNAL_SPLIT,
-                    xid,
-                    indexFile.oid(),
                     parentPageId,
                     leftPayload
                 );
-                parentPinned.frame().setPdLsn(leftLsn);
             }
 
             // WAL-before-data for the right (new) internal page
@@ -671,15 +669,14 @@ public final class BTree {
                 IndexFile.PinnedPage rightRefetch = indexFile.readPage(internalSplit.rightPageId());
                 if (rightRefetch.frame() != null) {
                     byte[] rightPayload = buildBtreeInternalSplitPayload(parentPageId, internalSplit.promotedKey());
-                    long rightLsn = xlogWriter.append(
+                    appendWalWithFPW(
+                        rightRefetch.frame(),
+                        rightRefetch.page().buffer(),
                         XLogRecord.RMGR_BTREE,
                         BTreeResourceManager.BTREE_INTERNAL_SPLIT,
-                        xid,
-                        indexFile.oid(),
                         internalSplit.rightPageId(),
                         rightPayload
                     );
-                    rightRefetch.frame().setPdLsn(rightLsn);
                 }
                 rightRefetch.unpin(false); // already dirty from split
             }
@@ -692,15 +689,14 @@ public final class BTree {
                 int slotNo = parent.layout().findInternalInsertionPoint(separatorKey);
                 if (xlogWriter != null && parentPinned.frame() != null) {
                     byte[] walPayload = buildBtreeInternalInsertPayload(slotNo, separatorKey, rightPageId);
-                    long lsn = xlogWriter.append(
+                    appendWalWithFPW(
+                        parentPinned.frame(),
+                        parentPageData.buffer(),
                         XLogRecord.RMGR_BTREE,
                         BTreeResourceManager.BTREE_INTERNAL_INSERT,
-                        xid,
-                        indexFile.oid(),
                         parentPageId,
                         walPayload
                     );
-                    parentPinned.frame().setPdLsn(lsn);
                 }
                 InsertResult insertResult = parent.insertSeparator(separatorKey, rightPageId);
                 if (insertResult != InsertResult.OK) {
@@ -716,15 +712,14 @@ public final class BTree {
                 int slotNo = rightPage.layout().findInternalInsertionPoint(separatorKey);
                 if (xlogWriter != null && rightPinned.frame() != null) {
                     byte[] walPayload = buildBtreeInternalInsertPayload(slotNo, separatorKey, rightPageId);
-                    long lsn = xlogWriter.append(
+                    appendWalWithFPW(
+                        rightPinned.frame(),
+                        rightPageData.buffer(),
                         XLogRecord.RMGR_BTREE,
                         BTreeResourceManager.BTREE_INTERNAL_INSERT,
-                        xid,
-                        indexFile.oid(),
                         newRightPageId,
                         walPayload
                     );
-                    rightPinned.frame().setPdLsn(lsn);
                 }
                 InsertResult insertResult = rightPage.insertSeparator(separatorKey, rightPageId);
                 if (insertResult != InsertResult.OK) {
@@ -762,15 +757,14 @@ public final class BTree {
         // WAL-before-data: emit record before populating the new root
         if (xlogWriter != null && newRootPinned.frame() != null) {
             byte[] walPayload = buildBtreeInternalInsertPayload(0, separatorKey, rightChild);
-            long lsn = xlogWriter.append(
+            appendWalWithFPW(
+                newRootPinned.frame(),
+                newRootPage.buffer(),
                 XLogRecord.RMGR_BTREE,
                 BTreeResourceManager.BTREE_INTERNAL_INSERT,
-                xid,
-                indexFile.oid(),
                 newRoot.pageId(),
                 walPayload
             );
-            newRootPinned.frame().setPdLsn(lsn);
         }
 
         newRoot.initializeWithChildren(leftChild, separatorKey, rightChild);
