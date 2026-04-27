@@ -1,19 +1,18 @@
 package com.coredb.index;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
 import com.coredb.page.Page;
 import com.coredb.page.PageType;
 import com.coredb.util.Constants;
 import com.coredb.util.CorruptionException;
 import com.coredb.util.StorageException;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class IndexFileTest {
 
@@ -65,8 +64,8 @@ class IndexFileTest {
 
         // Try to open with wrong OID
         assertThatThrownBy(() -> IndexFile.open(indexPath, 9999))
-                .isInstanceOf(CorruptionException.class)
-                .hasMessageContaining("OID mismatch");
+            .isInstanceOf(CorruptionException.class)
+            .hasMessageContaining("OID mismatch");
     }
 
     @Test
@@ -74,8 +73,8 @@ class IndexFileTest {
         Path indexPath = tempDir.resolve("nonexistent_pk");
 
         assertThatThrownBy(() -> IndexFile.open(indexPath, 1002))
-                .isInstanceOf(IOException.class)
-                .hasMessageContaining("not found");
+            .isInstanceOf(IOException.class)
+            .hasMessageContaining("not found");
     }
 
     @Test
@@ -85,7 +84,9 @@ class IndexFileTest {
         try (IndexFile idx = IndexFile.create(indexPath, 1002)) {
             assertThat(idx.nextPageId()).isEqualTo(2);
 
-            IndexFile.PinnedPage pinned = idx.allocateNewPage(PageType.INDEX_LEAF);
+            IndexFile.PinnedPage pinned = idx.allocateNewPage(
+                PageType.INDEX_LEAF
+            );
             Page newPage = pinned.page();
             pinned.unpin(false);
 
@@ -147,13 +148,13 @@ class IndexFileTest {
         try (IndexFile idx = IndexFile.create(indexPath, 1002)) {
             // nextPageId is 2, so page 2 doesn't exist yet
             assertThatThrownBy(() -> idx.readPage(2))
-                    .isInstanceOf(StorageException.class)
-                    .hasMessageContaining("does not exist");
+                .isInstanceOf(StorageException.class)
+                .hasMessageContaining("does not exist");
 
             // Page 0 is meta, not readable via readPage
             assertThatThrownBy(() -> idx.readPage(0))
-                    .isInstanceOf(StorageException.class)
-                    .hasMessageContaining("does not exist");
+                .isInstanceOf(StorageException.class)
+                .hasMessageContaining("does not exist");
         }
     }
 
@@ -223,7 +224,10 @@ class IndexFileTest {
         Path indexPath = tempDir.resolve("1002_pk");
 
         try (IndexFile idx = IndexFile.create(indexPath, 1002)) {
-            Page newPage = idx.allocateNewPage(PageType.INDEX_LEAF);
+            IndexFile.PinnedPage pinned = idx.allocateNewPage(
+                PageType.INDEX_LEAF
+            );
+            Page newPage = pinned.page();
 
             IndexPageLayout layout = IndexPageLayout.of(newPage);
             assertThat(layout.isLeaf()).isTrue();

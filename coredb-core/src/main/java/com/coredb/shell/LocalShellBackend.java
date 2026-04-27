@@ -16,7 +16,6 @@ import com.coredb.index.BTreeLeafPage;
 import com.coredb.index.IndexFile;
 import com.coredb.index.IndexPageLayout;
 import com.coredb.util.Constants;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -60,38 +59,43 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         String args = parts.length > 1 ? parts[1] : "";
 
         return switch (command) {
-            case "version"        -> formatVersion();
-            case "status"         -> formatStatus();
-            case "insert-raw"     -> handleInsertRaw(args);
-            case "get-raw"        -> handleGetRaw(args);
-            case "scan-raw"       -> handleScanRaw(args);
-            case "delete-raw"     -> handleDeleteRaw(args);
-            case "heap-stats"     -> handleHeapStats(args);
-            case "buffer-stats"   -> handleBufferStats();
-            case "schema-parse"      -> handleSchemaParse(args);
-            case "control-info"      -> handleControlInfo();
+            case "version" -> formatVersion();
+            case "status" -> formatStatus();
+            case "insert-raw" -> handleInsertRaw(args);
+            case "get-raw" -> handleGetRaw(args);
+            case "scan-raw" -> handleScanRaw(args);
+            case "delete-raw" -> handleDeleteRaw(args);
+            case "heap-stats" -> handleHeapStats(args);
+            case "buffer-stats" -> handleBufferStats();
+            case "schema-parse" -> handleSchemaParse(args);
+            case "control-info" -> handleControlInfo();
             case "control-alloc-oid" -> handleControlAllocOid();
-            case "heap-meta"         -> handleHeapMeta(args);
-            case "bootstrap"         -> handleBootstrap();
-            case "create-table"      -> handleCreateTable(args);
-            case "list-tables"       -> handleListTables();
-            case "describe"          -> handleDescribe(args);
-            case "drop-table"        -> handleDropTable(args);
-            case "index-meta"        -> handleIndexMeta(args);
-            case "index-dump"        -> handleIndexDump(args);
-            case "put"               -> handlePut(args);
-            case "get"               -> handleGet(args);
-            case "delete"            -> handleDelete(args);
-            case "scan"              -> handleScan(args);
-            case "range"             -> handleRange(args);
-            case "help"              -> formatHelp();
-            default                  -> "unknown command: " + command + "  (type 'help' for available commands)";
+            case "heap-meta" -> handleHeapMeta(args);
+            case "bootstrap" -> handleBootstrap();
+            case "create-table" -> handleCreateTable(args);
+            case "list-tables" -> handleListTables();
+            case "describe" -> handleDescribe(args);
+            case "drop-table" -> handleDropTable(args);
+            case "index-meta" -> handleIndexMeta(args);
+            case "index-dump" -> handleIndexDump(args);
+            case "put" -> handlePut(args);
+            case "get" -> handleGet(args);
+            case "delete" -> handleDelete(args);
+            case "scan" -> handleScan(args);
+            case "range" -> handleRange(args);
+            case "help" -> formatHelp();
+            default -> "unknown command: " +
+            command +
+            "  (type 'help' for available commands)";
         };
     }
 
     private String formatVersion() {
-        return String.format("CoreDB 0.1 | engine=%s | page-size=%d",
-                db.config().engineType(), db.config().pageSize());
+        return String.format(
+            "CoreDB 0.1 | engine=%s | page-size=%d",
+            db.config().engineType(),
+            db.config().pageSize()
+        );
     }
 
     private String formatStatus() {
@@ -106,42 +110,42 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
 
     private String formatHelp() {
         return """
-            Cluster commands:
-              control-info               show pg_control contents
-              control-alloc-oid          allocate next OID and persist
-              bootstrap                  show bootstrap status
+        Cluster commands:
+          control-info               show pg_control contents
+          control-alloc-oid          allocate next OID and persist
+          bootstrap                  show bootstrap status
 
-            Catalog commands:
-              create-table <name> cols... pk:<col>   create a new table
-              list-tables                              list all tables
-              describe <name>                          show table schema
-              drop-table <name>                        drop a table (soft delete)
-              schema-parse <def>                       parse column definition
+        Catalog commands:
+          create-table <name> cols... pk:<col>   create a new table
+          list-tables                              list all tables
+          describe <name>                          show table schema
+          drop-table <name>                        drop a table (soft delete)
+          schema-parse <def>                       parse column definition
 
-            Data commands (via StorageEngine - uses heap+index, MVCC semantics):
-              put <table> <pk> <col1> <col2> ...       insert or update a row (upsert)
-              get <table> <pk>                         retrieve a row by primary key
-              delete <table> <pk>                      delete a row by primary key
-              scan <table>                             full table scan (heap order)
-              range <table> <from-pk> <to-pk>          range scan by primary key (sorted)
+        Data commands (via StorageEngine - uses heap+index, MVCC semantics):
+          put <table> <pk> <col1> <col2> ...       insert or update a row (upsert)
+          get <table> <pk>                         retrieve a row by primary key
+          delete <table> <pk>                      delete a row by primary key
+          scan <table>                             full table scan (heap order)
+          range <table> <from-pk> <to-pk>          range scan by primary key (sorted)
 
-            Diagnostics:
-              version                    print version and config
-              status                     show DB file path and whether it exists
-              buffer-stats               show buffer pool statistics
-              help                       list available commands
-              quit                       exit
+        Diagnostics:
+          version                    print version and config
+          status                     show DB file path and whether it exists
+          buffer-stats               show buffer pool statistics
+          help                       list available commands
+          quit                       exit
 
-            Debug: (raw heap commands - bypass StorageEngine, direct heap access)
-              insert-raw table=<name>|oid=<N> id=N name=XXX age=N   insert a row
-              get-raw table=<name>|oid=<N> rid=page:slot            get a row by RecordId
-              scan-raw table=<name>|oid=<N>                         scan all rows
-              delete-raw table=<name>|oid=<N> rid=page:slot         delete a row by RecordId
-              heap-stats table=<name>|oid=<N>                       show file stats
-              heap-meta table=<name>|oid=<N>                        show meta page of per-table heap file
-              index-meta table=<name>|oid=<N>                       show meta page of per-table index file
-              index-dump table=<name>|oid=<N> page=<P>              dump index page contents
-            """;
+        Debug: (raw heap commands - bypass StorageEngine, direct heap access)
+          insert-raw table=<name>|oid=<N> id=N name=XXX age=N   insert a row
+          get-raw table=<name>|oid=<N> rid=page:slot            get a row by RecordId
+          scan-raw table=<name>|oid=<N>                         scan all rows
+          delete-raw table=<name>|oid=<N> rid=page:slot         delete a row by RecordId
+          heap-stats table=<name>|oid=<N>                       show file stats
+          heap-meta table=<name>|oid=<N>                        show meta page of per-table heap file
+          index-meta table=<name>|oid=<N>                       show meta page of per-table index file
+          index-dump table=<name>|oid=<N> page=<P>              dump index page contents
+        """;
     }
 
     private String handleInsertRaw(String args) {
@@ -165,7 +169,11 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
                     age = Integer.parseInt(part.substring(4));
                 }
             } catch (NumberFormatException e) {
-                return "usage: insert-raw table=<name>|oid=<N> id=N name=XXX age=N (invalid number: " + part + ")";
+                return (
+                    "usage: insert-raw table=<name>|oid=<N> id=N name=XXX age=N (invalid number: " +
+                    part +
+                    ")"
+                );
             }
         }
 
@@ -174,16 +182,28 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         }
 
         // Build path: dataDir/base/1/<oid>
-        Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
+        Path tablePath = db
+            .dataPath()
+            .resolve("base")
+            .resolve("1")
+            .resolve(String.valueOf(oid));
 
         if (!Files.exists(tablePath)) {
-            return "error: heap file not found: " + db.dataPath().relativize(tablePath);
+            return (
+                "error: heap file not found: " +
+                db.dataPath().relativize(tablePath)
+            );
         }
 
         try (HeapFile hf = HeapFile.open(tablePath, oid, schemaForOid(oid))) {
             Row row = Row.of(id, name, age);
             RecordId rid = hf.insert(row);
-            return String.format("rid=%s  (xmin=%d xmax=%d)", rid, Constants.BOOTSTRAP_XID, Constants.INVALID_XID);
+            return String.format(
+                "rid=%s  (xmin=%d xmax=%d)",
+                rid,
+                Constants.BOOTSTRAP_XID,
+                Constants.INVALID_XID
+            );
         } catch (Exception e) {
             return "error: " + e.getMessage();
         }
@@ -212,10 +232,17 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         }
 
         // Build path: dataDir/base/1/<oid>
-        Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
+        Path tablePath = db
+            .dataPath()
+            .resolve("base")
+            .resolve("1")
+            .resolve(String.valueOf(oid));
 
         if (!Files.exists(tablePath)) {
-            return "error: heap file not found: " + db.dataPath().relativize(tablePath);
+            return (
+                "error: heap file not found: " +
+                db.dataPath().relativize(tablePath)
+            );
         }
 
         try (HeapFile hf = HeapFile.open(tablePath, oid, schemaForOid(oid))) {
@@ -238,10 +265,17 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         int oid = resolution.oid();
 
         // Build path: dataDir/base/1/<oid>
-        Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
+        Path tablePath = db
+            .dataPath()
+            .resolve("base")
+            .resolve("1")
+            .resolve(String.valueOf(oid));
 
         if (!Files.exists(tablePath)) {
-            return "error: heap file not found: " + db.dataPath().relativize(tablePath);
+            return (
+                "error: heap file not found: " +
+                db.dataPath().relativize(tablePath)
+            );
         }
 
         try (HeapFile hf = HeapFile.open(tablePath, oid, schemaForOid(oid))) {
@@ -258,7 +292,10 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             if (count == 0) {
                 return "(no live tuples)";
             }
-            return String.format("(%d rows)%n", count) + sb.toString().stripTrailing();
+            return (
+                String.format("(%d rows)%n", count) +
+                sb.toString().stripTrailing()
+            );
         } catch (Exception e) {
             return "error: " + e.getMessage();
         }
@@ -287,10 +324,17 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         }
 
         // Build path: dataDir/base/1/<oid>
-        Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
+        Path tablePath = db
+            .dataPath()
+            .resolve("base")
+            .resolve("1")
+            .resolve(String.valueOf(oid));
 
         if (!Files.exists(tablePath)) {
-            return "error: heap file not found: " + db.dataPath().relativize(tablePath);
+            return (
+                "error: heap file not found: " +
+                db.dataPath().relativize(tablePath)
+            );
         }
 
         try (HeapFile hf = HeapFile.open(tablePath, oid, schemaForOid(oid))) {
@@ -309,10 +353,17 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         int oid = resolution.oid();
 
         // Build path: dataDir/base/1/<oid>
-        Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
+        Path tablePath = db
+            .dataPath()
+            .resolve("base")
+            .resolve("1")
+            .resolve(String.valueOf(oid));
 
         if (!Files.exists(tablePath)) {
-            return "error: heap file not found: " + db.dataPath().relativize(tablePath);
+            return (
+                "error: heap file not found: " +
+                db.dataPath().relativize(tablePath)
+            );
         }
 
         try (HeapFile hf = HeapFile.open(tablePath, oid, schemaForOid(oid))) {
@@ -329,10 +380,23 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             }
 
             StringBuilder sb = new StringBuilder();
-            sb.append("path=").append(db.dataPath().relativize(tablePath)).append("\n");
-            sb.append(String.format("fileSize=%d bytes (%d pages)%n", fileSize, fileSize / Constants.PAGE_SIZE));
+            sb
+                .append("path=")
+                .append(db.dataPath().relativize(tablePath))
+                .append("\n");
+            sb.append(
+                String.format(
+                    "fileSize=%d bytes (%d pages)%n",
+                    fileSize,
+                    fileSize / Constants.PAGE_SIZE
+                )
+            );
             sb.append("nextPageId=").append(nextPageId).append("\n");
-            sb.append("livePages=").append(dataPages).append("  liveRows=").append(liveRows);
+            sb
+                .append("livePages=")
+                .append(dataPages)
+                .append("  liveRows=")
+                .append(liveRows);
 
             return sb.toString();
         } catch (Exception e) {
@@ -347,7 +411,10 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
 
         try {
             ColumnDefParser.ParsedSchema parsed = ColumnDefParser.parse(args);
-            return ColumnDefParser.formatSchema(parsed.schema(), parsed.pkColumn());
+            return ColumnDefParser.formatSchema(
+                parsed.schema(),
+                parsed.pkColumn()
+            );
         } catch (IllegalArgumentException e) {
             return "error: " + e.getMessage();
         }
@@ -376,10 +443,17 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         int oid = resolution.oid();
 
         // Build path: dataDir/base/1/<oid>
-        Path tablePath = db.dataPath().resolve("base").resolve("1").resolve(String.valueOf(oid));
+        Path tablePath = db
+            .dataPath()
+            .resolve("base")
+            .resolve("1")
+            .resolve(String.valueOf(oid));
 
         if (!Files.exists(tablePath)) {
-            return "error: heap file not found: " + db.dataPath().relativize(tablePath);
+            return (
+                "error: heap file not found: " +
+                db.dataPath().relativize(tablePath)
+            );
         }
 
         try {
@@ -387,10 +461,18 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             // Use a dummy schema - the meta page doesn't depend on it
             Schema dummySchema = Schema.of(Column.longCol("dummy"));
             try (HeapFile hf = HeapFile.open(tablePath, oid, dummySchema)) {
-                String path = db.dataPath().relativize(hf.tablePath()).toString();
+                String path = db
+                    .dataPath()
+                    .relativize(hf.tablePath())
+                    .toString();
                 StringBuilder sb = new StringBuilder();
                 sb.append("path=").append(path).append("\n");
-                sb.append(String.format("magic=0x%08X (\"HEAP\")%n", Constants.HEAP_FILE_MAGIC));
+                sb.append(
+                    String.format(
+                        "magic=0x%08X (\"HEAP\")%n",
+                        Constants.HEAP_FILE_MAGIC
+                    )
+                );
                 sb.append("formatVersion=1\n");
                 sb.append("oid=").append(oid).append("\n");
                 sb.append("nextPageId=").append(hf.nextPageId());
@@ -403,19 +485,24 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
 
     private static Schema schemaForOid(int oid) {
         return switch (oid) {
-            case BootstrapCatalog.CORE_CLASS_OID      -> BootstrapCatalog.CORE_CLASS_SCHEMA;
-            case BootstrapCatalog.CORE_ATTRIBUTE_OID  -> BootstrapCatalog.CORE_ATTRIBUTE_SCHEMA;
-            default                                   -> RAW_SCHEMA;
+            case BootstrapCatalog.CORE_CLASS_OID -> BootstrapCatalog.CORE_CLASS_SCHEMA;
+            case BootstrapCatalog.CORE_ATTRIBUTE_OID -> BootstrapCatalog.CORE_ATTRIBUTE_SCHEMA;
+            default -> RAW_SCHEMA;
         };
     }
 
     /**
      * Result of OID resolution: either success with OID, or failure with error message.
      */
-    private record OidResolution(int oid, String errorMessage, boolean isSuccess) {
+    private record OidResolution(
+        int oid,
+        String errorMessage,
+        boolean isSuccess
+    ) {
         static OidResolution success(int oid) {
             return new OidResolution(oid, null, true);
         }
+
         static OidResolution failure(String errorMessage) {
             return new OidResolution(-1, errorMessage, false);
         }
@@ -430,9 +517,13 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         for (String part : parts) {
             if (part.startsWith("oid=")) {
                 try {
-                    return OidResolution.success(Integer.parseInt(part.substring(4)));
+                    return OidResolution.success(
+                        Integer.parseInt(part.substring(4))
+                    );
                 } catch (NumberFormatException e) {
-                    return OidResolution.failure("usage: specify oid=<N> or table=<name>");
+                    return OidResolution.failure(
+                        "usage: specify oid=<N> or table=<name>"
+                    );
                 }
             } else if (part.startsWith("table=")) {
                 String tableName = part.substring(6);
@@ -440,7 +531,9 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
                     Catalog cat = getCatalog();
                     Optional<TableMeta> meta = cat.openTable(tableName);
                     if (meta.isEmpty()) {
-                        return OidResolution.failure("error: unknown table: " + tableName);
+                        return OidResolution.failure(
+                            "error: unknown table: " + tableName
+                        );
                     }
                     return OidResolution.success(meta.get().oid());
                 } catch (IOException e) {
@@ -453,8 +546,10 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
 
     private String handleCreateTable(String args) {
         if (args.isBlank()) {
-            return "usage: create-table <name> col:type ... pk:<col>\n" +
-                   "  e.g., create-table users id:long name:string age:int pk:id";
+            return (
+                "usage: create-table <name> col:type ... pk:<col>\n" +
+                "  e.g., create-table users id:long name:string age:int pk:id"
+            );
         }
 
         String[] parts = args.trim().split("\\s+", 2);
@@ -466,7 +561,9 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         }
 
         try {
-            ColumnDefParser.ParsedSchema parsed = ColumnDefParser.parse(colDefs);
+            ColumnDefParser.ParsedSchema parsed = ColumnDefParser.parse(
+                colDefs
+            );
             Catalog cat = getCatalog();
             cat.createTable(tableName, parsed.schema(), parsed.pkColumn());
             return "ok";
@@ -486,9 +583,17 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             }
             StringBuilder sb = new StringBuilder();
             for (TableMeta meta : tables) {
-                String pk = meta.pkColumn() != null ? meta.pkColumn() : "(none)";
-                sb.append(String.format("%-20s oid=%d  pk=%s  engine=%s%n",
-                    meta.name(), meta.oid(), pk, meta.engineType()));
+                String pk =
+                    meta.pkColumn() != null ? meta.pkColumn() : "(none)";
+                sb.append(
+                    String.format(
+                        "%-20s oid=%d  pk=%s  engine=%s%n",
+                        meta.name(),
+                        meta.oid(),
+                        pk,
+                        meta.engineType()
+                    )
+                );
             }
             return sb.toString().stripTrailing();
         } catch (IOException e) {
@@ -511,13 +616,28 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             TableMeta meta = metaOpt.get();
             StringBuilder sb = new StringBuilder();
             String pk = meta.pkColumn() != null ? meta.pkColumn() : "(none)";
-            sb.append(String.format("table=%s  oid=%d  pk=%s  engine=%s%n",
-                meta.name(), meta.oid(), pk, meta.engineType()));
-            sb.append(String.format("%-5s %-7s %s%n", "col", "type", "nullable"));
+            sb.append(
+                String.format(
+                    "table=%s  oid=%d  pk=%s  engine=%s%n",
+                    meta.name(),
+                    meta.oid(),
+                    pk,
+                    meta.engineType()
+                )
+            );
+            sb.append(
+                String.format("%-5s %-7s %s%n", "col", "type", "nullable")
+            );
             for (int i = 0; i < meta.schema().columnCount(); i++) {
                 Column col = meta.schema().column(i);
-                sb.append(String.format("%-5s %-7s %s%n",
-                    col.name(), col.type(), col.nullable() ? "true" : "false"));
+                sb.append(
+                    String.format(
+                        "%-5s %-7s %s%n",
+                        col.name(),
+                        col.type(),
+                        col.nullable() ? "true" : "false"
+                    )
+                );
             }
             return sb.toString().stripTrailing();
         } catch (IOException e) {
@@ -549,7 +669,9 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         if (Files.exists(controlPath)) {
             return "already initialized (pg_control exists)";
         }
-        throw new IllegalStateException("pg_control missing — CoreDB.open() should have initialized");
+        throw new IllegalStateException(
+            "pg_control missing — CoreDB.open() should have initialized"
+        );
     }
 
     private String handleIndexMeta(String args) {
@@ -560,18 +682,33 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         int oid = resolution.oid();
 
         // Build path: dataDir/base/1/<oid>_pk
-        Path indexPath = db.dataPath().resolve("base").resolve("1").resolve(oid + "_pk");
+        Path indexPath = db
+            .dataPath()
+            .resolve("base")
+            .resolve("1")
+            .resolve(oid + "_pk");
 
         if (!Files.exists(indexPath)) {
-            return "error: index file not found: " + db.dataPath().relativize(indexPath);
+            return (
+                "error: index file not found: " +
+                db.dataPath().relativize(indexPath)
+            );
         }
 
         try {
             try (IndexFile idx = IndexFile.open(indexPath, oid)) {
-                String path = db.dataPath().relativize(idx.indexPath()).toString();
+                String path = db
+                    .dataPath()
+                    .relativize(idx.indexPath())
+                    .toString();
                 StringBuilder sb = new StringBuilder();
                 sb.append("path=").append(path).append("\n");
-                sb.append(String.format("magic=0x%08X (\"IDXP\")%n", Constants.INDEX_FILE_MAGIC));
+                sb.append(
+                    String.format(
+                        "magic=0x%08X (\"IDXP\")%n",
+                        Constants.INDEX_FILE_MAGIC
+                    )
+                );
                 sb.append("formatVersion=1\n");
                 sb.append("oid=").append(oid).append("\n");
                 sb.append("root=").append(idx.rootPageId()).append("\n");
@@ -608,19 +745,33 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         }
 
         // Build path: dataDir/base/1/<oid>_pk
-        Path indexPath = db.dataPath().resolve("base").resolve("1").resolve(oid + "_pk");
+        Path indexPath = db
+            .dataPath()
+            .resolve("base")
+            .resolve("1")
+            .resolve(oid + "_pk");
 
         if (!Files.exists(indexPath)) {
-            return "error: index file not found: " + db.dataPath().relativize(indexPath);
+            return (
+                "error: index file not found: " +
+                db.dataPath().relativize(indexPath)
+            );
         }
 
         try {
             try (IndexFile idx = IndexFile.open(indexPath, oid)) {
                 if (pageId < 1 || pageId >= idx.nextPageId()) {
-                    return "error: page " + pageId + " does not exist (allocated=" + idx.nextPageId() + ")";
+                    return (
+                        "error: page " +
+                        pageId +
+                        " does not exist (allocated=" +
+                        idx.nextPageId() +
+                        ")"
+                    );
                 }
 
-                com.coredb.page.Page page = idx.readPage(pageId);
+                IndexFile.PinnedPage pinned = idx.readPage(pageId);
+                com.coredb.page.Page page = pinned.page();
                 IndexPageLayout layout = IndexPageLayout.of(page);
                 BTreeLeafPage leaf = BTreeLeafPage.of(layout);
 
@@ -638,7 +789,9 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
                     for (int i = 0; i < leaf.entryCount(); i++) {
                         long key = leaf.keyAt(i);
                         RecordId rid = leaf.ridAt(i);
-                        sb.append(String.format("  %-5d %-5d %s%n", i, key, rid));
+                        sb.append(
+                            String.format("  %-5d %-5d %s%n", i, key, rid)
+                        );
                     }
                 }
 
@@ -689,16 +842,22 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             values[pkIndex] = pk;
 
             // Parse remaining arguments for other columns
-            int argIdx = 2;  // Start after table name and pk
+            int argIdx = 2; // Start after table name and pk
             for (int i = 0; i < meta.schema().columnCount(); i++) {
-                if (i == pkIndex) continue;  // Skip PK, already set
+                if (i == pkIndex) continue; // Skip PK, already set
 
                 if (argIdx >= parts.length) {
-                    return "error: not enough values provided (expected " +
-                           (meta.schema().columnCount() - 1) + " non-PK columns)";
+                    return (
+                        "error: not enough values provided (expected " +
+                        (meta.schema().columnCount() - 1) +
+                        " non-PK columns)"
+                    );
                 }
 
-                values[i] = parseValue(parts[argIdx], meta.schema().column(i).type());
+                values[i] = parseValue(
+                    parts[argIdx],
+                    meta.schema().column(i).type()
+                );
                 argIdx++;
             }
 
@@ -709,7 +868,6 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             boolean isUpdate = engine.get(pk).isPresent();
             engine.put(pk, row);
             return isUpdate ? "ok (updated)" : "ok (inserted)";
-
         } catch (IllegalStateException e) {
             return "error: " + e.getMessage();
         } catch (IOException | IllegalArgumentException e) {
@@ -755,7 +913,6 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             } else {
                 return "(not found)";
             }
-
         } catch (IOException e) {
             return "error: " + e.getMessage();
         }
@@ -795,7 +952,6 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             StorageEngine engine = db.getEngineForTable(meta);
             engine.delete(pk);
             return "ok";
-
         } catch (IOException e) {
             return "error: " + e.getMessage();
         }
@@ -824,18 +980,25 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             StringBuilder sb = new StringBuilder();
             int count = 0;
 
-            java.util.Iterator<java.util.Map.Entry<Long, Row>> it = engine.fullScan();
+            java.util.Iterator<java.util.Map.Entry<Long, Row>> it =
+                engine.fullScan();
             while (it.hasNext()) {
                 java.util.Map.Entry<Long, Row> entry = it.next();
-                sb.append(entry.getKey()).append(": ").append(entry.getValue().values().toString()).append("\n");
+                sb
+                    .append(entry.getKey())
+                    .append(": ")
+                    .append(entry.getValue().values().toString())
+                    .append("\n");
                 count++;
             }
 
             if (count == 0) {
                 return "(no rows)";
             }
-            return String.format("(%d rows)%n", count) + sb.toString().stripTrailing();
-
+            return (
+                String.format("(%d rows)%n", count) +
+                sb.toString().stripTrailing()
+            );
         } catch (IOException e) {
             return "error: " + e.getMessage();
         }
@@ -876,18 +1039,25 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             StringBuilder sb = new StringBuilder();
             int count = 0;
 
-            java.util.Iterator<java.util.Map.Entry<Long, Row>> it = engine.rangeScan(fromPk, toPk);
+            java.util.Iterator<java.util.Map.Entry<Long, Row>> it =
+                engine.rangeScan(fromPk, toPk);
             while (it.hasNext()) {
                 java.util.Map.Entry<Long, Row> entry = it.next();
-                sb.append(entry.getKey()).append(": ").append(entry.getValue().values().toString()).append("\n");
+                sb
+                    .append(entry.getKey())
+                    .append(": ")
+                    .append(entry.getValue().values().toString())
+                    .append("\n");
                 count++;
             }
 
             if (count == 0) {
                 return "(no rows in range)";
             }
-            return String.format("(%d rows)%n", count) + sb.toString().stripTrailing();
-
+            return (
+                String.format("(%d rows)%n", count) +
+                sb.toString().stripTrailing()
+            );
         } catch (IOException e) {
             return "error: " + e.getMessage();
         }
