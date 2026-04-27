@@ -17,10 +17,10 @@ class XLogRecordTest {
         XLogRecord record = XLogRecord.create(100, 1, 50, XLogRecord.RMGR_HEAP, (byte) 0x01, 1000, 5, data);
 
         assertThat(record.lsn()).isEqualTo(100);
-        assertThat(record.totLen()).isEqualTo(44); // 40 byte header + 4 bytes data
+        assertThat(record.totalLength()).isEqualTo(44); // 40 byte header + 4 bytes data
         assertThat(record.xid()).isEqualTo(1);
         assertThat(record.prevLsn()).isEqualTo(50);
-        assertThat(record.rmgr()).isEqualTo(XLogRecord.RMGR_HEAP);
+        assertThat(record.resourceManager()).isEqualTo(XLogRecord.RMGR_HEAP);
         assertThat(record.info()).isEqualTo((byte) 0x01);
         assertThat(record.tableOid()).isEqualTo(1000);
         assertThat(record.pageId()).isEqualTo(5);
@@ -31,7 +31,7 @@ class XLogRecordTest {
     void create_withEmptyData() {
         XLogRecord record = XLogRecord.create(100, 1, 0, XLogRecord.RMGR_HEAP, (byte) 0x01, 1000, 1, new byte[0]);
 
-        assertThat(record.totLen()).isEqualTo(40); // Just header, no data
+        assertThat(record.totalLength()).isEqualTo(40); // Just header, no data
         assertThat(record.data()).isEmpty();
     }
 
@@ -48,18 +48,18 @@ class XLogRecordTest {
     }
 
     @Test
-    void rmgrName_returnsCorrectNames() {
+    void resourceManagerName_returnsCorrectNames() {
         XLogRecord heapRecord = XLogRecord.create(100, 1, 0, XLogRecord.RMGR_HEAP, (byte) 0x01, 1000, 1, new byte[]{1});
-        assertThat(heapRecord.rmgrName()).isEqualTo("HEAP");
+        assertThat(heapRecord.resourceManagerName()).isEqualTo("HEAP");
 
         XLogRecord btreeRecord = XLogRecord.create(100, 1, 0, XLogRecord.RMGR_BTREE, (byte) 0x01, 1000, 1, new byte[]{1});
-        assertThat(btreeRecord.rmgrName()).isEqualTo("BTREE");
+        assertThat(btreeRecord.resourceManagerName()).isEqualTo("BTREE");
 
         XLogRecord xlogRecord = XLogRecord.create(100, 1, 0, XLogRecord.RMGR_XLOG, (byte) 0x01, 1000, 1, new byte[]{1});
-        assertThat(xlogRecord.rmgrName()).isEqualTo("XLOG");
+        assertThat(xlogRecord.resourceManagerName()).isEqualTo("XLOG");
 
         XLogRecord unknownRecord = XLogRecord.create(100, 1, 0, (byte) 99, (byte) 0x01, 1000, 1, new byte[]{1});
-        assertThat(unknownRecord.rmgrName()).isEqualTo("UNKNOWN(99)");
+        assertThat(unknownRecord.resourceManagerName()).isEqualTo("UNKNOWN(99)");
     }
 
     @Test
@@ -73,10 +73,10 @@ class XLogRecordTest {
 
         assertThat(recovered).isNotNull();
         assertThat(recovered.lsn()).isEqualTo(original.lsn());
-        assertThat(recovered.totLen()).isEqualTo(original.totLen());
+        assertThat(recovered.totalLength()).isEqualTo(original.totalLength());
         assertThat(recovered.xid()).isEqualTo(original.xid());
         assertThat(recovered.prevLsn()).isEqualTo(original.prevLsn());
-        assertThat(recovered.rmgr()).isEqualTo(original.rmgr());
+        assertThat(recovered.resourceManager()).isEqualTo(original.resourceManager());
         assertThat(recovered.info()).isEqualTo(original.info());
         assertThat(recovered.tableOid()).isEqualTo(original.tableOid());
         assertThat(recovered.pageId()).isEqualTo(original.pageId());
@@ -111,7 +111,7 @@ class XLogRecordTest {
         ByteBuffer buf = ByteBuffer.allocate(45); // Header + partial data
         buf.order(ByteOrder.BIG_ENDIAN);
         buf.putLong(100); // lsn
-        buf.putInt(100);  // totLen (claims to be much larger than buffer)
+        buf.putInt(100);  // totalLength (claims to be much larger than buffer)
         buf.flip();
 
         XLogRecord record = XLogRecord.readFrom(buf, 0);
@@ -123,7 +123,7 @@ class XLogRecordTest {
         ByteBuffer buf = ByteBuffer.allocate(40);
         buf.order(ByteOrder.BIG_ENDIAN);
         buf.putLong(100); // lsn
-        buf.putInt(50);   // totLen (bigger than buffer)
+        buf.putInt(50);   // totalLength (bigger than buffer)
         buf.flip();
 
         XLogRecord record = XLogRecord.readFrom(buf, 0);
@@ -149,7 +149,7 @@ class XLogRecordTest {
 
         assertThat(str).contains("lsn=100");
         assertThat(str).contains("xid=42");
-        assertThat(str).contains("rmgr=HEAP");
+        assertThat(str).contains("resourceManager=HEAP");
         assertThat(str).contains("info=0x01");
         assertThat(str).contains("dataLen=2");
     }

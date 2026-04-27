@@ -1093,12 +1093,12 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
                     rec.lsn(),
                     rec.prevLsn(),
                     rec.xid(),
-                    rec.rmgrName(),
+                    rec.resourceManagerName(),
                     infoStr,
                     rec.tableOid(),
                     rec.pageId(),
                     fpwFlag,
-                    rec.totLen()
+                    rec.totalLength()
                 ));
                 count++;
             }

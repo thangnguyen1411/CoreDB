@@ -69,7 +69,7 @@ class XLogReaderTest {
         try (XLogReader reader = XLogReader.open(walPath)) {
             Optional<XLogRecord> rec1 = reader.readNext();
             assertThat(rec1).isPresent();
-            assertThat(rec1.get().rmgr()).isEqualTo(XLogRecord.RMGR_HEAP);
+            assertThat(rec1.get().resourceManager()).isEqualTo(XLogRecord.RMGR_HEAP);
             assertThat(rec1.get().info()).isEqualTo((byte) 0x01);
             assertThat(rec1.get().xid()).isEqualTo(1);
             assertThat(rec1.get().tableOid()).isEqualTo(1000);
@@ -78,7 +78,7 @@ class XLogReaderTest {
 
             Optional<XLogRecord> rec2 = reader.readNext();
             assertThat(rec2).isPresent();
-            assertThat(rec2.get().rmgr()).isEqualTo(XLogRecord.RMGR_BTREE);
+            assertThat(rec2.get().resourceManager()).isEqualTo(XLogRecord.RMGR_BTREE);
             assertThat(rec2.get().info()).isEqualTo((byte) 0x10);
             assertThat(rec2.get().xid()).isEqualTo(2);
             assertThat(rec2.get().tableOid()).isEqualTo(1001);

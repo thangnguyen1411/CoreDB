@@ -123,25 +123,25 @@ public final class XLogReader implements AutoCloseable {
         headerBuf.flip();
 
         headerBuf.getLong(); // skip lsn (we'll validate from the full record)
-        int totLen = headerBuf.getInt();
+        int totalLength = headerBuf.getInt();
 
-        if (totLen < 40) {
-            throw new CorruptionException("Invalid record length: " + totLen);
+        if (totalLength < 40) {
+            throw new CorruptionException("Invalid record length: " + totalLength);
         }
 
-        if (currentOffset + totLen > fileSize) {
+        if (currentOffset + totalLength > fileSize) {
             // Incomplete record at end of file - treat as EOF
             return Optional.empty();
         }
 
         // Read the complete record
-        ByteBuffer recordBuf = ByteBuffer.allocate(totLen);
+        ByteBuffer recordBuf = ByteBuffer.allocate(totalLength);
         recordBuf.order(ByteOrder.BIG_ENDIAN);
 
         // Re-position and read the full record
         channel.position(currentOffset);
         int totalRead = channel.read(recordBuf);
-        if (totalRead < totLen) {
+        if (totalRead < totalLength) {
             // Incomplete read
             return Optional.empty();
         }
@@ -158,7 +158,7 @@ public final class XLogReader implements AutoCloseable {
                 String.format("LSN mismatch: expected %d, got %d", currentOffset, record.lsn()));
         }
 
-        currentOffset += totLen;
+        currentOffset += totalLength;
         lastReadLsn = record.lsn();
         return Optional.of(record);
     }

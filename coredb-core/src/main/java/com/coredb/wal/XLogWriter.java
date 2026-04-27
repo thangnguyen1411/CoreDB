@@ -35,6 +35,7 @@ public final class XLogWriter implements AutoCloseable {
     private final Path walPath;
     private long currentLsn;
     private long flushedLsn;
+    private long prevLsn;
 
     /**
      * Opens or creates the WAL file at the given path.
@@ -83,7 +84,8 @@ public final class XLogWriter implements AutoCloseable {
 
             // Position at end for appending
             long currentLsn = fileSize;
-            return new XLogWriter(channel, walPath, currentLsn, currentLsn);
+            long prevLsn = scanForPrevLsn(channel, fileSize);
+            return new XLogWriter(channel, walPath, currentLsn, currentLsn, prevLsn);
         } else {
             // New file: write header
             ByteBuffer header = ByteBuffer.allocate(WAL_HEADER_SIZE);
@@ -100,21 +102,22 @@ public final class XLogWriter implements AutoCloseable {
             }
             channel.force(false);
 
-            return new XLogWriter(channel, walPath, FIRST_LSN, INVALID_LSN);
+            return new XLogWriter(channel, walPath, FIRST_LSN, INVALID_LSN, INVALID_LSN);
         }
     }
 
-    private XLogWriter(FileChannel channel, Path walPath, long currentLsn, long flushedLsn) {
+    private XLogWriter(FileChannel channel, Path walPath, long currentLsn, long flushedLsn, long prevLsn) {
         this.channel = channel;
         this.walPath = walPath;
         this.currentLsn = currentLsn;
         this.flushedLsn = flushedLsn;
+        this.prevLsn = prevLsn;
     }
 
     /**
      * Appends a record to the WAL.
      *
-     * @param rmgr resource manager ID
+     * @param resourceManager resource manager ID
      * @param info operation code
      * @param xid transaction ID
      * @param tableOid target table OID
@@ -123,12 +126,11 @@ public final class XLogWriter implements AutoCloseable {
      * @return the LSN where this record was written
      * @throws IOException if write fails
      */
-    public synchronized long append(byte rmgr, byte info, int xid, int tableOid, int pageId,
+    public synchronized long append(byte resourceManager, byte info, int xid, int tableOid, int pageId,
                                      byte[] data) throws IOException {
         long lsn = currentLsn;
-        long prevLsn = (lsn == FIRST_LSN) ? INVALID_LSN : findPrevLsn();
 
-        XLogRecord record = XLogRecord.create(lsn, xid, prevLsn, rmgr, info, tableOid, pageId, data);
+        XLogRecord record = XLogRecord.create(lsn, xid, prevLsn, resourceManager, info, tableOid, pageId, data);
         byte[] recordBytes = record.toBytes();
 
         ByteBuffer buf = ByteBuffer.wrap(recordBytes);
@@ -139,6 +141,7 @@ public final class XLogWriter implements AutoCloseable {
         }
 
         currentLsn = lsn + recordBytes.length;
+        prevLsn = lsn;  // This record becomes the prev for the next append
         return lsn;
     }
 
@@ -183,25 +186,20 @@ public final class XLogWriter implements AutoCloseable {
         return walPath;
     }
 
-    private long findPrevLsn() throws IOException {
-        // For simplicity, we track prevLsn in memory during normal operation.
-        // To reconstruct from file, we'd need to scan backward from currentLsn.
-        // For now, we'll use the simple approach: track it as we append.
-        // This will be refined when we implement the full WAL manager.
-        long pos = channel.position();
-        if (pos <= FIRST_LSN) {
+    /**
+     * Scans the WAL file once at open() to find the prevLsn of the last record.
+     * This is O(N) but only runs once at startup, not on every append.
+     */
+    private static long scanForPrevLsn(FileChannel channel, long fileSize) throws IOException {
+        if (fileSize <= FIRST_LSN) {
             return INVALID_LSN;
         }
 
-        // Scan backward to find the previous record
-        // We need to find the start of the previous record
-        // This is a simplified implementation - we scan from the beginning
-        // In a production system, we'd maintain an index
         long scanPos = FIRST_LSN;
-        long prevLsn = INVALID_LSN;
+        long lastLsn = INVALID_LSN;
 
-        while (scanPos < pos) {
-            ByteBuffer header = ByteBuffer.allocate(12); // lsn + totLen
+        while (scanPos < fileSize) {
+            ByteBuffer header = ByteBuffer.allocate(12); // lsn + totalLength
             channel.position(scanPos);
             int read = channel.read(header);
             if (read < 12) {
@@ -211,16 +209,21 @@ public final class XLogWriter implements AutoCloseable {
             header.order(ByteOrder.BIG_ENDIAN);
 
             long recordLsn = header.getLong();
-            int totLen = header.getInt();
+            int totalLength = header.getInt();
 
-            if (totLen < 40) { // Minimum record size
+            if (totalLength < 40) { // Minimum record size
                 break;
             }
 
-            prevLsn = recordLsn;
-            scanPos += totLen;
+            lastLsn = recordLsn;
+            scanPos += totalLength;
+
+            if (scanPos > fileSize) {
+                // Incomplete last record - treat last complete record as prev
+                break;
+            }
         }
 
-        return prevLsn;
+        return lastLsn;
     }
 }

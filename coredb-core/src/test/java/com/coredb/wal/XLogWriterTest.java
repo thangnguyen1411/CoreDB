@@ -7,6 +7,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -138,5 +139,35 @@ class XLogWriterTest {
         long expectedSize = 16 + (long) recordCount * (headerSize + dataSize);
         long actualSize = Files.size(walPath);
         assertThat(actualSize).isEqualTo(expectedSize);
+    }
+
+    @Test
+    void reopen_preservesPrevLsnForNextAppend() throws IOException {
+        Path walPath = tempDir.resolve("pg_wal");
+
+        // Create file and write first record
+        long firstLsn;
+        try (XLogWriter writer = XLogWriter.open(walPath)) {
+            firstLsn = writer.append(XLogRecord.RMGR_HEAP, (byte) 0x01, 1, 1000, 1, new byte[]{1});
+            writer.flushUpTo(firstLsn);
+        }
+
+        // Reopen and append second record
+        try (XLogWriter writer = XLogWriter.open(walPath)) {
+            long secondLsn = writer.append(XLogRecord.RMGR_HEAP, (byte) 0x01, 2, 1000, 1, new byte[]{2});
+            writer.flushUpTo(secondLsn);
+        }
+
+        // Verify prevLsn chain is correct by reading back
+        try (XLogReader reader = XLogReader.open(walPath)) {
+            Optional<XLogRecord> rec1 = reader.readNext();
+            assertThat(rec1).isPresent();
+            assertThat(rec1.get().lsn()).isEqualTo(firstLsn);
+            assertThat(rec1.get().prevLsn()).isEqualTo(XLogWriter.INVALID_LSN); // First record
+
+            Optional<XLogRecord> rec2 = reader.readNext();
+            assertThat(rec2).isPresent();
+            assertThat(rec2.get().prevLsn()).isEqualTo(firstLsn); // Points to first record
+        }
     }
 }
