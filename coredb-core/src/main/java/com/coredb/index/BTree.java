@@ -1,6 +1,5 @@
 package com.coredb.index;
 
-import com.coredb.buffer.BufferDescriptor;
 import com.coredb.heap.RecordId;
 import com.coredb.page.Page;
 import com.coredb.page.PageType;
