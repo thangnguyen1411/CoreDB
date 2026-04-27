@@ -1,11 +1,17 @@
 package com.coredb.index;
 
+import com.coredb.buffer.BufferDescriptor;
 import com.coredb.heap.RecordId;
 import com.coredb.page.Page;
 import com.coredb.page.PageType;
+import com.coredb.wal.BTreeResourceManager;
+import com.coredb.wal.XLogRecord;
+import com.coredb.wal.XLogWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.util.AbstractMap;
 import java.util.Iterator;
@@ -41,6 +47,8 @@ public final class BTree {
     private static final int MAX_HEIGHT = 32;
 
     private final IndexFile indexFile;
+    private final XLogWriter xlogWriter; // May be null during early startup
+    private final int xid; // Transaction ID for WAL records
 
     // Path tracking stack for descent and split propagation
     // pathStack[i] = pageId at level i during descent
@@ -48,8 +56,10 @@ public final class BTree {
     private final int[] pathStack;
     private int pathDepth;
 
-    private BTree(IndexFile indexFile) {
+    private BTree(IndexFile indexFile, XLogWriter xlogWriter, int xid) {
         this.indexFile = indexFile;
+        this.xlogWriter = xlogWriter;
+        this.xid = xid;
         this.pathStack = new int[MAX_HEIGHT];
         this.pathDepth = 0;
     }
@@ -63,17 +73,19 @@ public final class BTree {
      * @return a new BTree instance
      */
     public static BTree create(IndexFile indexFile) {
-        return new BTree(indexFile);
+        return new BTree(indexFile, null, com.coredb.util.Constants.BOOTSTRAP_XID);
     }
 
-    /**
-     * Opens an existing B+ tree from an index file.
-     *
-     * @param indexFile the index file containing the tree
-     * @return a BTree instance for the existing tree
-     */
     public static BTree open(IndexFile indexFile) {
-        return new BTree(indexFile);
+        return new BTree(indexFile, null, com.coredb.util.Constants.BOOTSTRAP_XID);
+    }
+
+    public static BTree create(IndexFile indexFile, XLogWriter xlogWriter, int xid) {
+        return new BTree(indexFile, xlogWriter, xid);
+    }
+
+    public static BTree open(IndexFile indexFile, XLogWriter xlogWriter, int xid) {
+        return new BTree(indexFile, xlogWriter, xid);
     }
 
     /**
@@ -329,10 +341,25 @@ public final class BTree {
         Page page = pinned.page();
         BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(page));
 
+        // Determine insertion slot BEFORE mutating
+        int slotNo = leaf.layout().findInsertionPoint(key);
+
         InsertResult result = leaf.insert(key, rid);
 
         if (result == InsertResult.OK) {
-            // Simple case: insert succeeded, unpin dirty
+            // WAL-before-data: emit BTREE_INSERT after successful insert
+            if (xlogWriter != null && pinned.frame() != null) {
+                byte[] walPayload = buildBtreeInsertPayload(slotNo, key, rid);
+                long lsn = xlogWriter.append(
+                    XLogRecord.RMGR_BTREE,
+                    BTreeResourceManager.BTREE_INSERT,
+                    xid,
+                    indexFile.oid(),
+                    leafPageId,
+                    walPayload
+                );
+                pinned.frame().setPdLsn(lsn);
+            }
             pinned.unpin(true);
             return;
         }
@@ -345,6 +372,21 @@ public final class BTree {
         // result == InsertResult.FULL: need to split
         // Note: handleLeafSplit will unpin the page
         handleLeafSplit(leaf, pinned, key, rid);
+    }
+
+    /**
+     * Builds the WAL payload for a BTREE_INSERT record.
+     * Format: (int slotNo, long key, int ridPageId, short ridSlotNo)
+     */
+    private byte[] buildBtreeInsertPayload(int slotNo, long key, RecordId rid) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        DataOutputStream dos = new DataOutputStream(baos);
+        dos.writeInt(slotNo);
+        dos.writeLong(key);
+        dos.writeInt(rid.pageId());
+        dos.writeShort((short) rid.slotNo());
+        dos.flush();
+        return baos.toByteArray();
     }
 
     /**

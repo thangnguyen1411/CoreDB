@@ -4,6 +4,7 @@ import com.coredb.page.Page;
 import com.coredb.page.PageIO;
 import com.coredb.util.Constants;
 import com.coredb.util.StorageException;
+import com.coredb.wal.XLogWriter;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -32,6 +33,7 @@ public final class BufferPool implements AutoCloseable {
     private final BufferDescriptor[] descriptors;
     private final Map<Long, Integer> pageTable; // (fileId, pageId) -> frameId
     private final Map<Integer, FileChannel> channels; // fileId -> FileChannel
+    private XLogWriter xlogWriter; // may be null during early startup
 
     // Statistics
     private long hits;
@@ -76,6 +78,14 @@ public final class BufferPool implements AutoCloseable {
      */
     public BufferPool() {
         this(1024);
+    }
+
+    /**
+     * Sets the XLogWriter for WAL-before-data flush rule.
+     * Must be called before any dirty pages are flushed.
+     */
+    public void setXLogWriter(XLogWriter xlogWriter) {
+        this.xlogWriter = xlogWriter;
     }
 
     /**
@@ -160,6 +170,9 @@ public final class BufferPool implements AutoCloseable {
         victim.page().put(page.buffer().duplicate().clear());
         victim.page().flip();
 
+        // Load pd_lsn from page header into frame (for recovery idempotency)
+        victim.setPdLsn(page.getPdLsn());
+
         // Set up the frame — usageCount = 1 on first load
         victim.bind(fileId, pageId);
         victim.initUsageCount();
@@ -233,7 +246,9 @@ public final class BufferPool implements AutoCloseable {
 
     /**
      * Flushes a specific dirty frame to disk.
-     * 
+     * Enforces WAL-before-data flush rule: WAL up to frame.pdLsn must be
+     * flushed before the page is written.
+     *
      * @param frameId the frame to flush
      * @param channel the FileChannel to write to
      * @throws IOException if write fails
@@ -244,10 +259,18 @@ public final class BufferPool implements AutoCloseable {
             return;
         }
 
-        // Write the page to disk
+        // WAL-before-data flush rule: ensure WAL is flushed up to this page's LSN
+        if (xlogWriter != null && frame.pdLsn() > 0) {
+            xlogWriter.flushUpTo(frame.pdLsn());
+        }
+
+        // Write pd_lsn to page header before flushing
         Page page = Page.Factory.wrap(frame.pageId(), frame.page().duplicate().clear());
+        page.setPdLsn(frame.pdLsn());
+
+        // Write the page to disk
         PageIO.writePage(channel, page);
-        
+
         // Mark clean (just clear dirty flag, preserve binding for potential reuse)
         frame.markClean();
     }

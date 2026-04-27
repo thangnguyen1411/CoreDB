@@ -11,6 +11,7 @@ import com.coredb.heap.HeapPage;
 import com.coredb.heap.RecordId;
 import com.coredb.page.Page;
 import com.coredb.page.PageType;
+import com.coredb.wal.XLogWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -48,11 +49,14 @@ public final class Catalog implements AutoCloseable {
     private final Path dataDir;
     private final ControlFile controlFile;
     private final BufferPool bufferPool;
+    private final XLogWriter xlogWriter;
+    private final int xid; // Transaction ID for WAL records
     private final HeapFile coreClassFile;
     private final HeapFile coreAttributeFile;
 
     /**
-     * Opens the catalog using the system catalog heap files.
+     * Opens the catalog using the system catalog heap files (without WAL).
+     * Used during early startup before WAL is initialized.
      *
      * @param dataDir the data directory path
      * @param controlFile the control file for OID allocation
@@ -60,16 +64,43 @@ public final class Catalog implements AutoCloseable {
      * @throws IOException if the catalog files cannot be opened
      */
     public Catalog(Path dataDir, ControlFile controlFile, BufferPool bufferPool) throws IOException {
+        this(dataDir, controlFile, bufferPool, null, com.coredb.util.Constants.BOOTSTRAP_XID);
+    }
+
+    /**
+     * Opens the catalog using the system catalog heap files with WAL support.
+     *
+     * @param dataDir the data directory path
+     * @param controlFile the control file for OID allocation
+     * @param bufferPool the buffer pool for caching pages
+     * @param xlogWriter the WAL writer for durability
+     * @param xid the transaction ID for WAL records
+     * @throws IOException if the catalog files cannot be opened
+     */
+    public Catalog(Path dataDir, ControlFile controlFile, BufferPool bufferPool,
+                   XLogWriter xlogWriter, int xid) throws IOException {
         this.dataDir = dataDir;
         this.controlFile = controlFile;
         this.bufferPool = bufferPool;
+        this.xlogWriter = xlogWriter;
+        this.xid = xid;
 
         Path baseDir = dataDir.resolve("base").resolve("1");
         Path coreClassPath = baseDir.resolve(String.valueOf(BootstrapCatalog.CORE_CLASS_OID));
         Path coreAttributePath = baseDir.resolve(String.valueOf(BootstrapCatalog.CORE_ATTRIBUTE_OID));
 
-        this.coreClassFile = HeapFile.open(coreClassPath, BootstrapCatalog.CORE_CLASS_OID, BootstrapCatalog.CORE_CLASS_SCHEMA, bufferPool);
-        this.coreAttributeFile = HeapFile.open(coreAttributePath, BootstrapCatalog.CORE_ATTRIBUTE_OID, BootstrapCatalog.CORE_ATTRIBUTE_SCHEMA, bufferPool);
+        // Open system catalogs with WAL support if available
+        if (xlogWriter != null) {
+            this.coreClassFile = HeapFile.open(coreClassPath, BootstrapCatalog.CORE_CLASS_OID,
+                BootstrapCatalog.CORE_CLASS_SCHEMA, bufferPool, xlogWriter, xid);
+            this.coreAttributeFile = HeapFile.open(coreAttributePath, BootstrapCatalog.CORE_ATTRIBUTE_OID,
+                BootstrapCatalog.CORE_ATTRIBUTE_SCHEMA, bufferPool, xlogWriter, xid);
+        } else {
+            this.coreClassFile = HeapFile.open(coreClassPath, BootstrapCatalog.CORE_CLASS_OID,
+                BootstrapCatalog.CORE_CLASS_SCHEMA, bufferPool);
+            this.coreAttributeFile = HeapFile.open(coreAttributePath, BootstrapCatalog.CORE_ATTRIBUTE_OID,
+                BootstrapCatalog.CORE_ATTRIBUTE_SCHEMA, bufferPool);
+        }
 
         log.debug("Catalog opened: core_class={}, core_attribute={}", coreClassPath, coreAttributePath);
     }
@@ -124,11 +155,11 @@ public final class Catalog implements AutoCloseable {
         }
         log.debug("Inserted {} columns into core_attribute for table {}", schema.columnCount(), name);
 
-        // Note: Table heap file is created and closed above (fsynced via close).
-        // Catalog files (core_class, core_attribute) remain open for the lifetime
-        // of Catalog instance and are synced on Catalog.close().
-        // Note: There is no immediate fsync of catalog files after insert. If process crashes
-        // before Catalog.close(), the catalog entries may not be persisted.
+        // DDL durability: flush WAL up to the last emitted LSN before returning
+        // This ensures the catalog changes are durable before we report success
+        if (xlogWriter != null) {
+            xlogWriter.flushUpTo(xlogWriter.currentLsn());
+        }
     }
 
     /**
@@ -190,6 +221,12 @@ public final class Catalog implements AutoCloseable {
         }
 
         coreClassFile.delete(targetRid);
+
+        // DDL durability: flush WAL up to the last emitted LSN before returning
+        if (xlogWriter != null) {
+            xlogWriter.flushUpTo(xlogWriter.currentLsn());
+        }
+
         log.info("Dropped table {} (soft delete, rid={})", name, targetRid);
     }
 

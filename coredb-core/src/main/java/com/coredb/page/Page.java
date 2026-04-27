@@ -101,4 +101,20 @@ public final class Page {
     public ByteBuffer buffer() {
         return buffer;
     }
+
+    /**
+     * Returns the pd_lsn from the page header - the LSN of the last WAL record for this page.
+     * Used for idempotency during recovery (skip records already applied).
+     */
+    public long getPdLsn() {
+        return BinaryUtil.readU64(buffer, PageHeader.OFFSET_LSN);
+    }
+
+    /**
+     * Sets the pd_lsn in the page header.
+     * Called before writing a dirty page to disk.
+     */
+    public void setPdLsn(long lsn) {
+        BinaryUtil.writeU64(buffer, PageHeader.OFFSET_LSN, lsn);
+    }
 }

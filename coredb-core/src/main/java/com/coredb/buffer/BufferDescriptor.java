@@ -153,7 +153,7 @@ public final class BufferDescriptor {
      * Sets the pd_lsn - the LSN of the last WAL record for this page.
      * Used for WAL-before-data flush rule.
      */
-    void setPdLsn(long lsn) {
+    public void setPdLsn(long lsn) {
         pdLsn = lsn;
     }
 
