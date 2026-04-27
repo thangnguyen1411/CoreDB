@@ -288,10 +288,9 @@ class BTreeLeafPageSplitTest {
         for (int i = 0; i < 20; i++) {
             leaf.insert((long) i, new RecordId(1, i));
         }
-        pinned.unpin(true);
-
         // First split
         SplitResult split1 = leaf.split(indexFile);
+        pinned.unpin(true);
 
         // Read the new right page and fill it up
         PinnedPage page2Pinned = indexFile.readPage(split1.newRightPageId());
@@ -304,10 +303,9 @@ class BTreeLeafPageSplitTest {
                 break;
             }
         }
-        page2Pinned.unpin(true);
-
         // Second split
         SplitResult split2 = page2.split(indexFile);
+        page2Pinned.unpin(true);
 
         // Verify three-page chain via btpo_next
         PinnedPage page1Pinned = indexFile.readPage(1);

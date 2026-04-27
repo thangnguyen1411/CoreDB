@@ -85,7 +85,9 @@ class IndexFileTest {
         try (IndexFile idx = IndexFile.create(indexPath, 1002)) {
             assertThat(idx.nextPageId()).isEqualTo(2);
 
-            Page newPage = idx.allocateNewPage(PageType.INDEX_LEAF);
+            IndexFile.PinnedPage pinned = idx.allocateNewPage(PageType.INDEX_LEAF);
+            Page newPage = pinned.page();
+            pinned.unpin(false);
 
             assertThat(newPage.pageId()).isEqualTo(2);
             assertThat(idx.nextPageId()).isEqualTo(3);
@@ -130,7 +132,9 @@ class IndexFileTest {
 
         try (IndexFile idx = IndexFile.create(indexPath, 1002)) {
             // Root page should be page 1
-            Page rootPage = idx.readPage(1);
+            IndexFile.PinnedPage pinned = idx.readPage(1);
+            Page rootPage = pinned.page();
+            pinned.unpin(false);
             assertThat(rootPage.pageId()).isEqualTo(1);
             assertThat(rootPage.pageType()).isEqualTo(PageType.INDEX_LEAF);
         }
@@ -159,18 +163,21 @@ class IndexFileTest {
 
         // Create and modify a page
         try (IndexFile idx = IndexFile.create(indexPath, 1002)) {
-            Page rootPage = idx.readPage(1);
+            IndexFile.PinnedPage pinned = idx.readPage(1);
+            Page rootPage = pinned.page();
             IndexPageLayout layout = IndexPageLayout.of(rootPage);
 
             // Add an entry
             layout.writeLeafEntry(42L, new com.coredb.heap.RecordId(5, 3));
-            idx.writePage(rootPage);
+            pinned.unpin(true); // write back to disk
         }
 
         // Reopen and verify
         try (IndexFile idx = IndexFile.open(indexPath, 1002)) {
-            Page rootPage = idx.readPage(1);
+            IndexFile.PinnedPage pinned = idx.readPage(1);
+            Page rootPage = pinned.page();
             IndexPageLayout layout = IndexPageLayout.of(rootPage);
+            pinned.unpin(false);
 
             assertThat(layout.entryCount()).isEqualTo(1);
             assertThat(layout.readLeafEntry(0).key()).isEqualTo(42L);
@@ -183,8 +190,8 @@ class IndexFileTest {
 
         // Create, allocate some pages, modify root, close
         try (IndexFile idx = IndexFile.create(indexPath, 1002)) {
-            idx.allocateNewPage(PageType.INDEX_LEAF); // page 2
-            idx.allocateNewPage(PageType.INDEX_LEAF); // page 3
+            idx.allocateNewPage(PageType.INDEX_LEAF).unpin(false); // page 2
+            idx.allocateNewPage(PageType.INDEX_LEAF).unpin(false); // page 3
             idx.setRootPageId(3); // Move root to page 3
         }
 
@@ -197,9 +204,17 @@ class IndexFileTest {
             assertThat(idx.pageCount()).isEqualTo(4);
 
             // All pages should be readable
-            assertThat(idx.readPage(1).pageId()).isEqualTo(1);
-            assertThat(idx.readPage(2).pageId()).isEqualTo(2);
-            assertThat(idx.readPage(3).pageId()).isEqualTo(3);
+            IndexFile.PinnedPage p1 = idx.readPage(1);
+            assertThat(p1.page().pageId()).isEqualTo(1);
+            p1.unpin(false);
+
+            IndexFile.PinnedPage p2 = idx.readPage(2);
+            assertThat(p2.page().pageId()).isEqualTo(2);
+            p2.unpin(false);
+
+            IndexFile.PinnedPage p3 = idx.readPage(3);
+            assertThat(p3.page().pageId()).isEqualTo(3);
+            p3.unpin(false);
         }
     }
 

@@ -101,9 +101,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
     }
 
     private String handleBufferStats() {
-        // BufferPool exists but is not yet integrated into CoreDB.
-        // For now, show a placeholder with what the stats would look like.
-        return "buffer-stats: BufferPool implemented. Integration with CoreDB not yet implemented.";
+        return db.bufferPool().statsString();
     }
 
     private String formatHelp() {
