@@ -90,6 +90,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             case "range" -> handleRange(args);
             case "wal-dump" -> handleWalDump();
             case "checkpoint" -> handleCheckpoint();
+            case "recovery-status" -> handleRecoveryStatus();
             case "help" -> formatHelp();
             default -> "unknown command: " +
             command +
@@ -156,6 +157,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         WAL commands:
           wal-dump                   dump WAL file contents
           checkpoint                 perform database checkpoint (flush dirty pages, write CHECKPOINT record)
+          recovery-status            show last recovery statistics
         """;
     }
 
@@ -1142,6 +1144,13 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
      * Handles: checkpoint
      * Performs a database checkpoint - flushes dirty pages and writes CHECKPOINT record.
      */
+    private String handleRecoveryStatus() {
+        if (db.lastRecoveryStats() == null) {
+            return "no recovery stats available";
+        }
+        return db.lastRecoveryStats().format();
+    }
+
     private String handleCheckpoint() {
         try {
             BufferPool.CheckpointResult result = db.bufferPool().checkpoint(db.controlFile());

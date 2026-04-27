@@ -7,6 +7,8 @@ import com.coredb.catalog.ControlFile;
 import com.coredb.catalog.TableMeta;
 import com.coredb.engine.StorageEngine;
 import com.coredb.engine.StorageEngineFactory;
+import com.coredb.recovery.RecoveryManager;
+import com.coredb.recovery.RecoveryStats;
 import com.coredb.util.Constants;
 import com.coredb.wal.XLogWriter;
 import java.io.IOException;
@@ -28,6 +30,7 @@ public final class CoreDB implements AutoCloseable {
     private final XLogWriter xlogWriter;
     private final Catalog catalog;
     private final Map<Integer, StorageEngine> engineCache;
+    private final RecoveryStats lastRecoveryStats;
     private volatile boolean closed = false;
 
     private CoreDB(
@@ -36,7 +39,8 @@ public final class CoreDB implements AutoCloseable {
         ControlFile controlFile,
         BufferPool bufferPool,
         XLogWriter xlogWriter,
-        Catalog catalog
+        Catalog catalog,
+        RecoveryStats lastRecoveryStats
     ) {
         this.dataPath = dataPath;
         this.config = config;
@@ -45,6 +49,7 @@ public final class CoreDB implements AutoCloseable {
         this.xlogWriter = xlogWriter;
         this.catalog = catalog;
         this.engineCache = new ConcurrentHashMap<>();
+        this.lastRecoveryStats = lastRecoveryStats;
         log.debug(
             "CoreDB opened: path={} engine={} pageSize={}",
             dataPath,
@@ -71,16 +76,25 @@ public final class CoreDB implements AutoCloseable {
         // Ensure data directory exists
         Files.createDirectories(dataPath);
 
+        RecoveryStats recoveryStats;
         ControlFile controlFile;
+
         if (Files.exists(dataPath.resolve("global/pg_control"))) {
-            // Existing database: load control file and validate
-            controlFile = ControlFile.load(dataPath);
+            // Existing database: run recovery then load control file
             log.info("Opened existing database: {}", dataPath);
+            recoveryStats = RecoveryManager.recover(dataPath);
+            controlFile = ControlFile.load(dataPath);
+            if (!recoveryStats.isNoRecovery()) {
+                log.info("Recovery complete: {} records redone, {} FPW restored, {} skipped",
+                         recoveryStats.redone(), recoveryStats.fpwRestored(),
+                         recoveryStats.skippedByPdLsn());
+            }
         } else {
             // Fresh database: run bootstrap to create system catalogs
             log.info("Initializing new database: {}", dataPath);
             BootstrapCatalog.initialize(dataPath, config);
             controlFile = ControlFile.load(dataPath);
+            recoveryStats = RecoveryStats.noRecoveryNeeded("fresh database");
             log.info("Database bootstrap complete");
         }
 
@@ -97,7 +111,7 @@ public final class CoreDB implements AutoCloseable {
         // Create Catalog with WAL support (opens core_class and core_attribute heap files via buffer pool)
         Catalog catalog = new Catalog(dataPath, controlFile, bufferPool, xlogWriter, Constants.BOOTSTRAP_XID);
 
-        return new CoreDB(dataPath, config, controlFile, bufferPool, xlogWriter, catalog);
+        return new CoreDB(dataPath, config, controlFile, bufferPool, xlogWriter, catalog, recoveryStats);
     }
 
     public Path dataPath() {
@@ -114,6 +128,15 @@ public final class CoreDB implements AutoCloseable {
 
     public Catalog catalog() {
         return catalog;
+    }
+
+    /**
+     * Returns the recovery statistics from the last database open.
+     *
+     * @return RecoveryStats with counts from recovery, or null if no recovery was needed
+     */
+    public RecoveryStats lastRecoveryStats() {
+        return lastRecoveryStats;
     }
 
     /**
