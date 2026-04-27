@@ -4,6 +4,7 @@ import com.coredb.api.Column;
 import com.coredb.api.CoreDB;
 import com.coredb.api.Row;
 import com.coredb.api.Schema;
+import com.coredb.buffer.BufferPool;
 import com.coredb.catalog.BootstrapCatalog;
 import com.coredb.catalog.Catalog;
 import com.coredb.catalog.ColumnDefParser;
@@ -86,6 +87,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             case "scan" -> handleScan(args);
             case "range" -> handleRange(args);
             case "wal-dump" -> handleWalDump();
+            case "checkpoint" -> handleCheckpoint();
             case "help" -> formatHelp();
             default -> "unknown command: " +
             command +
@@ -150,7 +152,8 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
           index-dump table=<name>|oid=<N> page=<P>              dump index page contents
 
         WAL commands:
-          wal-dump                                              dump WAL file contents
+          wal-dump                   dump WAL file contents
+          checkpoint                 perform database checkpoint (flush dirty pages, write CHECKPOINT record)
         """;
     }
 
@@ -1108,6 +1111,19 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             }
             sb.append(String.format("(%d records)%n", count));
             return sb.toString().stripTrailing();
+        } catch (Exception e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Handles: checkpoint
+     * Performs a database checkpoint - flushes dirty pages and writes CHECKPOINT record.
+     */
+    private String handleCheckpoint() {
+        try {
+            BufferPool.CheckpointResult result = db.bufferPool().checkpoint(db.controlFile());
+            return String.format("flushed %d dirty pages  checkpoint-lsn=%d", result.flushedPages(), result.checkpointLsn());
         } catch (Exception e) {
             return "error: " + e.getMessage();
         }

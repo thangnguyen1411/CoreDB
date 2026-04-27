@@ -116,9 +116,9 @@ class BTreeWalProducerTest {
         Files.createDirectories(indexPath.getParent());
         int indexOid = 1002 + 0x00100000;
 
-        bufferPool.registerFile(indexOid, indexPath);
         long walBefore = xlogWriter.currentLsn();
 
+        // IndexFile.create() registers the file with BufferPool internally
         IndexFile indexFile = IndexFile.create(indexPath, indexOid, bufferPool);
         try (indexFile) {
             BTree btree = BTree.create(indexFile, xlogWriter, Constants.BOOTSTRAP_XID);
@@ -144,8 +144,7 @@ class BTreeWalProducerTest {
         Files.createDirectories(indexPath.getParent());
         int indexOid = 1002 + 0x00100000;
 
-        bufferPool.registerFile(indexOid, indexPath);
-
+        // IndexFile.create() registers the file with BufferPool internally
         IndexFile indexFile = IndexFile.create(indexPath, indexOid, bufferPool);
         try (indexFile) {
             BTree btree = BTree.create(indexFile, xlogWriter, Constants.BOOTSTRAP_XID);

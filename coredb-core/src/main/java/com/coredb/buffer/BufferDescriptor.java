@@ -21,6 +21,7 @@ public final class BufferDescriptor {
     private boolean dirty;
     private long pdLsn;
     private final ByteBuffer page;
+    private boolean needsFullPageWrite;
 
     BufferDescriptor(int frameId, ByteBuffer page) {
         this.frameId = frameId;
@@ -31,6 +32,7 @@ public final class BufferDescriptor {
         this.usageCount = 0;
         this.dirty = false;
         this.pdLsn = 0;
+        this.needsFullPageWrite = false;
     }
 
     public int frameId() {
@@ -158,6 +160,28 @@ public final class BufferDescriptor {
     }
 
     /**
+     * Returns true if this frame needs a full-page write on next WAL record.
+     */
+    public boolean needsFullPageWrite() {
+        return needsFullPageWrite;
+    }
+
+    /**
+     * Sets the full-page write flag.
+     * Called at checkpoint completion for all frames.
+     */
+    public void setNeedsFullPageWrite(boolean needsFullPageWrite) {
+        this.needsFullPageWrite = needsFullPageWrite;
+    }
+
+    /**
+     * Clears the full-page write flag after a WAL record has embedded the page image.
+     */
+    public void clearNeedsFullPageWrite() {
+        this.needsFullPageWrite = false;
+    }
+
+    /**
      * Resets all mutable state for reuse when frame is evicted.
      */
     void reset() {
@@ -167,6 +191,7 @@ public final class BufferDescriptor {
         usageCount = 0;
         dirty = false;
         pdLsn = 0;
+        needsFullPageWrite = false;
     }
 
     /**

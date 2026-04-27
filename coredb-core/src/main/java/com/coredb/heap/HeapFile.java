@@ -366,15 +366,14 @@ public final class HeapFile implements AutoCloseable {
 
                 if (xlogWriter != null && pinned.frame() != null) {
                     byte[] walPayload = buildInsertWalPayload(slotNo, natts, nullBitmap, dataBytes);
-                    long lsn = xlogWriter.append(
+                    appendWalWithFPW(
+                        pinned.frame(),
+                        page.buffer(),
                         XLogRecord.RMGR_HEAP,
                         HeapResourceManager.HEAP_INSERT,
-                        xid,
-                        oid,
                         pageId,
                         walPayload
                     );
-                    pinned.frame().setPdLsn(lsn);
                 }
 
                 RecordId rid = heapPage.insert(dataBytes, natts, nullBitmap);
@@ -402,15 +401,14 @@ public final class HeapFile implements AutoCloseable {
         // WAL-before-data: emit WAL first, then mutate, then mark dirty
         if (xlogWriter != null && newPinned.frame() != null) {
             byte[] walPayload = buildInsertWalPayload(slotNo, natts, nullBitmap, dataBytes);
-            long lsn = xlogWriter.append(
+            appendWalWithFPW(
+                newPinned.frame(),
+                newPage.buffer(),
                 XLogRecord.RMGR_HEAP,
                 HeapResourceManager.HEAP_INSERT,
-                xid,
-                oid,
                 newPage.pageId(),
                 walPayload
             );
-            newPinned.frame().setPdLsn(lsn);
         }
 
         RecordId rid = heapPage.insert(dataBytes, natts, nullBitmap);
@@ -433,6 +431,68 @@ public final class HeapFile implements AutoCloseable {
         dos.write(dataBytes);
         dos.flush();
         return baos.toByteArray();
+    }
+
+    /**
+     * Builds a full-page write WAL payload.
+     * Format: (byte[8192] pageImage, byte[] originalPayload)
+     *
+     * <p>The page image is captured before mutation and is used to restore
+     * the entire page during recovery in case of torn-page writes.</p>
+     */
+    private byte[] buildFullPageWritePayload(ByteBuffer pageBuffer, byte[] originalPayload) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        DataOutputStream dos = new DataOutputStream(baos);
+
+        // Write the full page image (pre-mutation snapshot)
+        byte[] pageImage = new byte[Constants.PAGE_SIZE];
+        ByteBuffer dup = pageBuffer.duplicate();
+        dup.clear();
+        dup.get(pageImage);
+        dos.write(pageImage);
+
+        // Write the original payload
+        dos.write(originalPayload);
+
+        dos.flush();
+        return baos.toByteArray();
+    }
+
+    /**
+     * Appends a WAL record with full-page write support.
+     *
+     * <p>If the frame has needsFullPageWrite set, embeds the page image and
+     * clears the flag. Otherwise, writes the original payload.</p>
+     */
+    private long appendWalWithFPW(com.coredb.buffer.BufferDescriptor frame, ByteBuffer pageBuffer,
+                                   byte rmgr, byte info, int pageId, byte[] payload) throws IOException {
+        if (xlogWriter == null) {
+            return XLogWriter.INVALID_LSN;
+        }
+
+        byte[] walPayload;
+        byte infoWithFlags = info;
+
+        if (frame.needsFullPageWrite()) {
+            // Embed full page image + original payload
+            walPayload = buildFullPageWritePayload(pageBuffer, payload);
+            infoWithFlags = (byte) (info | XLogRecord.XLOG_FPW);
+            frame.clearNeedsFullPageWrite();
+        } else {
+            walPayload = payload;
+        }
+
+        long lsn = xlogWriter.append(
+            rmgr,
+            infoWithFlags,
+            xid,
+            oid,
+            pageId,
+            walPayload
+        );
+
+        frame.setPdLsn(lsn);
+        return lsn;
     }
 
     public Optional<Row> get(RecordId recordId) throws IOException {
@@ -495,15 +555,14 @@ public final class HeapFile implements AutoCloseable {
         // WAL-before-data: emit WAL first, then mutate, then mark dirty
         if (xlogWriter != null && pinned.frame() != null) {
             byte[] walPayload = buildDeleteWalPayload(rid.slotNo());
-            long lsn = xlogWriter.append(
+            appendWalWithFPW(
+                pinned.frame(),
+                page.buffer(),
                 XLogRecord.RMGR_HEAP,
                 HeapResourceManager.HEAP_DELETE,
-                xid,
-                oid,
                 rid.pageId(),
                 walPayload
             );
-            pinned.frame().setPdLsn(lsn);
         }
 
         heapPage.delete(rid.slotNo());
