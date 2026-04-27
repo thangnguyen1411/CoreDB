@@ -16,6 +16,8 @@ import com.coredb.index.BTreeLeafPage;
 import com.coredb.index.IndexFile;
 import com.coredb.index.IndexPageLayout;
 import com.coredb.util.Constants;
+import com.coredb.wal.XLogReader;
+import com.coredb.wal.XLogRecord;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -83,6 +85,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             case "delete" -> handleDelete(args);
             case "scan" -> handleScan(args);
             case "range" -> handleRange(args);
+            case "wal-dump" -> handleWalDump();
             case "help" -> formatHelp();
             default -> "unknown command: " +
             command +
@@ -145,6 +148,9 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
           heap-meta table=<name>|oid=<N>                        show meta page of per-table heap file
           index-meta table=<name>|oid=<N>                       show meta page of per-table index file
           index-dump table=<name>|oid=<N> page=<P>              dump index page contents
+
+        WAL commands:
+          wal-dump                                              dump WAL file contents
         """;
     }
 
@@ -1059,6 +1065,50 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
                 sb.toString().stripTrailing()
             );
         } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Handles: wal-dump
+     * Dumps WAL file contents for diagnostics.
+     */
+    private String handleWalDump() {
+        Path walPath = db.dataPath().resolve("global/pg_wal");
+        if (!Files.exists(walPath)) {
+            return "(WAL file does not exist)";
+        }
+
+        StringBuilder sb = new StringBuilder();
+        try (XLogReader reader = XLogReader.open(walPath)) {
+            int count = 0;
+            Optional<XLogRecord> recordOpt;
+            while ((recordOpt = reader.readNext()).isPresent()) {
+                XLogRecord rec = recordOpt.get();
+                String infoStr = String.format("0x%02X", rec.info());
+                String fpwFlag = rec.isFullPageWrite() ? "yes" : "no";
+
+                sb.append(String.format(
+                    "LSN=%d prev=%d xid=%d rmgr=%s info=%s tbl=%d pg=%d fpw=%s len=%d%n",
+                    rec.lsn(),
+                    rec.prevLsn(),
+                    rec.xid(),
+                    rec.resourceManagerName(),
+                    infoStr,
+                    rec.tableOid(),
+                    rec.pageId(),
+                    fpwFlag,
+                    rec.totalLength()
+                ));
+                count++;
+            }
+
+            if (count == 0) {
+                return "(WAL file is empty - only header present)";
+            }
+            sb.append(String.format("(%d records)%n", count));
+            return sb.toString().stripTrailing();
+        } catch (Exception e) {
             return "error: " + e.getMessage();
         }
     }

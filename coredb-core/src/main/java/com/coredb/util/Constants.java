@@ -21,6 +21,9 @@ public final class Constants {
     // Index file magic ("IDXP" = 0x49445850, stands for "Index Page")
     public static final int INDEX_FILE_MAGIC = 0x49445850;
 
+    // WAL file magic ("WAL\0" = 0x57414C00)
+    public static final int WAL_FILE_MAGIC = 0x57414C00;
+
     public static final int INVALID_XID      = 0;
     public static final int BOOTSTRAP_XID    = 1;
     public static final int FROZEN_XID       = 2;
