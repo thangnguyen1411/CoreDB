@@ -108,6 +108,14 @@ public final class CoreDB implements AutoCloseable {
         // Wire XLogWriter to BufferPool for WAL-before-data flush rule
         bufferPool.setXLogWriter(xlogWriter);
 
+        // Post-recovery checkpoint for existing databases
+        // This updates pg_control.checkpointLsn and resets needsFullPageWrite on frames
+        if (Files.exists(dataPath.resolve("global/pg_control")) &&
+            !recoveryStats.isNoRecovery()) {
+            log.info("Performing post-recovery checkpoint...");
+            bufferPool.checkpoint(controlFile);
+        }
+
         // Create Catalog with WAL support (opens core_class and core_attribute heap files via buffer pool)
         Catalog catalog = new Catalog(dataPath, controlFile, bufferPool, xlogWriter, Constants.BOOTSTRAP_XID);
 

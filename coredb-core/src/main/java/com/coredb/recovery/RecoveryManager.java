@@ -156,14 +156,10 @@ public final class RecoveryManager {
     private static void restoreFullPage(Path dataDir, XLogRecord record) throws IOException {
         byte[] data = record.data();
 
-        // FPW record format: (long pageLsn)[8] + (byte[] pageImage)[8192]
-        // Extract the page LSN and page image
-        ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN);
-        long pageLsn = buf.getLong();
-
-        // Extract page image (remaining bytes)
+        // FPW record format: (byte[] pageImage)[8192] - raw page image bytes
+        // Read first PAGE_SIZE bytes directly as the page image
         byte[] pageImage = new byte[Constants.PAGE_SIZE];
-        buf.get(pageImage);
+        ByteBuffer.wrap(data).get(pageImage);
 
         // Determine file path from tableOid
         Path filePath = resolveFilePath(dataDir, record.tableOid());
@@ -187,8 +183,8 @@ public final class RecoveryManager {
             channel.force(true); // fsync
         }
 
-        log.debug("Restored full page: tableOid={}, pageId={}, pageLsn={}",
-                  record.tableOid(), record.pageId(), pageLsn);
+        log.debug("Restored full page: tableOid={}, pageId={}",
+                  record.tableOid(), record.pageId());
     }
 
     /**
@@ -264,33 +260,26 @@ public final class RecoveryManager {
         return true;
     }
 
+    // Index files use heap OID + this offset (must match BTreeStorageEngine)
+    public static final int INDEX_OID_OFFSET = 0x00100000;
+
     /**
      * Resolves a table OID to a file path.
      *
+     * <p>All heap table files are in base/1/&lt;oid&gt;.
+     * Index files (OID >= INDEX_OID_OFFSET) are in base/1/&lt;baseOid&gt;_pk.</p>
+     *
      * @param dataDir the database data directory
      * @param tableOid the table OID
-     * @return the path to the table's heap file
+     * @return the path to the file
      */
     private static Path resolveFilePath(Path dataDir, int tableOid) {
-        // System catalogs are in global directory with pg_class naming
-        // User tables are in base directories
-        if (tableOid < 16384) {
-            // System table
-            String fileName;
-            switch (tableOid) {
-                case 1247:
-                    fileName = "pg_class";
-                    break;
-                case 1249:
-                    fileName = "pg_attribute";
-                    break;
-                default:
-                    fileName = "pg_class" + tableOid;
-            }
-            return dataDir.resolve("global/" + fileName);
+        // Check if this is an index OID (has the offset applied)
+        if (tableOid >= INDEX_OID_OFFSET) {
+            int baseOid = tableOid - INDEX_OID_OFFSET;
+            return dataDir.resolve("base/1/" + baseOid + "_pk");
         }
-        // User table - use base directory structure
-        // For simplicity, use default database OID 1
+        // Regular heap table file
         return dataDir.resolve("base/1/" + tableOid);
     }
 }
