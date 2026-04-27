@@ -23,12 +23,10 @@ public record Snapshot(int xmin, int xmax, Set<Integer> activeXids) {
      * Bootstrap snapshot that sees everything.
      *
      * <p>This snapshot is used for catalog bootstrap and VACUUM reads.
-     * By construction, it satisfies every visibility check:</p>
-     * <ul>
-     *   <li>No xmin can be < Integer.MAX_VALUE, so all xids appear committed</li>
-     *   <li>No xmax can be >= Integer.MAX_VALUE, so no xids are "in the future"</li>
-     *   <li>The active set is empty, so no xids appear in-progress</li>
-     * </ul>
+     * By construction, no normal XID fails the "started after snapshot" check
+     * (xmax = MAX_VALUE), and no XID appears in-progress (empty active set).
+     * Visibility still consults clog for non-BOOTSTRAP/FROZEN xmins, so
+     * uncommitted tuples remain invisible.</p>
      */
     public static final Snapshot BOOTSTRAP =
             new Snapshot(Integer.MAX_VALUE, Integer.MAX_VALUE, Collections.emptySet());

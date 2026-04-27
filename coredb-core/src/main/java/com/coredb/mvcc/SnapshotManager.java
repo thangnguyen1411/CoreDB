@@ -114,7 +114,7 @@ public final class SnapshotManager {
      *
      * @return the newly allocated XID
      */
-    public int allocateXid() {
+    public synchronized int allocateXid() {
         return nextXid.getAndIncrement();
     }
 

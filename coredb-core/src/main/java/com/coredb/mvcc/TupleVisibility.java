@@ -75,7 +75,7 @@ public final class TupleVisibility {
     private static boolean xminVisible(HeapTupleHeader header, Snapshot snapshot, ClogManager clog) {
         int xmin = header.xmin();
 
-        if (xmin == Constants.BOOTSTRAP_XID) {
+        if (xmin == Constants.BOOTSTRAP_XID || xmin == Constants.FROZEN_XID) {
             return true;
         }
 

@@ -146,8 +146,8 @@ final class FileClogManager implements ClogManager {
                 while (bodyBuffer.hasRemaining()) {
                     long position = HEADER_SIZE + bodyBuffer.position();
                     int n = channel.read(bodyBuffer, position);
-                    if (n == -1) {
-                        break; // EOF reached unexpectedly
+                    if (n <= 0) {
+                        break;
                     }
                 }
             }
@@ -174,8 +174,8 @@ final class FileClogManager implements ClogManager {
         if (xid == XID_INVALID) {
             throw new IllegalArgumentException("Cannot query status of INVALID_XID (0)");
         }
-        if (xid == XID_BOOTSTRAP) {
-            return Status.COMMITTED; // Bootstrap XID is always committed
+        if (xid == XID_BOOTSTRAP || xid == Constants.FROZEN_XID) {
+            return Status.COMMITTED;
         }
 
         int byteIndex = xid / 4;
@@ -265,7 +265,7 @@ final class FileClogManager implements ClogManager {
         int aborted = 0;
         int inProgress = 0;
 
-        for (int xid = 2; xid < entryCount(); xid++) {
+        for (int xid = Constants.FIRST_NORMAL_XID; xid < entryCount(); xid++) {
             Status status = getStatus(xid);
             switch (status) {
                 case COMMITTED -> committed++;
