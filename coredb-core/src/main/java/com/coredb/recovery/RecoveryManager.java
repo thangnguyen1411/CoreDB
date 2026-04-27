@@ -15,6 +15,7 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Instant;
+import java.util.Arrays;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -115,7 +116,7 @@ public final class RecoveryManager {
 
                 // Handle full-page write records
                 if (record.isFullPageWrite()) {
-                    restoreFullPage(dataDir, record);
+                    restoreFullPage(dataDir, record, rmgrRegistry);
                     fpwRestored++;
                     continue;
                 }
@@ -153,34 +154,46 @@ public final class RecoveryManager {
      * @param record the full-page write WAL record
      * @throws IOException if page restoration fails
      */
-    private static void restoreFullPage(Path dataDir, XLogRecord record) throws IOException {
+    private static void restoreFullPage(Path dataDir, XLogRecord record,
+                                         ResourceManagerRegistry rmgrRegistry) throws IOException {
         byte[] data = record.data();
 
-        // FPW record format: (byte[] pageImage)[8192] - raw page image bytes
-        // Read first PAGE_SIZE bytes directly as the page image
+        // FPW payload: [PAGE_SIZE bytes pre-mutation image][mutation payload bytes]
         byte[] pageImage = new byte[Constants.PAGE_SIZE];
         ByteBuffer.wrap(data).get(pageImage);
 
-        // Determine file path from tableOid
+        ByteBuffer pageBuffer = ByteBuffer.wrap(Arrays.copyOf(pageImage, pageImage.length))
+                                          .order(ByteOrder.BIG_ENDIAN);
+
+        // Apply the embedded mutation on top of the restored image
+        if (data.length > Constants.PAGE_SIZE) {
+            byte[] mutationPayload = Arrays.copyOfRange(data, Constants.PAGE_SIZE, data.length);
+            byte infoWithoutFpw = (byte) (record.info() & ~XLogRecord.XLOG_FPW);
+            XLogRecord mutationRecord = XLogRecord.create(
+                record.lsn(), record.xid(), record.prevLsn(),
+                record.resourceManager(), infoWithoutFpw,
+                record.tableOid(), record.pageId(), mutationPayload);
+            rmgrRegistry.dispatch(mutationRecord, pageBuffer);
+        }
+
+        BinaryUtil.writeU64(pageBuffer, PageHeader.OFFSET_LSN, record.lsn());
+
         Path filePath = resolveFilePath(dataDir, record.tableOid());
 
-        // Write page image to file at correct offset
         try (FileChannel channel = FileChannel.open(filePath,
                 StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE)) {
 
             long fileOffset = (long) record.pageId() * Constants.PAGE_SIZE;
 
-            // Ensure file is large enough
             long currentSize = channel.size();
             if (fileOffset + Constants.PAGE_SIZE > currentSize) {
                 channel.position(fileOffset + Constants.PAGE_SIZE - 1);
                 channel.write(ByteBuffer.wrap(new byte[1]));
             }
 
-            ByteBuffer pageBuffer = ByteBuffer.wrap(pageImage);
             channel.position(fileOffset);
             channel.write(pageBuffer);
-            channel.force(true); // fsync
+            channel.force(true);
         }
 
         log.debug("Restored full page: tableOid={}, pageId={}",
@@ -242,6 +255,18 @@ public final class RecoveryManager {
                 return false;
             }
 
+            // Initialize new page: pd_lower=0 on a zero page means header was never written
+            if (pdLsn == 0 && BinaryUtil.readU16(pageBuffer, PageHeader.OFFSET_PD_LOWER) == 0) {
+                boolean isIndex = record.tableOid() >= INDEX_OID_OFFSET;
+                short flags = isIndex ? (short) 0x0300 : (short) 0x0100;
+                BinaryUtil.writeU16(pageBuffer, PageHeader.OFFSET_PD_LOWER, (short) PageHeader.SIZE);
+                BinaryUtil.writeU16(pageBuffer, PageHeader.OFFSET_PD_UPPER, (short) Constants.PAGE_SIZE);
+                BinaryUtil.writeU16(pageBuffer, PageHeader.OFFSET_PD_SPECIAL, (short) Constants.PAGE_SIZE);
+                BinaryUtil.writeU16(pageBuffer, PageHeader.OFFSET_PD_FLAGS, flags);
+                log.debug("Initialized fresh page for redo: tableOid={}, pageId={}",
+                          record.tableOid(), record.pageId());
+            }
+
             // Dispatch to resource manager
             rmgrRegistry.dispatch(record, pageBuffer);
 
@@ -249,7 +274,7 @@ public final class RecoveryManager {
             BinaryUtil.writeU64(pageBuffer, PageHeader.OFFSET_LSN, record.lsn());
 
             // Write page back to disk
-            pageBuffer.flip();
+            pageBuffer.rewind();
             channel.position(fileOffset);
             channel.write(pageBuffer);
             channel.force(true); // fsync

@@ -79,8 +79,8 @@ class RecoveryManagerTest {
         engine.put(2L, Row.of(2L, "row2", 200));
         engine.put(3L, Row.of(3L, "row3", 300));
 
-        // 3. Close WITHOUT checkpoint - simulates crash
-        db.close();
+        // 3. Simulate crash - flush WAL but not dirty pages
+        db.simulateCrash();
 
         // 4. Re-open - recovery should replay WAL and restore rows
         CoreDB db2 = CoreDB.open(tempDir, CoreDBConfig.defaults());
@@ -129,8 +129,8 @@ class RecoveryManagerTest {
         engine.put(3L, Row.of(3L, "batch2_a", 300));
         engine.put(4L, Row.of(4L, "batch2_b", 400));
 
-        // 5. Close without checkpoint - simulates crash
-        db.close();
+        // 5. Simulate crash - flush WAL but not dirty pages
+        db.simulateCrash();
 
         // 6. Re-open - recovery should only replay post-checkpoint records
         CoreDB db2 = CoreDB.open(tempDir, CoreDBConfig.defaults());
@@ -168,9 +168,10 @@ class RecoveryManagerTest {
 
         // Insert a row
         engine.put(1L, Row.of(1L, "original", 100));
-        db.close();
+        db.simulateCrash();
 
-        // First recovery - applies the insert
+        // First recovery - applies the insert (with post-recovery checkpoint disabled)
+        System.setProperty("coredb.skip_post_recovery_checkpoint", "true");
         CoreDB db2 = CoreDB.open(tempDir, CoreDBConfig.defaults());
         RecoveryStats stats1 = db2.lastRecoveryStats();
         assertThat(stats1.redone()).isGreaterThan(0);
@@ -179,11 +180,16 @@ class RecoveryManagerTest {
         Optional<TableMeta> metaOpt2 = db2.catalog().openTable("test");
         StorageEngine engine2 = db2.getEngineForTable(metaOpt2.get());
         Row rowAfterFirstRecovery = engine2.get(1L).get();
-        db2.close();
+
+        // Crash again - recovery will run again from the same starting point
+        db2.simulateCrash();
 
         // Second recovery on same database - should skip due to pd_lsn
         CoreDB db3 = CoreDB.open(tempDir, CoreDBConfig.defaults());
         RecoveryStats stats2 = db3.lastRecoveryStats();
+
+        // Clear the system property
+        System.clearProperty("coredb.skip_post_recovery_checkpoint");
 
         // The record should be skipped due to pd_lsn check
         assertThat(stats2.skippedByPdLsn()).isGreaterThan(0);
@@ -223,8 +229,8 @@ class RecoveryManagerTest {
         // Insert more data (this should trigger FPW on the first page modification)
         engine.put(2L, Row.of(2L, "test2", 200));
 
-        // Close without checkpoint - simulates crash
-        db.close();
+        // Simulate crash - flush WAL but not dirty pages
+        db.simulateCrash();
 
         // Re-open - recovery should restore full page images correctly
         CoreDB db2 = CoreDB.open(tempDir, CoreDBConfig.defaults());

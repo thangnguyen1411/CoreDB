@@ -110,7 +110,10 @@ public final class CoreDB implements AutoCloseable {
 
         // Post-recovery checkpoint for existing databases
         // This updates pg_control.checkpointLsn and resets needsFullPageWrite on frames
-        if (Files.exists(dataPath.resolve("global/pg_control")) &&
+        // Can be disabled via system property for testing idempotency
+        boolean skipPostRecoveryCheckpoint = Boolean.getBoolean("coredb.skip_post_recovery_checkpoint");
+        if (!skipPostRecoveryCheckpoint &&
+            Files.exists(dataPath.resolve("global/pg_control")) &&
             !recoveryStats.isNoRecovery()) {
             log.info("Performing post-recovery checkpoint...");
             bufferPool.checkpoint(controlFile);
@@ -194,6 +197,41 @@ public final class CoreDB implements AutoCloseable {
 
     public boolean isClosed() {
         return closed;
+    }
+
+    /**
+     * Simulates a crash by flushing WAL but NOT dirty pages.
+     * Used for testing crash recovery scenarios.
+     *
+     * <p>This ensures WAL records are on disk but data pages are not,
+     * forcing recovery to replay WAL on next open.</p>
+     *
+     * @throws IOException if WAL flush fails
+     */
+    public void simulateCrash() throws IOException {
+        if (!closed) {
+            // Flush WAL to ensure records survive the "crash"
+            xlogWriter.flushUpTo(xlogWriter.currentLsn());
+
+            // Close without flushing dirty pages (simulates crash)
+            closed = true;
+            engineCache.clear();
+            try {
+                catalog.close();
+            } finally {
+                try {
+                    // Close buffer pool WITHOUT flushing dirty pages
+                    bufferPool.closeWithoutFlush();
+                } finally {
+                    try {
+                        xlogWriter.close();
+                    } finally {
+                        controlFile.close();
+                    }
+                }
+            }
+            log.debug("CoreDB crashed (simulated): path={}", dataPath);
+        }
     }
 
     @Override

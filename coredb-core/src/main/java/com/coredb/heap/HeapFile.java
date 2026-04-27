@@ -289,6 +289,12 @@ public final class HeapFile implements AutoCloseable {
         int nextPageId = validateMetaPage(metaPage, tablePath, oid);
         bufferPool.unpinPage(metaFrame, false);
 
+        // After crash recovery, the meta page's nextPageId may be stale
+        // (updateMetaPage goes through the buffer pool, which may not have been flushed).
+        // Use the actual file size as the authoritative page count.
+        int pagesOnDisk = (int)(Files.size(tablePath) / Constants.PAGE_SIZE);
+        nextPageId = Math.max(nextPageId, pagesOnDisk);
+
         // Open or create FSM file
         Path fsmPath = tablePath.getParent().resolve(tablePath.getFileName() + "_fsm");
         FreeSpaceMap fsm;
