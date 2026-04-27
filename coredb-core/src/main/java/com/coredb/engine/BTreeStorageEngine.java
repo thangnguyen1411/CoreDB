@@ -35,6 +35,10 @@ public class BTreeStorageEngine implements StorageEngine {
 
     private static final Logger log = LoggerFactory.getLogger(BTreeStorageEngine.class);
 
+    // Heap and index files share the same table OID, but must use distinct buffer pool keys.
+    // Index files use heap OID + this offset so their pages don't collide in the pool.
+    private static final int INDEX_OID_OFFSET = 0x00100000;
+
     private final CoreDBConfig config;
 
     // Engine state (valid after open())
@@ -73,11 +77,12 @@ public class BTreeStorageEngine implements StorageEngine {
 
         // Open or create index file: base/1/<oid>_pk
         Path indexPath = dataDir.resolve("base/1/" + meta.oid() + "_pk");
+        int indexOid = meta.oid() + INDEX_OID_OFFSET;
         if (java.nio.file.Files.exists(indexPath)) {
-            this.indexFile = IndexFile.open(indexPath, meta.oid(), bufferPool);
+            this.indexFile = IndexFile.open(indexPath, indexOid, bufferPool);
             this.pkIndex = BTree.open(indexFile);
         } else {
-            this.indexFile = IndexFile.create(indexPath, meta.oid(), bufferPool);
+            this.indexFile = IndexFile.create(indexPath, indexOid, bufferPool);
             this.pkIndex = BTree.create(indexFile);
         }
 
