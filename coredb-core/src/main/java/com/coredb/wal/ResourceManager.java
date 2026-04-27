@@ -21,11 +21,14 @@ import java.nio.ByteBuffer;
 public interface ResourceManager {
 
     /**
-     * Returns the resource manager ID (rmgrId) for this manager.
+     * Returns the resource manager ID for this manager.
      *
-     * @return the rmgrId (HEAP=1, BTREE=2, XLOG=3)
+     * <p>Implementations return a constant ID (HEAP=1, BTREE=2, XLOG=3).
+     * This ID is stored in WAL record headers for dispatch during recovery.</p>
+     *
+     * @return the resource manager ID
      */
-    byte rmgrId();
+    byte getResourceManagerId();
 
     /**
      * Replays a WAL record against a target page buffer.

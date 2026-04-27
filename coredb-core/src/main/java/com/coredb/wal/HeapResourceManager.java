@@ -29,7 +29,7 @@ public final class HeapResourceManager implements ResourceManager {
     public static final byte HEAP_UPDATE = 0x03;
 
     @Override
-    public byte rmgrId() {
+    public byte getResourceManagerId() {
         return XLogRecord.RMGR_HEAP;
     }
 

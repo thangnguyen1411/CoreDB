@@ -44,12 +44,12 @@ public final class ResourceManagerRegistry {
      * @throws IllegalArgumentException if a manager with the same rmgrId is already registered
      */
     public void register(ResourceManager manager) {
-        byte rmgrId = manager.rmgrId();
-        if (managers.containsKey(rmgrId)) {
+        byte resourceManagerId = manager.getResourceManagerId();
+        if (managers.containsKey(resourceManagerId)) {
             throw new IllegalArgumentException(
-                "Resource manager with rmgrId=" + rmgrId + " already registered");
+                "Resource manager with ID=" + resourceManagerId + " already registered");
         }
-        managers.put(rmgrId, manager);
+        managers.put(resourceManagerId, manager);
     }
 
     /**

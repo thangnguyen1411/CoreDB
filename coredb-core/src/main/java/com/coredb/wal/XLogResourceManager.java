@@ -18,7 +18,7 @@ public final class XLogResourceManager implements ResourceManager {
     public static final byte CHECKPOINT = 0x20;
 
     @Override
-    public byte rmgrId() {
+    public byte getResourceManagerId() {
         return XLogRecord.RMGR_XLOG;
     }
 

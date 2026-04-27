@@ -176,6 +176,6 @@ class BTreeResourceManagerTest {
     @Test
     void rmgrId_shouldReturnBtreeConstant() {
         BTreeResourceManager rmgr = new BTreeResourceManager();
-        assertThat(rmgr.rmgrId()).isEqualTo(XLogRecord.RMGR_BTREE);
+        assertThat(rmgr.getResourceManagerId()).isEqualTo(XLogRecord.RMGR_BTREE);
     }
 }

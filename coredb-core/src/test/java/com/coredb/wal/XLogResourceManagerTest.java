@@ -77,7 +77,7 @@ class XLogResourceManagerTest {
     @Test
     void rmgrId_shouldReturnXlogConstant() {
         XLogResourceManager rmgr = new XLogResourceManager();
-        assertThat(rmgr.rmgrId()).isEqualTo(XLogRecord.RMGR_XLOG);
+        assertThat(rmgr.getResourceManagerId()).isEqualTo(XLogRecord.RMGR_XLOG);
     }
 
     @Test

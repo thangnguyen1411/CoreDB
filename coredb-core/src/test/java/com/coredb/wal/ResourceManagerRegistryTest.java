@@ -140,17 +140,17 @@ class ResourceManagerRegistryTest {
      * Test implementation of ResourceManager for unit testing.
      */
     private static class TestResourceManager implements ResourceManager {
-        private final byte rmgrId;
+        private final byte resourceManagerId;
         boolean redoCalled = false;
         XLogRecord lastRecord = null;
 
-        TestResourceManager(byte rmgrId) {
-            this.rmgrId = rmgrId;
+        TestResourceManager(byte resourceManagerId) {
+            this.resourceManagerId = resourceManagerId;
         }
 
         @Override
-        public byte rmgrId() {
-            return rmgrId;
+        public byte getResourceManagerId() {
+            return resourceManagerId;
         }
 
         @Override

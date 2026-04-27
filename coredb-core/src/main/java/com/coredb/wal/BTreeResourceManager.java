@@ -27,7 +27,7 @@ public final class BTreeResourceManager implements ResourceManager {
     public static final byte BTREE_INTERNAL_SPLIT = 0x13;
 
     @Override
-    public byte rmgrId() {
+    public byte getResourceManagerId() {
         return XLogRecord.RMGR_BTREE;
     }
 
