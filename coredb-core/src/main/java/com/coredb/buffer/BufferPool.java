@@ -1,11 +1,16 @@
 package com.coredb.buffer;
 
+import com.coredb.catalog.ControlFile;
 import com.coredb.page.Page;
 import com.coredb.page.PageIO;
 import com.coredb.util.Constants;
 import com.coredb.util.StorageException;
+import com.coredb.wal.XLogRecord;
+import com.coredb.wal.XLogResourceManager;
 import com.coredb.wal.XLogWriter;
 
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -309,6 +314,85 @@ public final class BufferPool implements AutoCloseable {
                 }
             }
         }
+    }
+
+    /**
+     * Checkpoint result containing statistics about the checkpoint operation.
+     */
+    public record CheckpointResult(long checkpointLsn, int flushedPages) {}
+
+    /**
+     * Performs a checkpoint operation.
+     *
+     * <p>The checkpoint procedure:
+     * <ol>
+     *   <li>Flush all dirty frames (each flush waits for its pd_lsn)</li>
+     *   <li>Append CHECKPOINT WAL record</li>
+     *   <li>Flush WAL up to checkpoint LSN</li>
+     *   <li>Update control file with checkpoint LSN</li>
+     *   <li>Set needsFullPageWrite=true on all frames</li>
+     * </ol>
+     *
+     * @param controlFile the control file to update with checkpoint LSN
+     * @return the checkpoint result with LSN and flushed page count
+     * @throws IOException if any operation fails
+     */
+    public CheckpointResult checkpoint(ControlFile controlFile) throws IOException {
+        if (xlogWriter == null) {
+            throw new IllegalStateException("XLogWriter not set - cannot perform checkpoint");
+        }
+
+        // 1. Flush all dirty frames (each flush waits for its pd_lsn per WAL-before-data rule)
+        int flushedPages = 0;
+        for (int i = 0; i < frameCount; i++) {
+            BufferDescriptor frame = descriptors[i];
+            if (frame.dirty() && frame.fileId() != 0) {
+                FileChannel channel = channels.get(frame.fileId());
+                if (channel != null) {
+                    flushFrame(i, channel);
+                    flushedPages++;
+                }
+            }
+        }
+
+        // 2. Append CHECKPOINT record
+        // Payload: (long redoLsn) - the LSN at which redo should start on next recovery
+        long checkpointLsn = xlogWriter.currentLsn();
+        byte[] payload = buildCheckpointPayload(checkpointLsn);
+        long recordLsn = xlogWriter.append(
+            XLogRecord.RMGR_XLOG,
+            XLogResourceManager.CHECKPOINT,
+            0, // xid not relevant for checkpoint
+            0, // tableOid not relevant for checkpoint
+            0, // pageId not relevant for checkpoint
+            payload
+        );
+
+        // 3. Flush WAL up to checkpoint LSN
+        xlogWriter.flushUpTo(recordLsn);
+
+        // 4. Update control file with checkpoint LSN
+        controlFile.updateCheckpointLsn(checkpointLsn);
+
+        // 5. Set needsFullPageWrite=true on all frames
+        // This ensures the first modification to each page after checkpoint embeds full page image
+        for (BufferDescriptor frame : descriptors) {
+            frame.setNeedsFullPageWrite(true);
+        }
+
+        return new CheckpointResult(checkpointLsn, flushedPages);
+    }
+
+    /**
+     * Builds the WAL payload for a CHECKPOINT record.
+     * Format: (long redoLsn)
+     */
+    private byte[] buildCheckpointPayload(long redoLsn) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        DataOutputStream dos = new DataOutputStream(baos);
+        dos.writeLong(redoLsn);
+        dos.flush();
+        return baos.toByteArray();
     }
 
     /**

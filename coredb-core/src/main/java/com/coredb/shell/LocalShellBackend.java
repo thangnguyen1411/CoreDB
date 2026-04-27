@@ -4,6 +4,7 @@ import com.coredb.api.Column;
 import com.coredb.api.CoreDB;
 import com.coredb.api.Row;
 import com.coredb.api.Schema;
+import com.coredb.buffer.BufferPool;
 import com.coredb.catalog.BootstrapCatalog;
 import com.coredb.catalog.Catalog;
 import com.coredb.catalog.ColumnDefParser;
@@ -18,6 +19,8 @@ import com.coredb.index.IndexPageLayout;
 import com.coredb.util.Constants;
 import com.coredb.wal.XLogReader;
 import com.coredb.wal.XLogRecord;
+import com.coredb.wal.XLogResourceManager;
+import com.coredb.wal.XLogWriter;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -86,6 +89,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             case "scan" -> handleScan(args);
             case "range" -> handleRange(args);
             case "wal-dump" -> handleWalDump();
+            case "checkpoint" -> handleCheckpoint();
             case "help" -> formatHelp();
             default -> "unknown command: " +
             command +
@@ -150,7 +154,8 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
           index-dump table=<name>|oid=<N> page=<P>              dump index page contents
 
         WAL commands:
-          wal-dump                                              dump WAL file contents
+          wal-dump                   dump WAL file contents
+          checkpoint                 perform database checkpoint (flush dirty pages, write CHECKPOINT record)
         """;
     }
 
@@ -1085,21 +1090,41 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             Optional<XLogRecord> recordOpt;
             while ((recordOpt = reader.readNext()).isPresent()) {
                 XLogRecord rec = recordOpt.get();
-                String infoStr = String.format("0x%02X", rec.info());
-                String fpwFlag = rec.isFullPageWrite() ? "yes" : "no";
 
-                sb.append(String.format(
-                    "LSN=%d prev=%d xid=%d rmgr=%s info=%s tbl=%d pg=%d fpw=%s len=%d%n",
-                    rec.lsn(),
-                    rec.prevLsn(),
-                    rec.xid(),
-                    rec.resourceManagerName(),
-                    infoStr,
-                    rec.tableOid(),
-                    rec.pageId(),
-                    fpwFlag,
-                    rec.totalLength()
-                ));
+                // Special formatting for CHECKPOINT records
+                if (rec.resourceManager() == XLogRecord.RMGR_XLOG
+                        && (rec.info() & 0x7F) == XLogResourceManager.CHECKPOINT) {
+                    long redoLsn = 0;
+                    byte[] data = rec.data();
+                    if (data.length >= 8) {
+                        java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(data);
+                        bb.order(java.nio.ByteOrder.BIG_ENDIAN);
+                        redoLsn = bb.getLong();
+                    }
+                    sb.append(String.format(
+                        "LSN=%d xid=%d rmgr=%s info=CHECKPOINT redoLsn=%d%n",
+                        rec.lsn(),
+                        rec.xid(),
+                        rec.resourceManagerName(),
+                        redoLsn
+                    ));
+                } else {
+                    String infoStr = String.format("0x%02X", rec.info());
+                    String fpwFlag = rec.isFullPageWrite() ? "yes" : "no";
+
+                    sb.append(String.format(
+                        "LSN=%d prev=%d xid=%d rmgr=%s info=%s tbl=%d pg=%d fpw=%s len=%d%n",
+                        rec.lsn(),
+                        rec.prevLsn(),
+                        rec.xid(),
+                        rec.resourceManagerName(),
+                        infoStr,
+                        rec.tableOid(),
+                        rec.pageId(),
+                        fpwFlag,
+                        rec.totalLength()
+                    ));
+                }
                 count++;
             }
 
@@ -1108,6 +1133,19 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             }
             sb.append(String.format("(%d records)%n", count));
             return sb.toString().stripTrailing();
+        } catch (Exception e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Handles: checkpoint
+     * Performs a database checkpoint - flushes dirty pages and writes CHECKPOINT record.
+     */
+    private String handleCheckpoint() {
+        try {
+            BufferPool.CheckpointResult result = db.bufferPool().checkpoint(db.controlFile());
+            return String.format("flushed %d dirty pages  checkpoint-lsn=%d", result.flushedPages(), result.checkpointLsn());
         } catch (Exception e) {
             return "error: " + e.getMessage();
         }
