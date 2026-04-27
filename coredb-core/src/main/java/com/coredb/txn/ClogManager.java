@@ -83,6 +83,12 @@ public interface ClogManager extends AutoCloseable {
      * Statistics about clog contents.
      */
     record Stats(int entries, int inProgress, int committed, int aborted, int cacheBytes) {
+        @Override
+        public String toString() {
+            return String.format(
+                "entries=%d  in-progress=%d  committed=%d  aborted=%d  cache-bytes=%d",
+                entries, inProgress, committed, aborted, cacheBytes);
+        }
     }
 
     /**
