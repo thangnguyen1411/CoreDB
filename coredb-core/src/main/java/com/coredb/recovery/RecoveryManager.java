@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -102,7 +103,7 @@ public final class RecoveryManager {
         try {
             log.info("Starting recovery from LSN={}", startLsn);
 
-            java.util.Optional<XLogRecord> optRecord;
+            Optional<XLogRecord> optRecord;
             while ((optRecord = reader.readNext()).isPresent()) {
                 XLogRecord record = optRecord.get();
                 lastLsn = record.lsn();

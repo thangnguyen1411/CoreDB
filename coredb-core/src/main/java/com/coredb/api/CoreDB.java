@@ -12,9 +12,11 @@ import com.coredb.recovery.RecoveryStats;
 import com.coredb.util.Constants;
 import com.coredb.wal.XLogWriter;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.Collections;
 import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -176,7 +178,7 @@ public final class CoreDB implements AutoCloseable {
                 );
                 return engine;
             } catch (IOException e) {
-                throw new java.io.UncheckedIOException(e);
+                throw new UncheckedIOException(e);
             }
         });
     }
@@ -240,7 +242,7 @@ public final class CoreDB implements AutoCloseable {
             closed = true;
             // Close engines in reverse order of creation (newest first)
             var engines = engineCache.values().stream().toList();
-            java.util.Collections.reverse(engines);
+            Collections.reverse(engines);
             for (StorageEngine engine : engines) {
                 try {
                     engine.close();

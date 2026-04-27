@@ -710,7 +710,7 @@ public final class HeapFile implements AutoCloseable {
      * Holder for a pinned page and its buffer descriptor.
      * Callers must call unpin(dirty) when done to release the frame.
      */
-    public record PinnedPage(Page page, BufferDescriptor frame, BufferPool pool, java.nio.channels.FileChannel channel) {
+    public record PinnedPage(Page page, BufferDescriptor frame, BufferPool pool, FileChannel channel) {
         /**
          * Unpins this page. If frame is null (bootstrap mode), writes to disk if dirty.
          * @param dirty true if the page was modified
