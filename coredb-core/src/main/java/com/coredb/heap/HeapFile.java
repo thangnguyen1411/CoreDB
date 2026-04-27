@@ -446,10 +446,14 @@ public final class HeapFile implements AutoCloseable {
         if (bufferPool != null) {
             // Buffer pool mode: get new page from buffer pool
             BufferDescriptor newFrame = bufferPool.fetchNewPage(oid, newPageId);
-            Page newPage = Page.Factory.wrap(newPageId, newFrame.page());
 
-            // Initialize as heap page
-            newPage.buffer().putInt(8, PageType.HEAP.ordinal());
+            // Initialize frame with properly initialized heap page
+            Page initializedPage = Page.Factory.allocateHeapPage(newPageId);
+            newFrame.page().clear();
+            newFrame.page().put(initializedPage.buffer().duplicate());
+            newFrame.page().flip();
+
+            Page newPage = Page.Factory.wrap(newPageId, newFrame.page());
 
             // Return pinned page - caller must unpin after modifying
             pinned = new PinnedPage(newPage, newFrame, bufferPool, null);
