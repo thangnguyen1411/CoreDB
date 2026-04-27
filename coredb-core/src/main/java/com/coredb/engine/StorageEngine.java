@@ -3,7 +3,6 @@ package com.coredb.engine;
 import com.coredb.api.Row;
 import com.coredb.buffer.BufferPool;
 import com.coredb.catalog.TableMeta;
-
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Iterator;
@@ -26,7 +25,6 @@ import java.util.Optional;
  * </ul>
  */
 public interface StorageEngine extends AutoCloseable {
-
     /**
      * Opens or initializes this storage engine for the given table.
      *
@@ -35,7 +33,8 @@ public interface StorageEngine extends AutoCloseable {
      * @param bufferPool the buffer pool for caching pages
      * @throws IOException if opening fails
      */
-    void open(Path dataDir, TableMeta meta, BufferPool bufferPool) throws IOException;
+    void open(Path dataDir, TableMeta meta, BufferPool bufferPool)
+        throws IOException;
 
     /**
      * Closes the storage engine, releasing all resources.
@@ -94,7 +93,8 @@ public interface StorageEngine extends AutoCloseable {
      * @return an iterator over (PK, Row) entries in ascending order
      * @throws IOException if the operation fails
      */
-    Iterator<Map.Entry<Long, Row>> rangeScan(long fromPk, long toPk) throws IOException;
+    Iterator<Map.Entry<Long, Row>> rangeScan(long fromPk, long toPk)
+        throws IOException;
 
     /**
      * Returns an iterator over all rows in the table.
@@ -139,7 +139,8 @@ public interface StorageEngine extends AutoCloseable {
      * @throws IOException                  if the operation fails
      * @throws UnsupportedOperationException if not yet implemented
      */
-    Iterator<Map.Entry<Long, Row>> indexLookup(String indexName, Object value) throws IOException;
+    Iterator<Map.Entry<Long, Row>> indexLookup(String indexName, Object value)
+        throws IOException;
 
     /**
      * Scans a range of values in a secondary index.
@@ -151,7 +152,11 @@ public interface StorageEngine extends AutoCloseable {
      * @throws IOException                  if the operation fails
      * @throws UnsupportedOperationException if not yet implemented
      */
-    Iterator<Map.Entry<Long, Row>> indexRangeScan(String indexName, Object from, Object to) throws IOException;
+    Iterator<Map.Entry<Long, Row>> indexRangeScan(
+        String indexName,
+        Object from,
+        Object to
+    ) throws IOException;
 
     /**
      * Flushes all dirty data to disk.

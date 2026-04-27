@@ -211,6 +211,48 @@ public final class IndexFile implements AutoCloseable {
                 metaInfo.rootPageId, metaInfo.treeHeight, metaInfo.nextPageId, null);
     }
 
+    /**
+     * Opens an existing index file and recovers the file ID from the meta page.
+     *
+     * The meta page stores the OID that was used at creation time, so this
+     * method recovers the correct file ID without requiring the caller to
+     * know it. This avoids buffer pool key collisions between heap and index
+     * files that share the same table OID.
+     *
+     * @param indexPath path to the index file
+     * @param bufferPool the buffer pool for caching pages
+     * @return an IndexFile instance
+     * @throws IOException         if file cannot be read
+     * @throws CorruptionException if meta page validation fails
+     */
+    public static IndexFile open(Path indexPath, BufferPool bufferPool) throws IOException {
+        if (!Files.exists(indexPath)) {
+            throw new IOException("Index file not found: " + indexPath);
+        }
+
+        // Read meta page directly to recover the stored file ID
+        FileChannel probe = FileChannel.open(indexPath,
+                StandardOpenOption.READ, StandardOpenOption.WRITE);
+        Page metaPageProbe = PageIO.readPage(probe, 0);
+        int storedOid = BinaryUtil.readU32(metaPageProbe.buffer(), META_OFFSET_OID);
+        probe.close();
+
+        // Use the stored OID as the file ID for buffer pool operations
+        bufferPool.registerFile(storedOid, indexPath);
+
+        BufferDescriptor metaFrame = bufferPool.fetchPage(storedOid, 0);
+        Page metaPage = Page.Factory.wrap(0, metaFrame.page().duplicate());
+        MetaInfo metaInfo = validateMetaPage(metaPage, indexPath, storedOid);
+        bufferPool.unpinPage(metaFrame, false);
+
+        log.info("Opened index file: {} (oid={}, root={}, height={}, pages={})",
+                indexPath.toAbsolutePath(), storedOid, metaInfo.rootPageId,
+                metaInfo.treeHeight, metaInfo.nextPageId);
+
+        return new IndexFile(indexPath, storedOid, bufferPool, metaPage,
+                metaInfo.rootPageId, metaInfo.treeHeight, metaInfo.nextPageId, null);
+    }
+
     // === Public accessors ===
 
     public Path indexPath() {
@@ -372,7 +414,7 @@ public final class IndexFile implements AutoCloseable {
     public void flush() throws IOException {
         if (bufferPool != null) {
             // Flush all dirty pages for this table via buffer pool
-            bufferPool.flushAllForTable(oid);
+            bufferPool.flushAllForFile(oid);
         } else if (channel != null) {
             // Bootstrap/test mode: fsync the channel directly
             channel.force(true);

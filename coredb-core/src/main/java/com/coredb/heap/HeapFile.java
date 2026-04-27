@@ -374,8 +374,8 @@ public final class HeapFile implements AutoCloseable {
     public void flush() throws IOException {
         fsm.flush();
         if (bufferPool != null) {
-            // Flush all dirty pages for this table via buffer pool
-            bufferPool.flushAllForTable(oid);
+            // Flush all dirty pages for this file via buffer pool
+            bufferPool.flushAllForFile(oid);
         } else if (channel != null) {
             // Bootstrap mode: fsync the channel directly
             channel.force(true);

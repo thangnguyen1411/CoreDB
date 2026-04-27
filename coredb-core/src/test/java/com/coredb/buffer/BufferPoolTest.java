@@ -297,7 +297,7 @@ class BufferPoolTest {
 
         BufferDescriptor frame = pool.fetchNewPage(TEST_OID, 5);
 
-        assertThat(frame.tableOid()).isEqualTo(TEST_OID);
+        assertThat(frame.fileId()).isEqualTo(TEST_OID);
         assertThat(frame.pageId()).isEqualTo(5);
         assertThat(frame.pinCount()).isEqualTo(1);
         assertThat(frame.dirty()).isTrue();
