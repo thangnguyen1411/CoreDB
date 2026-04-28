@@ -302,10 +302,8 @@ public final class BTree {
      * @throws IOException if page operations fail
      */
     public boolean delete(long key) throws IOException {
-        // Descend to the appropriate leaf page
         int leafPageId = descendToLeaf(key);
 
-        // Delete from the leaf
         IndexFile.PinnedPage pinned = indexFile.readPage(leafPageId);
         Page page = pinned.page();
         BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(page));
@@ -313,13 +311,66 @@ public final class BTree {
         boolean deleted = leaf.delete(key);
 
         if (deleted) {
-            // Mark page dirty and unpin
+            if (xlogWriter != null && pinned.frame() != null) {
+                byte[] payload = buildBtreeDeletePayload(key);
+                appendWalWithFPW(pinned.frame(), page.buffer(),
+                        XLogRecord.RMGR_BTREE, BTreeResourceManager.BTREE_DELETE,
+                        leafPageId, payload);
+            }
             pinned.unpin(true);
         } else {
             pinned.unpin(false);
         }
 
         return deleted;
+    }
+
+    /**
+     * Scans all leaf pages and removes the entry whose heap RecordId matches {@code rid}.
+     *
+     * <p>This is O(total index entries) because the index is keyed on the PK, not on
+     * RecordId. Used by VACUUM to clean up index entries for dead heap slots before
+     * rewriting the page.</p>
+     *
+     * @param rid the heap RecordId to remove
+     * @return the PK key of the removed entry, or empty if not found
+     * @throws IOException if a page operation fails
+     */
+    public Optional<Long> removeEntriesPointingAt(RecordId rid) throws IOException {
+        int leafPageId = descendToLeaf(Long.MIN_VALUE);
+
+        while (leafPageId != 0) {
+            IndexFile.PinnedPage pinned = indexFile.readPage(leafPageId);
+            Page page = pinned.page();
+            BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(page));
+
+            int nextLeaf = leaf.btpoNext();
+            Optional<Long> deletedKey = leaf.deleteByRid(rid);
+
+            if (deletedKey.isPresent()) {
+                if (xlogWriter != null && pinned.frame() != null) {
+                    byte[] payload = buildBtreeDeletePayload(deletedKey.get());
+                    appendWalWithFPW(pinned.frame(), page.buffer(),
+                            XLogRecord.RMGR_BTREE, BTreeResourceManager.BTREE_DELETE,
+                            leafPageId, payload);
+                }
+                pinned.unpin(true);
+                return deletedKey;
+            }
+
+            pinned.unpin(false);
+            leafPageId = nextLeaf;
+        }
+
+        return Optional.empty();
+    }
+
+    private byte[] buildBtreeDeletePayload(long key) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        DataOutputStream dos = new DataOutputStream(baos);
+        dos.writeLong(key);
+        dos.flush();
+        return baos.toByteArray();
     }
 
     /**

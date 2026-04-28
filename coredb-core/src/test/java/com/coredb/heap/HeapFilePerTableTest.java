@@ -6,6 +6,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.coredb.api.Column;
 import com.coredb.api.Row;
 import com.coredb.api.Schema;
+import com.coredb.mvcc.Snapshot;
+import com.coredb.txn.ClogManager;
 import com.coredb.util.Constants;
 import com.coredb.util.CorruptionException;
 import org.junit.jupiter.api.BeforeEach;
@@ -30,15 +32,22 @@ class HeapFilePerTableTest {
 
     private Schema schema;
     private Path tablePath;
+    private ClogManager clog;
 
     @BeforeEach
-    void setUp() {
+    void setUp() throws Exception {
+        clog = ClogManager.create(tempDir);
         schema = Schema.of(
             Column.longCol("id"),
             Column.stringCol("name"),
             Column.intCol("age")
         );
         tablePath = tempDir.resolve("base").resolve("1").resolve("1000");
+    }
+
+    @org.junit.jupiter.api.AfterEach
+    void tearDown() throws Exception {
+        if (clog != null) clog.close();
     }
 
     @Test
@@ -191,7 +200,7 @@ class HeapFilePerTableTest {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
 
         Row row = Row.of(1L, "Alice", 30);
-        RecordId rid = hf.insert(row);
+        RecordId rid = hf.insert(row, Constants.BOOTSTRAP_XID);
 
         assertThat(rid.pageId()).isGreaterThanOrEqualTo(1); // Page 0 is meta
         assertThat(rid.slotNo()).isZero();
@@ -204,7 +213,7 @@ class HeapFilePerTableTest {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
 
         Row row = Row.of(1L, "Alice", 30);
-        hf.insert(row);
+        hf.insert(row, Constants.BOOTSTRAP_XID);
         hf.close();
 
         // File should be: 1 meta page + 1 data page = 2 pages
@@ -218,7 +227,7 @@ class HeapFilePerTableTest {
 
         int count = 100;
         for (int i = 0; i < count; i++) {
-            hf.insert(Row.of((long) i, "User" + i, i));
+            hf.insert(Row.of((long) i, "User" + i, i), Constants.BOOTSTRAP_XID);
         }
 
         // Get page count before closing
@@ -235,9 +244,9 @@ class HeapFilePerTableTest {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
 
         Row original = Row.of(1L, "Alice", 30);
-        RecordId rid = hf.insert(original);
+        RecordId rid = hf.insert(original, Constants.BOOTSTRAP_XID);
 
-        java.util.Optional<Row> fetched = hf.get(rid);
+        java.util.Optional<Row> fetched = hf.get(rid, Snapshot.BOOTSTRAP, clog);
 
         assertThat(fetched).isPresent();
         assertThat(fetched.get()).isEqualTo(original);
@@ -250,7 +259,7 @@ class HeapFilePerTableTest {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
 
         RecordId rid = new RecordId(1, 99);
-        java.util.Optional<Row> fetched = hf.get(rid);
+        java.util.Optional<Row> fetched = hf.get(rid, Snapshot.BOOTSTRAP, clog);
 
         assertThat(fetched).isEmpty();
 
@@ -266,11 +275,11 @@ class HeapFilePerTableTest {
 
         for (int i = 0; i < count; i++) {
             Row row = Row.of((long) i, "User" + i, i % 100);
-            rids.add(hf.insert(row));
+            rids.add(hf.insert(row, Constants.BOOTSTRAP_XID));
         }
 
         for (int i = 0; i < count; i++) {
-            java.util.Optional<Row> fetched = hf.get(rids.get(i));
+            java.util.Optional<Row> fetched = hf.get(rids.get(i), Snapshot.BOOTSTRAP, clog);
             assertThat(fetched).isPresent();
             assertThat(fetched.get().getLong(0)).isEqualTo((long) i);
             assertThat(fetched.get().getString(1)).isEqualTo("User" + i);
@@ -287,12 +296,12 @@ class HeapFilePerTableTest {
         assertThat(hf.nextPageId()).isEqualTo(1); // Just meta page
 
         // First insert allocates page 1
-        hf.insert(Row.of(1L, "Alice", 30));
+        hf.insert(Row.of(1L, "Alice", 30), Constants.BOOTSTRAP_XID);
         assertThat(hf.nextPageId()).isEqualTo(2);
 
         // Many more inserts to force another page allocation
         for (int i = 0; i < 1000; i++) {
-            hf.insert(Row.of((long) i, "User" + i, i));
+            hf.insert(Row.of((long) i, "User" + i, i), Constants.BOOTSTRAP_XID);
         }
         assertThat(hf.nextPageId()).isGreaterThan(2);
 
@@ -305,7 +314,7 @@ class HeapFilePerTableTest {
 
         // Insert enough rows to allocate multiple pages
         for (int i = 0; i < 1000; i++) {
-            hf.insert(Row.of((long) i, "User" + i, i));
+            hf.insert(Row.of((long) i, "User" + i, i), Constants.BOOTSTRAP_XID);
         }
 
         int pageCountBeforeClose = hf.nextPageId();
@@ -324,11 +333,11 @@ class HeapFilePerTableTest {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
 
         Row row = Row.of(1L, "Alice", 30);
-        RecordId rid = hf.insert(row);
+        RecordId rid = hf.insert(row, Constants.BOOTSTRAP_XID);
 
-        hf.delete(rid);
+        hf.delete(rid, Constants.BOOTSTRAP_XID);
 
-        java.util.Optional<Row> fetched = hf.get(rid);
+        java.util.Optional<Row> fetched = hf.get(rid, Snapshot.BOOTSTRAP, clog);
         assertThat(fetched).isEmpty();
 
         hf.close();
@@ -339,7 +348,7 @@ class HeapFilePerTableTest {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
 
         java.util.List<Row> rows = new java.util.ArrayList<>();
-        hf.scan().forEachRemaining(rows::add);
+        hf.scan(Snapshot.BOOTSTRAP, clog).forEachRemaining(rows::add);
 
         assertThat(rows).isEmpty();
 
@@ -352,11 +361,11 @@ class HeapFilePerTableTest {
 
         int count = 50;
         for (int i = 0; i < count; i++) {
-            hf.insert(Row.of((long) i, "User" + i, i));
+            hf.insert(Row.of((long) i, "User" + i, i), Constants.BOOTSTRAP_XID);
         }
 
         java.util.List<Row> rows = new java.util.ArrayList<>();
-        hf.scan().forEachRemaining(rows::add);
+        hf.scan(Snapshot.BOOTSTRAP, clog).forEachRemaining(rows::add);
 
         assertThat(rows).hasSize(count);
 
@@ -371,15 +380,15 @@ class HeapFilePerTableTest {
         int count = 20;
 
         for (int i = 0; i < count; i++) {
-            rids.add(hf.insert(Row.of((long) i, "User" + i, i)));
+            rids.add(hf.insert(Row.of((long) i, "User" + i, i), Constants.BOOTSTRAP_XID));
         }
 
         for (int i = 0; i < count; i += 2) {
-            hf.delete(rids.get(i));
+            hf.delete(rids.get(i), Constants.BOOTSTRAP_XID);
         }
 
         java.util.List<Row> rows = new java.util.ArrayList<>();
-        hf.scan().forEachRemaining(rows::add);
+        hf.scan(Snapshot.BOOTSTRAP, clog).forEachRemaining(rows::add);
 
         assertThat(rows).hasSize(count / 2);
 
@@ -394,14 +403,14 @@ class HeapFilePerTableTest {
         int count = 50;
 
         for (int i = 0; i < count; i++) {
-            rids.add(hf.insert(Row.of((long) i, "User" + i, i)));
+            rids.add(hf.insert(Row.of((long) i, "User" + i, i), Constants.BOOTSTRAP_XID));
         }
         hf.close();
 
         // Reopen and verify data
         HeapFile reopened = HeapFile.open(tablePath, 1000, schema);
         for (int i = 0; i < count; i++) {
-            java.util.Optional<Row> fetched = reopened.get(rids.get(i));
+            java.util.Optional<Row> fetched = reopened.get(rids.get(i), Snapshot.BOOTSTRAP, clog);
             assertThat(fetched).isPresent();
             assertThat(fetched.get().getLong(0)).isEqualTo((long) i);
         }
@@ -414,13 +423,13 @@ class HeapFilePerTableTest {
 
         int count = 50;
         for (int i = 0; i < count; i++) {
-            hf.insert(Row.of((long) i, "User" + i, i));
+            hf.insert(Row.of((long) i, "User" + i, i), Constants.BOOTSTRAP_XID);
         }
         hf.close();
 
         HeapFile reopened = HeapFile.open(tablePath, 1000, schema);
         java.util.List<Row> rows = new java.util.ArrayList<>();
-        reopened.scan().forEachRemaining(rows::add);
+        reopened.scan(Snapshot.BOOTSTRAP, clog).forEachRemaining(rows::add);
 
         assertThat(rows).hasSize(count);
         reopened.close();
@@ -435,12 +444,12 @@ class HeapFilePerTableTest {
         HeapFile hf1001 = HeapFile.create(path1001, 1001, schema);
 
         // Insert different amounts of data into each
-        hf1000.insert(Row.of(1L, "A", 1));
+        hf1000.insert(Row.of(1L, "A", 1), Constants.BOOTSTRAP_XID);
 
         // Insert many rows into second file to force page allocation
         // Need enough rows to span multiple pages
         for (int i = 0; i < 1000; i++) {
-            hf1001.insert(Row.of((long) i, "User" + i, i));
+            hf1001.insert(Row.of((long) i, "User" + i, i), Constants.BOOTSTRAP_XID);
         }
 
         int pages1000 = hf1000.nextPageId();
@@ -471,7 +480,7 @@ class HeapFilePerTableTest {
 
         assertThat(hf.pageCount()).isEqualTo(1); // Just meta page
 
-        hf.insert(Row.of(1L, "Alice", 30));
+        hf.insert(Row.of(1L, "Alice", 30), Constants.BOOTSTRAP_XID);
         assertThat(hf.pageCount()).isGreaterThanOrEqualTo(2); // Meta + at least 1 data
 
         hf.close();
@@ -484,7 +493,7 @@ class HeapFilePerTableTest {
         long size1 = hf.fileSize();
         assertThat(size1).isEqualTo(Constants.PAGE_SIZE); // Just meta page
 
-        hf.insert(Row.of(1L, "Alice", 30));
+        hf.insert(Row.of(1L, "Alice", 30), Constants.BOOTSTRAP_XID);
 
         long size2 = hf.fileSize();
         assertThat(size2).isGreaterThan(size1);
@@ -502,7 +511,7 @@ class HeapFilePerTableTest {
 
         // Initially page 1 doesn't exist, so no category tracked
         // After first insert, page 1 is created with high category
-        hf.insert(Row.of(1L, "User1", 1));
+        hf.insert(Row.of(1L, "User1", 1), Constants.BOOTSTRAP_XID);
 
         int initialCategory = getFsmCategory(hf, 1);
         assertThat(initialCategory).isGreaterThan(0); // Should have some free space
@@ -513,7 +522,7 @@ class HeapFilePerTableTest {
 
         while (inserted < 500) { // Safety limit
             try {
-                hf.insert(Row.of((long) inserted, "User" + inserted, inserted));
+                hf.insert(Row.of((long) inserted, "User" + inserted, inserted), Constants.BOOTSTRAP_XID);
                 inserted++;
 
                 int currentCategory = getFsmCategory(hf, 1);
@@ -549,7 +558,7 @@ class HeapFilePerTableTest {
         int page2Inserts = 0;
 
         for (int i = 0; i < 1000; i++) {
-            RecordId rid = hf.insert(Row.of((long) i, "User" + i, i));
+            RecordId rid = hf.insert(Row.of((long) i, "User" + i, i), Constants.BOOTSTRAP_XID);
             if (rid.pageId() == 1) {
                 page1Inserts++;
             } else if (rid.pageId() == 2) {
@@ -573,14 +582,14 @@ class HeapFilePerTableTest {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
 
         // Insert a few rows
-        RecordId rid1 = hf.insert(Row.of(1L, "Alice", 30));
-        RecordId rid2 = hf.insert(Row.of(2L, "Bob", 25));
+        RecordId rid1 = hf.insert(Row.of(1L, "Alice", 30), Constants.BOOTSTRAP_XID);
+        RecordId rid2 = hf.insert(Row.of(2L, "Bob", 25), Constants.BOOTSTRAP_XID);
 
         // Get category before delete
         int categoryBefore = getFsmCategory(hf, rid1.pageId());
 
         // Delete one row
-        hf.delete(rid1);
+        hf.delete(rid1, Constants.BOOTSTRAP_XID);
 
         // Get category after delete
         int categoryAfter = getFsmCategory(hf, rid1.pageId());
@@ -597,18 +606,18 @@ class HeapFilePerTableTest {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
 
         // Insert rows
-        RecordId rid1 = hf.insert(Row.of(1L, "Alice", 30));
+        RecordId rid1 = hf.insert(Row.of(1L, "Alice", 30), Constants.BOOTSTRAP_XID);
         int firstPageId = rid1.pageId();
 
         // Insert more rows on the same page
-        RecordId rid2 = hf.insert(Row.of(2L, "Bob", 25));
-        RecordId rid3 = hf.insert(Row.of(3L, "Carol", 35));
+        RecordId rid2 = hf.insert(Row.of(2L, "Bob", 25), Constants.BOOTSTRAP_XID);
+        RecordId rid3 = hf.insert(Row.of(3L, "Carol", 35), Constants.BOOTSTRAP_XID);
 
         // Delete the middle row
-        hf.delete(rid2);
+        hf.delete(rid2, Constants.BOOTSTRAP_XID);
 
         // Insert a new row - should reuse the freed slot on the same page
-        RecordId rid4 = hf.insert(Row.of(4L, "Dave", 40));
+        RecordId rid4 = hf.insert(Row.of(4L, "Dave", 40), Constants.BOOTSTRAP_XID);
 
         // The new row should land on the same page where we freed space
         assertThat(rid4.pageId()).isEqualTo(firstPageId);
@@ -622,8 +631,8 @@ class HeapFilePerTableTest {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
 
         // Insert some data
-        hf.insert(Row.of(1L, "Alice", 30));
-        hf.insert(Row.of(2L, "Bob", 25));
+        hf.insert(Row.of(1L, "Alice", 30), Constants.BOOTSTRAP_XID);
+        hf.insert(Row.of(2L, "Bob", 25), Constants.BOOTSTRAP_XID);
         hf.close();
 
         // Delete the FSM file
@@ -635,7 +644,7 @@ class HeapFilePerTableTest {
         HeapFile reopened = HeapFile.open(tablePath, 1000, schema);
 
         // Should be able to insert (FSM recreated, falls back to new page allocation)
-        RecordId rid = reopened.insert(Row.of(3L, "Carol", 35));
+        RecordId rid = reopened.insert(Row.of(3L, "Carol", 35), Constants.BOOTSTRAP_XID);
         assertThat(rid.pageId()).isGreaterThanOrEqualTo(1);
 
         // Verify the new FSM file exists
@@ -652,7 +661,7 @@ class HeapFilePerTableTest {
         // Insert enough rows to span multiple pages
         int maxPageSeen = 1;
         for (int i = 0; i < 500; i++) {
-            RecordId rid = hf.insert(Row.of((long) i, "User" + i, i));
+            RecordId rid = hf.insert(Row.of((long) i, "User" + i, i), Constants.BOOTSTRAP_XID);
             maxPageSeen = Math.max(maxPageSeen, rid.pageId());
             if (maxPageSeen >= 3) {
                 break;
@@ -680,7 +689,7 @@ class HeapFilePerTableTest {
         // Fill page 1 completely
         int page1RowCount = 0;
         for (int i = 0; i < 1000; i++) {
-            RecordId rid = hf.insert(Row.of((long) i, "User" + i, i));
+            RecordId rid = hf.insert(Row.of((long) i, "User" + i, i), Constants.BOOTSTRAP_XID);
             if (rid.pageId() == 1) {
                 page1RowCount++;
             } else {
@@ -697,7 +706,7 @@ class HeapFilePerTableTest {
 
         // Try to insert - should detect FSM is lying, correct it, and allocate new page
         int pageCountBefore = hf.pageCount();
-        RecordId rid = hf.insert(Row.of(9999L, "NewUser", 99));
+        RecordId rid = hf.insert(Row.of(9999L, "NewUser", 99), Constants.BOOTSTRAP_XID);
 
         // Should have allocated a new page (not gone to the "full" page 1)
         assertThat(rid.pageId()).isGreaterThanOrEqualTo(pageCountBefore - 1);
@@ -715,8 +724,8 @@ class HeapFilePerTableTest {
         HeapFile hf = HeapFile.create(tablePath, 1000, schema);
 
         // Insert a few rows first
-        hf.insert(Row.of(1L, "Alice", 30));
-        hf.insert(Row.of(2L, "Bob", 25));
+        hf.insert(Row.of(1L, "Alice", 30), Constants.BOOTSTRAP_XID);
+        hf.insert(Row.of(2L, "Bob", 25), Constants.BOOTSTRAP_XID);
 
         int pagesBefore = hf.pageCount();
 
@@ -724,13 +733,13 @@ class HeapFilePerTableTest {
         zeroAllFsmCategories(hf);
 
         // Insert should still work - will allocate new page since FSM returns -1
-        RecordId rid = hf.insert(Row.of(3L, "Carol", 35));
+        RecordId rid = hf.insert(Row.of(3L, "Carol", 35), Constants.BOOTSTRAP_XID);
 
         // Should have allocated a new page
         assertThat(hf.pageCount()).isGreaterThanOrEqualTo(pagesBefore);
 
         // Row should be retrievable
-        assertThat(hf.get(rid)).isPresent();
+        assertThat(hf.get(rid, Snapshot.BOOTSTRAP, clog)).isPresent();
 
         hf.close();
     }

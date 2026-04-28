@@ -390,6 +390,32 @@ public final class BTreeLeafPage {
     }
 
     /**
+     * Finds and removes the entry whose {@link RecordId} matches {@code rid}.
+     *
+     * <p>Used by VACUUM to clean index entries that point at dead heap slots.
+     * The search is a linear scan of the leaf's ItemId array because the index
+     * is keyed on the PK, not on RecordId.</p>
+     *
+     * @param rid the heap RecordId to look for
+     * @return the key of the removed entry, or empty if not found
+     */
+    public Optional<Long> deleteByRid(RecordId rid) {
+        int count = layout.entryCount();
+        for (int slot = 0; slot < count; slot++) {
+            if (ridAt(slot).equals(rid)) {
+                long key = keyAt(slot);
+                // Shift remaining ItemIds left.
+                for (int i = slot; i < count - 1; i++) {
+                    layout.writeItemId(i, layout.readItemId(i + 1));
+                }
+                layout.setPdLower((short) (layout.pdLower() - 4));
+                return Optional.of(key);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
      * Simple holder for key/rid pairs during split.
      */
     private record Entry(long key, RecordId rid) {

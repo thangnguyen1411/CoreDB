@@ -113,9 +113,10 @@ class HeapResourceManagerTest {
             throw new RuntimeException(e);
         }
 
-        // Verify the ItemId is marked as DEAD
+        // Slot stays FLAGS_NORMAL: MVCC deletion sets xmax but keeps the tuple
+        // visible to snapshots that predate the delete. LP_DEAD is set later by VACUUM.
         int itemId = BinaryUtil.readU32(pageBuf, PageHeader.SIZE);
-        assertThat(ItemId.flags(itemId)).isEqualTo(ItemId.FLAGS_DEAD);
+        assertThat(ItemId.flags(itemId)).isEqualTo(ItemId.FLAGS_NORMAL);
 
         // Verify the header has xmax set
         int tupleOffset = ItemId.offset(itemId);
@@ -164,9 +165,10 @@ class HeapResourceManagerTest {
             throw new RuntimeException(e);
         }
 
-        // Verify old tuple is marked deleted
+        // Old slot stays FLAGS_NORMAL — xmax chains it to the new version.
+        // MVCC keeps the old version visible to snapshots that predate the update.
         int oldItemId = BinaryUtil.readU32(pageBuf, PageHeader.SIZE + 4); // slot 1
-        assertThat(ItemId.flags(oldItemId)).isEqualTo(ItemId.FLAGS_DEAD);
+        assertThat(ItemId.flags(oldItemId)).isEqualTo(ItemId.FLAGS_NORMAL);
 
         // Verify new tuple exists at slot 2
         int newItemId = BinaryUtil.readU32(pageBuf, PageHeader.SIZE + 8); // slot 2

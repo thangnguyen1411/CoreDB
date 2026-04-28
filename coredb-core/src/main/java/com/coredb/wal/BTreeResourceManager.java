@@ -25,6 +25,7 @@ public final class BTreeResourceManager implements ResourceManager {
     public static final byte BTREE_SPLIT = 0x11;
     public static final byte BTREE_INTERNAL_INSERT = 0x12;
     public static final byte BTREE_INTERNAL_SPLIT = 0x13;
+    public static final byte BTREE_DELETE = 0x14;
 
     @Override
     public byte getResourceManagerId() {
@@ -48,6 +49,9 @@ public final class BTreeResourceManager implements ResourceManager {
                 break;
             case BTREE_INTERNAL_SPLIT:
                 redoInternalSplit(record, targetPage);
+                break;
+            case BTREE_DELETE:
+                redoLeafDelete(record, targetPage);
                 break;
             default:
                 throw new UnsupportedOperationException(
@@ -202,5 +206,45 @@ public final class BTreeResourceManager implements ResourceManager {
         // Update btpo_next to point to new right sibling
         int btpoNextOffset = page.capacity() - 12 + 4;
         page.putInt(btpoNextOffset, newRightPageId);
+    }
+
+    /**
+     * Redo a BTREE_DELETE operation on a leaf page.
+     *
+     * <p>Payload format:
+     * <pre>
+     * Offset  Size  Field
+     * 0       8     key   key of the entry to remove
+     * </pre>
+     *
+     * <p>Finds the entry with the matching key on this leaf and removes it by
+     * compacting the ItemId array. Note that the tuple bytes are not reclaimed
+     * (pd_upper stays unchanged) — the space is reclaimed by the next split or
+     * a future page reorganisation.</p>
+     */
+    private void redoLeafDelete(XLogRecord record, ByteBuffer page) {
+        byte[] data = record.data();
+        ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN);
+        long key = buf.getLong();
+
+        short pdLower = BinaryUtil.readU16(page, PageHeader.OFFSET_PD_LOWER);
+        int count = (pdLower - PageHeader.SIZE) / ItemId.SIZE;
+
+        // Linear scan to find the slot with this key.
+        for (int slot = 0; slot < count; slot++) {
+            int rawItemId = page.getInt(PageHeader.SIZE + slot * ItemId.SIZE);
+            int off = ItemId.offset(rawItemId);
+            long entryKey = page.getLong(off);
+            if (entryKey == key) {
+                // Shift remaining ItemIds left to close the gap.
+                for (int i = slot; i < count - 1; i++) {
+                    int next = page.getInt(PageHeader.SIZE + (i + 1) * ItemId.SIZE);
+                    page.putInt(PageHeader.SIZE + i * ItemId.SIZE, next);
+                }
+                BinaryUtil.writeU16(page, PageHeader.OFFSET_PD_LOWER, (short) (pdLower - ItemId.SIZE));
+                return;
+            }
+        }
+        // Key not found — record may have been replayed already; idempotent.
     }
 }
