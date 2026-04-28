@@ -103,9 +103,11 @@ public final class HeapResourceManager implements ResourceManager {
         int itemIdOffset = PageHeader.SIZE + slotNo * ItemId.SIZE;
         BinaryUtil.writeU32(page, itemIdOffset, itemId);
 
-        // Update page header
+        // Update page header; only advance pdLower if this slot is new (idempotent replay).
         short pdLower = BinaryUtil.readU16(page, PageHeader.OFFSET_PD_LOWER);
-        BinaryUtil.writeU16(page, PageHeader.OFFSET_PD_LOWER, (short) (pdLower + ItemId.SIZE));
+        if (slotNo >= (pdLower - PageHeader.SIZE) / ItemId.SIZE) {
+            BinaryUtil.writeU16(page, PageHeader.OFFSET_PD_LOWER, (short) (pdLower + ItemId.SIZE));
+        }
         BinaryUtil.writeU16(page, PageHeader.OFFSET_PD_UPPER, (short) tupleOffset);
     }
 
@@ -130,7 +132,6 @@ public final class HeapResourceManager implements ResourceManager {
         int itemIdOffset = PageHeader.SIZE + slotNo * ItemId.SIZE;
         int rawItemId = page.getInt(itemIdOffset);
         int tupleOffset = ItemId.offset(rawItemId);
-        int tupleLength = ItemId.length(rawItemId);
 
         // Set xmax so MVCC visibility governs this tuple; ItemId stays FLAGS_NORMAL.
         HeapTupleHeader header = HeapTupleHeader.readFrom(page, tupleOffset);
@@ -197,6 +198,12 @@ public final class HeapResourceManager implements ResourceManager {
 
         // Update old tuple in-place: xmax chains it to the new version.
         // ItemId stays FLAGS_NORMAL — MVCC visibility governs which version readers see.
+        short currentPdLower = BinaryUtil.readU16(page, PageHeader.OFFSET_PD_LOWER);
+        int currentSlotCount = (currentPdLower - PageHeader.SIZE) / ItemId.SIZE;
+        if (oldSlotNo >= currentSlotCount) {
+            throw new com.coredb.util.CorruptionException(
+                "redoUpdate: oldSlotNo " + oldSlotNo + " out of bounds (slots=" + currentSlotCount + ")");
+        }
         int oldItemIdOffset = PageHeader.SIZE + oldSlotNo * ItemId.SIZE;
         int oldRawItemId = page.getInt(oldItemIdOffset);
         int oldTupleOffset = ItemId.offset(oldRawItemId);
