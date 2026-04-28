@@ -4,8 +4,13 @@ import com.coredb.catalog.ControlFile;
 import com.coredb.mvcc.Snapshot;
 import com.coredb.mvcc.SnapshotManager;
 import com.coredb.util.TxnException;
+import com.coredb.wal.XLogRecord;
+import com.coredb.wal.XLogResourceManager;
+import com.coredb.wal.XLogWriter;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 
 /**
  * Manages transaction lifecycle: begin, commit, rollback.
@@ -22,13 +27,20 @@ public final class TransactionManager {
     private final ControlFile controlFile;
     private final SnapshotManager snapshotManager;
     private final ClogManager clog;
+    private final XLogWriter xlogWriter;
 
     private Transaction currentTx;
 
     public TransactionManager(ControlFile controlFile, SnapshotManager snapshotManager, ClogManager clog) {
+        this(controlFile, snapshotManager, clog, null);
+    }
+
+    public TransactionManager(ControlFile controlFile, SnapshotManager snapshotManager,
+                               ClogManager clog, XLogWriter xlogWriter) {
         this.controlFile = controlFile;
         this.snapshotManager = snapshotManager;
         this.clog = clog;
+        this.xlogWriter = xlogWriter;
     }
 
     /**
@@ -54,16 +66,111 @@ public final class TransactionManager {
         return currentTx;
     }
 
-    public void commit(Transaction tx) {
+    /**
+     * Commits a transaction with strict WAL ordering.
+     *
+     * <p>Order matters for durability and crash recovery:
+     * <ol>
+     *   <li>Append XACT_COMMIT WAL record</li>
+     *   <li>Flush WAL (durability point)</li>
+     *   <li>Mark committed in clog</li>
+     *   <li>Flush clog</li>
+     *   <li>Remove from active set</li>
+     *   <li>Set transaction state to COMMITTED</li>
+     * </ol>
+     */
+    public void commit(Transaction tx) throws IOException {
         validateActive(tx);
+
+        if (xlogWriter != null) {
+            // 1. Encode payload: (xid, timestamp)
+            byte[] payload = encodeCommitPayload(tx.xid(), System.currentTimeMillis());
+
+            // 2. Append XACT_COMMIT WAL record
+            long commitLsn = xlogWriter.append(
+                XLogRecord.RMGR_XLOG,
+                XLogResourceManager.XACT_COMMIT,
+                tx.xid(),
+                0,  // tableOid = 0 (no specific table)
+                0,  // pageId = 0 (no specific page)
+                payload
+            );
+
+            // 3. Flush WAL - this is the durability point
+            xlogWriter.flushUpTo(commitLsn);
+        }
+
+        // 4. Mark committed in clog
         clog.setCommitted(tx.xid());
+
+        // 5. Flush clog
+        clog.flush();
+
+        // 6-7. Remove from active set and set state
         finishTransaction(tx, Transaction.State.COMMITTED);
     }
 
-    public void rollback(Transaction tx) {
+    /**
+     * Rolls back a transaction with WAL ordering.
+     *
+     * <p>Order:
+     * <ol>
+     *   <li>Append XACT_ABORT WAL record</li>
+     *   <li>Flush WAL (optional but recommended)</li>
+     *   <li>Mark aborted in clog</li>
+     *   <li>Flush clog</li>
+     *   <li>Remove from active set</li>
+     *   <li>Set transaction state to ABORTED</li>
+     * </ol>
+     */
+    public void rollback(Transaction tx) throws IOException {
         validateActive(tx);
+
+        if (xlogWriter != null) {
+            // 1. Encode payload: (xid)
+            byte[] payload = encodeAbortPayload(tx.xid());
+
+            // 2. Append XACT_ABORT WAL record
+            long abortLsn = xlogWriter.append(
+                XLogRecord.RMGR_XLOG,
+                XLogResourceManager.XACT_ABORT,
+                tx.xid(),
+                0,  // tableOid = 0
+                0,  // pageId = 0
+                payload
+            );
+
+            // 3. Flush WAL (optional but makes clog match WAL)
+            xlogWriter.flushUpTo(abortLsn);
+        }
+
+        // 4. Mark aborted in clog
         clog.setAborted(tx.xid());
+
+        // 5. Flush clog
+        clog.flush();
+
+        // 6-7. Remove from active set and set state
         finishTransaction(tx, Transaction.State.ABORTED);
+    }
+
+    /**
+     * Encodes commit payload: (xid as int, timestamp as long) = 12 bytes.
+     */
+    private byte[] encodeCommitPayload(int xid, long timestamp) {
+        ByteBuffer buf = ByteBuffer.allocate(12).order(ByteOrder.BIG_ENDIAN);
+        buf.putInt(xid);
+        buf.putLong(timestamp);
+        return buf.array();
+    }
+
+    /**
+     * Encodes abort payload: (xid as int) = 4 bytes.
+     */
+    private byte[] encodeAbortPayload(int xid) {
+        ByteBuffer buf = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN);
+        buf.putInt(xid);
+        return buf.array();
     }
 
     /**

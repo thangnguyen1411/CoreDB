@@ -16,6 +16,8 @@ public final class XLogResourceManager implements ResourceManager {
 
     // Operation codes
     public static final byte CHECKPOINT = 0x20;
+    public static final byte XACT_COMMIT = 0x30;
+    public static final byte XACT_ABORT = 0x31;
 
     @Override
     public byte getResourceManagerId() {
@@ -28,12 +30,17 @@ public final class XLogResourceManager implements ResourceManager {
         // CHECKPOINT records affect the control file, which is handled
         // separately by RecoveryManager.
         //
-        // If we were to support more complex XLOG operations (like timeline
-        // switches), they would be implemented here.
+        // XACT_COMMIT and XACT_ABORT are metadata records that affect clog.
+        // During recovery, clog is rebuilt from these records, so no page
+        // modifications are needed here.
 
         switch (record.info()) {
             case CHECKPOINT:
                 // No-op - control file is updated by RecoveryManager separately
+                break;
+            case XACT_COMMIT:
+            case XACT_ABORT:
+                // No-op - clog is updated separately during recovery replay
                 break;
             default:
                 throw new UnsupportedOperationException(
@@ -50,6 +57,8 @@ public final class XLogResourceManager implements ResourceManager {
     public static String operationName(byte info) {
         return switch (info) {
             case CHECKPOINT -> "CHECKPOINT";
+            case XACT_COMMIT -> "XACT_COMMIT";
+            case XACT_ABORT -> "XACT_ABORT";
             default -> "UNKNOWN(0x" + Integer.toHexString(info & 0xFF) + ")";
         };
     }

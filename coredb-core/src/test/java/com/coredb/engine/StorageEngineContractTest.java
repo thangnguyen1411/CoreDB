@@ -97,12 +97,12 @@ public abstract class StorageEngineContractTest {
     }
 
     /** Commits the given transaction. */
-    protected void commit(Transaction tx) {
+    protected void commit(Transaction tx) throws IOException {
         transactionManager.commit(tx);
     }
 
     /** Rolls back the given transaction. */
-    protected void rollback(Transaction tx) {
+    protected void rollback(Transaction tx) throws IOException {
         transactionManager.rollback(tx);
     }
 
