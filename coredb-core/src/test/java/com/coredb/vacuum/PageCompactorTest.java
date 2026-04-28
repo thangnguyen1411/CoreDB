@@ -189,9 +189,9 @@ class PageCompactorTest {
         // Live tuples must keep their slot numbers after compaction so existing
         // RecordIds (pageId, slotNo) remain valid.
         HeapPage hp = freshHeapPage(2);
-        hp.insert(new byte[]{0xAA}, (short) 1, Constants.BOOTSTRAP_XID); // slot 0
-        hp.insert(new byte[]{0xBB}, (short) 1, Constants.BOOTSTRAP_XID); // slot 1 — dead
-        hp.insert(new byte[]{0xCC}, (short) 1, Constants.BOOTSTRAP_XID); // slot 2
+        hp.insert(new byte[]{(byte) 0xAA}, (short) 1, Constants.BOOTSTRAP_XID); // slot 0
+        hp.insert(new byte[]{(byte) 0xBB}, (short) 1, Constants.BOOTSTRAP_XID); // slot 1 — dead
+        hp.insert(new byte[]{(byte) 0xCC}, (short) 1, Constants.BOOTSTRAP_XID); // slot 2
 
         int deleteXid = 3;
         hp.delete(1, deleteXid);

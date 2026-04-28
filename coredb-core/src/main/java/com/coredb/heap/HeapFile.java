@@ -674,8 +674,73 @@ public final class HeapFile implements AutoCloseable {
         return new LazyRowIterator(snapshot, clog);
     }
 
+    /**
+     * Writes a compacted version of a heap page back to the buffer pool.
+     *
+     * <p>Ordering: emit {@code HEAP_VACUUM} WAL first (using the original page bytes for
+     * any full-page write), then overwrite the frame buffer with {@code newPageBytes},
+     * then mark the frame dirty. Callers must flush WAL for index changes before calling
+     * this method.</p>
+     *
+     * @param pageId       page to rewrite (1-based, skip meta page 0)
+     * @param newPageBytes compacted page bytes produced by {@link com.coredb.vacuum.PageCompactor}
+     * @param deadSlots    slots that were removed (recorded in the WAL payload for redo)
+     * @param xid          transaction ID to stamp on the WAL record
+     * @throws IOException if the page cannot be read or written
+     */
+    public void vacuumPage(int pageId, byte[] newPageBytes, int[] deadSlots, int xid) throws IOException {
+        PinnedPage pinned = readPage(pageId);
+        Page page = pinned.page();
+        if (page.pageType() != PageType.HEAP) {
+            pinned.unpin(false);
+            return;
+        }
+
+        if (xlogWriter != null && pinned.frame() != null) {
+            byte[] walPayload = buildVacuumPayload(deadSlots);
+            // appendWalWithFPW captures the ORIGINAL page bytes if a full-page write is needed,
+            // then sets frame.pdLsn. We overwrite the frame buffer afterwards.
+            long lsn = appendWalWithFPW(
+                    pinned.frame(), page.buffer(),
+                    XLogRecord.RMGR_HEAP, HeapResourceManager.HEAP_VACUUM, pageId, walPayload);
+            // Copy compacted bytes into the frame (overwrites original content).
+            ByteBuffer frameBuf = page.buffer();
+            frameBuf.position(0);
+            frameBuf.put(newPageBytes, 0, Constants.PAGE_SIZE);
+            // Restore the LSN that appendWalWithFPW set, since we just overwrote it.
+            pinned.frame().setPdLsn(lsn);
+        } else {
+            ByteBuffer frameBuf = page.buffer();
+            frameBuf.position(0);
+            frameBuf.put(newPageBytes, 0, Constants.PAGE_SIZE);
+        }
+
+        pinned.unpin(true);
+
+        // Update FSM with the new free space count.
+        ByteBuffer newBuf = ByteBuffer.wrap(newPageBytes).order(ByteOrder.BIG_ENDIAN);
+        int pdLower = Short.toUnsignedInt(BinaryUtil.readU16(newBuf, PageHeader.OFFSET_PD_LOWER));
+        int pdUpper = Short.toUnsignedInt(BinaryUtil.readU16(newBuf, PageHeader.OFFSET_PD_UPPER));
+        fsm.updatePage(pageId, pdUpper - pdLower);
+    }
+
+    private byte[] buildVacuumPayload(int[] deadSlots) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        DataOutputStream dos = new DataOutputStream(baos);
+        dos.writeInt(deadSlots.length);
+        for (int slot : deadSlots) {
+            dos.writeInt(slot);
+        }
+        dos.flush();
+        return baos.toByteArray();
+    }
+
     public int pageCount() {
         return nextPageId;
+    }
+
+    public FreeSpaceMap fsm() {
+        return fsm;
     }
 
     public void flush() throws IOException {

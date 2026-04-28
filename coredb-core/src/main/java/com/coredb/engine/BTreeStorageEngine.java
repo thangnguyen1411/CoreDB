@@ -113,6 +113,14 @@ public class BTreeStorageEngine implements StorageEngine {
         pkIndex = null;
     }
 
+    public HeapFile heap() {
+        return heap;
+    }
+
+    public BTree pkIndex() {
+        return pkIndex;
+    }
+
     @Override
     public void put(long pk, Row row) throws IOException {
         // Uses BOOTSTRAP_XID for now; wired to the real transaction XID later.

@@ -139,6 +139,29 @@ public final class FreeSpaceMap {
     }
 
     /**
+     * Returns the total estimated free bytes across all tracked pages.
+     * Each category byte is decoded as {@code category * 32} bytes.
+     */
+    public long totalFreeEstimate() {
+        long total = 0;
+        for (byte cat : categories) {
+            total += (cat & 0xFF) * 32L;
+        }
+        return total;
+    }
+
+    /**
+     * Returns the number of data pages with at least one free byte (category > 0).
+     */
+    public int pagesWithFreeSpace() {
+        int count = 0;
+        for (byte cat : categories) {
+            if ((cat & 0xFF) > 0) count++;
+        }
+        return count;
+    }
+
+    /**
      * Extends the tracked page count to {@code newPageCount}.
      * New entries are zero-filled (category 0 = full).
      *

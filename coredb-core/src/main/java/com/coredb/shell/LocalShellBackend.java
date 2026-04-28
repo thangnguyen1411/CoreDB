@@ -10,9 +10,14 @@ import com.coredb.catalog.Catalog;
 import com.coredb.catalog.ColumnDefParser;
 import com.coredb.catalog.ControlFile;
 import com.coredb.catalog.TableMeta;
+import com.coredb.engine.BTreeStorageEngine;
 import com.coredb.engine.StorageEngine;
+import com.coredb.vacuum.VacuumExecutor;
+import com.coredb.vacuum.VacuumStats;
+import com.coredb.fsm.FreeSpaceMap;
 import com.coredb.heap.HeapFile;
 import com.coredb.heap.RecordId;
+import com.coredb.mvcc.Snapshot;
 import com.coredb.index.BTreeLeafPage;
 import com.coredb.index.IndexFile;
 import com.coredb.index.IndexPageLayout;
@@ -94,6 +99,8 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             case "checkpoint" -> handleCheckpoint();
             case "recovery-status" -> handleRecoveryStatus();
             case "clog-status" -> handleClogStatus(args);
+            case "vacuum" -> handleVacuum(args);
+            case "vacuum-stats" -> handleVacuumStats(args);
             case "help" -> formatHelp();
             default -> "unknown command: " +
             command +
@@ -216,7 +223,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
 
         try (HeapFile hf = HeapFile.open(tablePath, oid, schemaForOid(oid))) {
             Row row = Row.of(id, name, age);
-            RecordId rid = hf.insert(row);
+            RecordId rid = hf.insert(row, Constants.BOOTSTRAP_XID);
             return String.format(
                 "rid=%s  (xmin=%d xmax=%d)",
                 rid,
@@ -265,7 +272,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         }
 
         try (HeapFile hf = HeapFile.open(tablePath, oid, schemaForOid(oid))) {
-            Optional<Row> row = hf.get(rid);
+            Optional<Row> row = hf.get(rid, Snapshot.BOOTSTRAP, db.clog());
             if (row.isPresent()) {
                 return row.get().values().toString();
             } else {
@@ -301,7 +308,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             StringBuilder sb = new StringBuilder();
             int count = 0;
 
-            Iterator<Row> it = hf.scan();
+            Iterator<Row> it = hf.scan(Snapshot.BOOTSTRAP, db.clog());
             while (it.hasNext()) {
                 Row row = it.next();
                 sb.append(row.values().toString()).append("\n");
@@ -357,7 +364,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         }
 
         try (HeapFile hf = HeapFile.open(tablePath, oid, schemaForOid(oid))) {
-            hf.delete(rid);
+            hf.delete(rid, Constants.BOOTSTRAP_XID);
             return "ok (t_xmax set)";
         } catch (Exception e) {
             return "error: " + e.getMessage();
@@ -392,7 +399,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
 
             // Count live rows by scanning
             int liveRows = 0;
-            Iterator<Row> it = hf.scan();
+            Iterator<Row> it = hf.scan(Snapshot.BOOTSTRAP, db.clog());
             while (it.hasNext()) {
                 it.next();
                 liveRows++;
@@ -1170,6 +1177,68 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
      * Handles: clog-status [xid]
      * Shows transaction status log summary or specific XID status.
      */
+    private String handleVacuum(String args) {
+        if (args.isBlank()) {
+            return "usage: vacuum <table>";
+        }
+        String tableName = args.trim();
+        try {
+            Catalog cat = getCatalog();
+            Optional<TableMeta> metaOpt = cat.openTable(tableName);
+            if (metaOpt.isEmpty()) {
+                return "error: unknown table: " + tableName;
+            }
+            TableMeta meta = metaOpt.get();
+            StorageEngine engine = db.getEngineForTable(meta);
+            if (!(engine instanceof BTreeStorageEngine btEngine)) {
+                return "error: vacuum only supported for BTreeStorageEngine";
+            }
+            int oldestXmin = db.snapshotManager().oldestActiveXmin();
+            VacuumExecutor vacuum = new VacuumExecutor(
+                    btEngine.heap(),
+                    List.of(btEngine.pkIndex()),
+                    db.xlogWriter(),
+                    db.clog());
+            VacuumStats stats = vacuum.vacuum(oldestXmin);
+            return String.format(
+                    "scanned %d pages  dead-tuples=%d  index-entries-removed=%d  reclaimed=%d B",
+                    stats.pagesScanned(), stats.deadTuples(),
+                    stats.indexEntriesRemoved(), stats.bytesReclaimed());
+        } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    private String handleVacuumStats(String args) {
+        if (args.isBlank()) {
+            return "usage: vacuum-stats <table>";
+        }
+        String tableName = args.trim();
+        try {
+            Catalog cat = getCatalog();
+            Optional<TableMeta> metaOpt = cat.openTable(tableName);
+            if (metaOpt.isEmpty()) {
+                return "error: unknown table: " + tableName;
+            }
+            TableMeta meta = metaOpt.get();
+            StorageEngine engine = db.getEngineForTable(meta);
+            if (!(engine instanceof BTreeStorageEngine btEngine)) {
+                return "error: vacuum-stats only supported for BTreeStorageEngine";
+            }
+            HeapFile heap = btEngine.heap();
+            FreeSpaceMap fsm = heap.fsm();
+            int pages = heap.pageCount() - 1; // data pages (excluding header page 0)
+            long totalFree = fsm.totalFreeEstimate();
+            int pagesWithFree = fsm.pagesWithFreeSpace();
+            long avgFree = pages > 0 ? totalFree / pages : 0;
+            return String.format(
+                "pages=%d  pages-with-free=%d  total-free=%d KB  avg-free-per-page=%d KB",
+                pages, pagesWithFree, totalFree / 1024, avgFree / 1024);
+        } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
     private String handleClogStatus(String args) {
         Path pgXactPath = db.dataPath().resolve("global/pg_xact");
         if (!Files.exists(pgXactPath)) {

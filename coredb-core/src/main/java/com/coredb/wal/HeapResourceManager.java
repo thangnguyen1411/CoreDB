@@ -28,6 +28,7 @@ public final class HeapResourceManager implements ResourceManager {
     public static final byte HEAP_INSERT = 0x01;
     public static final byte HEAP_DELETE = 0x02;
     public static final byte HEAP_UPDATE = 0x03;
+    public static final byte HEAP_VACUUM = 0x04;
 
     @Override
     public byte getResourceManagerId() {
@@ -48,6 +49,9 @@ public final class HeapResourceManager implements ResourceManager {
                 break;
             case HEAP_UPDATE:
                 redoUpdate(record, targetPage);
+                break;
+            case HEAP_VACUUM:
+                redoVacuum(record, targetPage);
                 break;
             default:
                 throw new UnsupportedOperationException(
@@ -217,5 +221,75 @@ public final class HeapResourceManager implements ResourceManager {
         oldHeader.setXmax(record.xid());
         oldHeader.setCtid(newRid);
         oldHeader.writeTo(page, oldTupleOffset);
+    }
+
+    /**
+     * Redo a HEAP_VACUUM operation.
+     *
+     * <p>Payload format:
+     * <pre>
+     * Offset  Size  Field
+     * 0       4     deadSlotCount
+     * 4       4*N   deadSlots (one int per dead slot)
+     * </pre>
+     *
+     * <p>Reapplies the same compaction that was performed at VACUUM time: marks dead slots
+     * LP_UNUSED and repacks live tuple bytes toward pd_special, updating pd_upper.</p>
+     */
+    private void redoVacuum(XLogRecord record, ByteBuffer page) {
+        byte[] data = record.data();
+        ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN);
+
+        int deadCount = buf.getInt();
+        boolean[] dead = new boolean[0];
+
+        int pdLower = Short.toUnsignedInt(BinaryUtil.readU16(page, PageHeader.OFFSET_PD_LOWER));
+        int slotCount = (pdLower - PageHeader.SIZE) / ItemId.SIZE;
+
+        if (slotCount > 0) {
+            dead = new boolean[slotCount];
+        }
+
+        for (int i = 0; i < deadCount; i++) {
+            int slot = buf.getInt();
+            if (slot < slotCount) {
+                dead[slot] = true;
+            }
+        }
+
+        // Repack live tuples from pdSpecial downward (same as PageCompactor.compact second pass).
+        int pdSpecial = Short.toUnsignedInt(BinaryUtil.readU16(page, PageHeader.OFFSET_PD_SPECIAL));
+        int newUpper = pdSpecial;
+
+        for (int slot = 0; slot < slotCount; slot++) {
+            int itemIdOff = PageHeader.SIZE + slot * ItemId.SIZE;
+            int rawItemId = page.getInt(itemIdOff);
+
+            if (dead[slot]) {
+                page.putInt(itemIdOff, 0); // LP_UNUSED
+                continue;
+            }
+
+            if (ItemId.flags(rawItemId) != ItemId.FLAGS_NORMAL) {
+                page.putInt(itemIdOff, 0); // non-normal non-dead → UNUSED
+                continue;
+            }
+
+            int oldOff = ItemId.offset(rawItemId);
+            int length  = ItemId.length(rawItemId);
+            newUpper -= length;
+
+            // Shift tuple bytes to new location.
+            // Must copy backwards to avoid overlap (newUpper <= oldOff always holds
+            // since we pack strictly downward), but forward copy is safe here because
+            // newUpper <= oldOff.
+            for (int b = 0; b < length; b++) {
+                page.put(newUpper + b, page.get(oldOff + b));
+            }
+
+            page.putInt(itemIdOff, ItemId.pack(newUpper, ItemId.FLAGS_NORMAL, length));
+        }
+
+        BinaryUtil.writeU16(page, PageHeader.OFFSET_PD_UPPER, (short) newUpper);
     }
 }

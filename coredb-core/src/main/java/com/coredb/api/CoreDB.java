@@ -7,6 +7,7 @@ import com.coredb.catalog.ControlFile;
 import com.coredb.catalog.TableMeta;
 import com.coredb.engine.StorageEngine;
 import com.coredb.engine.StorageEngineFactory;
+import com.coredb.mvcc.SnapshotManager;
 import com.coredb.recovery.RecoveryManager;
 import com.coredb.recovery.RecoveryStats;
 import com.coredb.txn.ClogManager;
@@ -33,6 +34,7 @@ public final class CoreDB implements AutoCloseable {
     private final XLogWriter xlogWriter;
     private final ClogManager clog;
     private final Catalog catalog;
+    private final SnapshotManager snapshotManager;
     private final Map<Integer, StorageEngine> engineCache;
     private final RecoveryStats lastRecoveryStats;
     private volatile boolean closed = false;
@@ -45,6 +47,7 @@ public final class CoreDB implements AutoCloseable {
         XLogWriter xlogWriter,
         ClogManager clog,
         Catalog catalog,
+        SnapshotManager snapshotManager,
         RecoveryStats lastRecoveryStats
     ) {
         this.dataPath = dataPath;
@@ -54,6 +57,7 @@ public final class CoreDB implements AutoCloseable {
         this.xlogWriter = xlogWriter;
         this.clog = clog;
         this.catalog = catalog;
+        this.snapshotManager = snapshotManager;
         this.engineCache = new ConcurrentHashMap<>();
         this.lastRecoveryStats = lastRecoveryStats;
         log.debug(
@@ -131,7 +135,12 @@ public final class CoreDB implements AutoCloseable {
         // Create Catalog with WAL support (opens core_class and core_attribute heap files via buffer pool)
         Catalog catalog = new Catalog(dataPath, controlFile, bufferPool, xlogWriter, Constants.BOOTSTRAP_XID, clog);
 
-        return new CoreDB(dataPath, config, controlFile, bufferPool, xlogWriter, clog, catalog, recoveryStats);
+        // SnapshotManager tracks active transactions for MVCC snapshot isolation.
+        // Initialized from the persisted nextXid so that all pre-existing committed
+        // transactions are behind the initial horizon.
+        SnapshotManager snapshotManager = new SnapshotManager(controlFile.nextXid());
+
+        return new CoreDB(dataPath, config, controlFile, bufferPool, xlogWriter, clog, catalog, snapshotManager, recoveryStats);
     }
 
     public Path dataPath() {
@@ -202,6 +211,20 @@ public final class CoreDB implements AutoCloseable {
      */
     public XLogWriter xlogWriter() {
         return xlogWriter;
+    }
+
+    /**
+     * Returns the commit-log manager for this database instance.
+     */
+    public ClogManager clog() {
+        return clog;
+    }
+
+    /**
+     * Returns the snapshot manager for this database instance.
+     */
+    public SnapshotManager snapshotManager() {
+        return snapshotManager;
     }
 
     public boolean isClosed() {
