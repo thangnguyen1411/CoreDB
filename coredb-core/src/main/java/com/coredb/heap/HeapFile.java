@@ -15,6 +15,7 @@ import com.coredb.txn.ClogManager;
 import com.coredb.util.BinaryUtil;
 import com.coredb.util.Constants;
 import com.coredb.util.CorruptionException;
+import com.coredb.util.PageFullException;
 import com.coredb.util.StorageException;
 import com.coredb.wal.HeapResourceManager;
 import com.coredb.wal.XLogRecord;
@@ -550,7 +551,7 @@ public final class HeapFile implements AutoCloseable {
      * @param newRow  the replacement row data
      * @param xid     transaction ID performing the update
      * @return RecordId of the newly inserted version
-     * @throws com.coredb.util.PageFullException if the page has no room for the new version
+     * @throws PageFullException if the page has no room for the new version
      */
     public RecordId update(RecordId rid, Row newRow, int xid) throws IOException {
         if (rid.pageId() < 1 || rid.pageId() >= pageCount()) {
@@ -582,6 +583,13 @@ public final class HeapFile implements AutoCloseable {
         if (existingHeader.xmax() != Constants.INVALID_XID) {
             pinned.unpin(false);
             throw new StorageException("slot " + rid.slotNo() + " is already deleted");
+        }
+
+        int headerSize = HeapTupleHeader.computeHeaderSize(natts);
+        int tupleSize = headerSize + dataBytes.length;
+        if (heapPage.freeBytes() < tupleSize + ItemId.SIZE) {
+            pinned.unpin(false);
+            throw new PageFullException("page " + rid.pageId() + " has no room for new tuple version");
         }
 
         int newSlotNo = heapPage.slotCount();
