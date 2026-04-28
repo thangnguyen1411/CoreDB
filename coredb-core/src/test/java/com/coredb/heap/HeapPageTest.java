@@ -244,6 +244,148 @@ class HeapPageTest {
         assertThat(h.isNull(3)).isFalse();
     }
 
+    // ─── update() ──────────────────────────────────────────────────────────────
+
+    @Test
+    void update_returnsNewRecordId() {
+        RecordId oldRid = heapPage.insert(new byte[]{1, 2, 3}, (short) 0, Constants.BOOTSTRAP_XID);
+        RecordId newRid = heapPage.update(oldRid.slotNo(), new byte[]{4, 5, 6}, (short) 0, new byte[0], 5);
+
+        assertThat(newRid.pageId()).isEqualTo(1);
+        assertThat(newRid.slotNo()).isEqualTo(1);
+    }
+
+    @Test
+    void update_oldTuple_hasXmaxAndCtidPointingToNewVersion() {
+        RecordId oldRid = heapPage.insert(new byte[]{1}, (short) 0, Constants.BOOTSTRAP_XID);
+        RecordId newRid = heapPage.update(oldRid.slotNo(), new byte[]{2}, (short) 0, new byte[0], 7);
+
+        HeapTupleHeader oldHeader = headerAt(heapPage, oldRid.slotNo());
+        assertThat(oldHeader.xmax()).isEqualTo(7);
+        assertThat(oldHeader.ctid()).isEqualTo(newRid);
+    }
+
+    @Test
+    void update_newTuple_hasXminAndCtidPointingToSelf() {
+        heapPage.insert(new byte[]{1}, (short) 0, Constants.BOOTSTRAP_XID);
+        RecordId newRid = heapPage.update(0, new byte[]{2}, (short) 0, new byte[0], 8);
+
+        HeapTupleHeader newHeader = headerAt(heapPage, newRid.slotNo());
+        assertThat(newHeader.xmin()).isEqualTo(8);
+        assertThat(newHeader.xmax()).isEqualTo(Constants.INVALID_XID);
+        assertThat(newHeader.ctid()).isEqualTo(newRid);
+    }
+
+    @Test
+    void update_bothVersionsOnSamePage_bothNormalFlags() {
+        RecordId oldRid = heapPage.insert(new byte[]{1}, (short) 0, Constants.BOOTSTRAP_XID);
+        RecordId newRid = heapPage.update(oldRid.slotNo(), new byte[]{2}, (short) 0, new byte[0], 9);
+
+        // Both slots must have FLAGS_NORMAL so MVCC visibility can filter them.
+        int oldItemId = heapPage.page().readItemId(oldRid.slotNo());
+        int newItemId = heapPage.page().readItemId(newRid.slotNo());
+        assertThat(com.coredb.page.ItemId.flags(oldItemId)).isEqualTo(com.coredb.page.ItemId.FLAGS_NORMAL);
+        assertThat(com.coredb.page.ItemId.flags(newItemId)).isEqualTo(com.coredb.page.ItemId.FLAGS_NORMAL);
+    }
+
+    @Test
+    void update_oldVersionInvisible_newVersionVisible_toSnapshotAfterCommit() throws Exception {
+        // Insert by xid=5
+        RecordId oldRid = heapPage.insert(new byte[]{1}, (short) 0, 5);
+        clog.setCommitted(5);
+
+        // Update by xid=6
+        heapPage.update(oldRid.slotNo(), new byte[]{2}, (short) 0, new byte[0], 6);
+        clog.setCommitted(6);
+
+        // Snapshot taken after both committed: only new version is visible.
+        Snapshot snap = new Snapshot(10, 20, java.util.Collections.emptySet());
+        List<RecordId> visible = heapPage.scan(snap, clog);
+
+        assertThat(visible).hasSize(1);
+        assertThat(visible.get(0).slotNo()).isEqualTo(1); // slot 1 is the new version
+    }
+
+    @Test
+    void update_oldVersionVisible_toSnapshotBeforeUpdateCommitted() throws Exception {
+        // Insert by xid=5
+        RecordId oldRid = heapPage.insert(new byte[]{1}, (short) 0, 5);
+        clog.setCommitted(5);
+
+        // Update by xid=6, but xid=6 is in-progress from the snapshot's POV
+        heapPage.update(oldRid.slotNo(), new byte[]{2}, (short) 0, new byte[0], 6);
+        // xid=6 is NOT committed yet
+
+        // Snapshot where xid=6 is active
+        Snapshot snap = new Snapshot(5, 7, java.util.Set.of(6));
+        List<RecordId> visible = heapPage.scan(snap, clog);
+
+        // Only old version visible (xmax=6 is in-progress, so delete is not visible)
+        assertThat(visible).hasSize(1);
+        assertThat(visible.get(0)).isEqualTo(oldRid);
+    }
+
+    // ─── hint bits ─────────────────────────────────────────────────────────────
+
+    @Test
+    void scan_setsXminCommittedHintBit_afterClogLookup() throws Exception {
+        RecordId rid = heapPage.insert(new byte[]{1}, (short) 0, 5);
+        clog.setCommitted(5);
+
+        Snapshot snap = new Snapshot(7, 10, java.util.Collections.emptySet());
+        heapPage.scan(snap, clog);
+
+        // Hint bit must be written back to the page buffer.
+        HeapTupleHeader header = headerAt(heapPage, rid.slotNo());
+        assertThat(header.hasInfomaskFlag(HeapTupleHeader.XMIN_COMMITTED)).isTrue();
+    }
+
+    @Test
+    void scan_setsXminInvalidHintBit_forAbortedInsert() throws Exception {
+        heapPage.insert(new byte[]{1}, (short) 0, 5);
+        clog.setAborted(5);
+
+        Snapshot snap = new Snapshot(7, 10, java.util.Collections.emptySet());
+        heapPage.scan(snap, clog);
+
+        HeapTupleHeader header = headerAt(heapPage, 0);
+        assertThat(header.hasInfomaskFlag(HeapTupleHeader.XMIN_INVALID)).isTrue();
+    }
+
+    @Test
+    void scan_hintBit_flagsPageAsDirty() throws Exception {
+        heapPage.insert(new byte[]{1}, (short) 0, 5);
+        clog.setCommitted(5);
+
+        Snapshot snap = new Snapshot(7, 10, java.util.Collections.emptySet());
+        heapPage.scan(snap, clog);
+
+        assertThat(heapPage.wasHintBitsModified()).isTrue();
+    }
+
+    @Test
+    void scan_noHintBitSet_whenXidIsInFuture() throws Exception {
+        heapPage.insert(new byte[]{1}, (short) 0, 25);
+        clog.setCommitted(25);
+
+        // xmin=25 >= snap.xmax=20 → filtered before clog — no hint bit
+        Snapshot snap = new Snapshot(10, 20, java.util.Collections.emptySet());
+        heapPage.scan(snap, clog);
+
+        HeapTupleHeader header = headerAt(heapPage, 0);
+        assertThat(header.hasInfomaskFlag(HeapTupleHeader.XMIN_COMMITTED)).isFalse();
+        assertThat(header.hasInfomaskFlag(HeapTupleHeader.XMIN_INVALID)).isFalse();
+        assertThat(heapPage.wasHintBitsModified()).isFalse();
+    }
+
+    // ─── helpers ───────────────────────────────────────────────────────────────
+
+    private static HeapTupleHeader headerAt(HeapPage hp, int slotNo) {
+        int raw = hp.page().readItemId(slotNo);
+        int offset = com.coredb.page.ItemId.offset(raw);
+        return HeapTupleHeader.readFrom(hp.page().buffer(), offset);
+    }
+
     private static byte[] dataOf(byte[] raw) {
         ByteBuffer buf = ByteBuffer.wrap(raw).order(ByteOrder.BIG_ENDIAN);
         HeapTupleHeader h = HeapTupleHeader.readFrom(buf, 0);

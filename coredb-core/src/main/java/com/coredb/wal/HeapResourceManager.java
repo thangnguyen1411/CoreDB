@@ -5,6 +5,7 @@ import com.coredb.heap.RecordId;
 import com.coredb.page.ItemId;
 import com.coredb.page.PageHeader;
 import com.coredb.util.BinaryUtil;
+import com.coredb.util.CorruptionException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -103,9 +104,11 @@ public final class HeapResourceManager implements ResourceManager {
         int itemIdOffset = PageHeader.SIZE + slotNo * ItemId.SIZE;
         BinaryUtil.writeU32(page, itemIdOffset, itemId);
 
-        // Update page header
+        // Update page header; only advance pdLower if this slot is new (idempotent replay).
         short pdLower = BinaryUtil.readU16(page, PageHeader.OFFSET_PD_LOWER);
-        BinaryUtil.writeU16(page, PageHeader.OFFSET_PD_LOWER, (short) (pdLower + ItemId.SIZE));
+        if (slotNo >= (pdLower - PageHeader.SIZE) / ItemId.SIZE) {
+            BinaryUtil.writeU16(page, PageHeader.OFFSET_PD_LOWER, (short) (pdLower + ItemId.SIZE));
+        }
         BinaryUtil.writeU16(page, PageHeader.OFFSET_PD_UPPER, (short) tupleOffset);
     }
 
@@ -118,7 +121,7 @@ public final class HeapResourceManager implements ResourceManager {
      * 0       4     slotNo         slot to delete
      * </pre>
      *
-     * <p>Sets the tuple's t_xmax to BOOTSTRAP_XID and marks the ItemId as DEAD.</p>
+     * <p>Sets the tuple's t_xmax to the deleting XID; ItemId stays FLAGS_NORMAL.</p>
      */
     private void redoDelete(XLogRecord record, ByteBuffer page) {
         byte[] data = record.data();
@@ -129,17 +132,16 @@ public final class HeapResourceManager implements ResourceManager {
         // Read the ItemId to find tuple offset
         int itemIdOffset = PageHeader.SIZE + slotNo * ItemId.SIZE;
         int rawItemId = page.getInt(itemIdOffset);
+        if (ItemId.flags(rawItemId) != ItemId.FLAGS_NORMAL) {
+            throw new CorruptionException(
+                "redoDelete: slot " + slotNo + " is not FLAGS_NORMAL (flags=" + ItemId.flags(rawItemId) + ")");
+        }
         int tupleOffset = ItemId.offset(rawItemId);
-        int tupleLength = ItemId.length(rawItemId);
 
-        // Read and update the tuple header
+        // Set xmax so MVCC visibility governs this tuple; ItemId stays FLAGS_NORMAL.
         HeapTupleHeader header = HeapTupleHeader.readFrom(page, tupleOffset);
-        header.setXmax(com.coredb.util.Constants.BOOTSTRAP_XID);
+        header.setXmax(record.xid());
         header.writeTo(page, tupleOffset);
-
-        // Mark ItemId as DEAD (keep same offset and length)
-        int deadItemId = ItemId.pack(tupleOffset, ItemId.FLAGS_DEAD, tupleLength);
-        page.putInt(itemIdOffset, deadItemId);
     }
 
     /**
@@ -174,44 +176,46 @@ public final class HeapResourceManager implements ResourceManager {
         byte[] tupleBytes = new byte[tupleDataSize];
         buf.get(tupleBytes);
 
-        // First, mark the old tuple as deleted
-        int oldItemIdOffset = PageHeader.SIZE + oldSlotNo * ItemId.SIZE;
-        int oldRawItemId = page.getInt(oldItemIdOffset);
-        int oldTupleOffset = ItemId.offset(oldRawItemId);
-        int oldTupleLength = ItemId.length(oldRawItemId);
-
-        HeapTupleHeader oldHeader = HeapTupleHeader.readFrom(page, oldTupleOffset);
-        oldHeader.setXmax(com.coredb.util.Constants.BOOTSTRAP_XID);
-        oldHeader.writeTo(page, oldTupleOffset);
-
-        int deadItemId = ItemId.pack(oldTupleOffset, ItemId.FLAGS_DEAD, oldTupleLength);
-        page.putInt(oldItemIdOffset, deadItemId);
-
-        // Then, insert the new tuple
+        // Insert new tuple version at the top of free space.
         int headerSize = HeapTupleHeader.computeHeaderSize(natts);
         int tupleSize = headerSize + tupleDataSize;
 
         short pdUpper = BinaryUtil.readU16(page, PageHeader.OFFSET_PD_UPPER);
-        int tupleOffset = pdUpper - tupleSize;
+        int newTupleOffset = pdUpper - tupleSize;
 
-        RecordId self = new RecordId(record.pageId(), newSlotNo);
-        HeapTupleHeader newHeader = new HeapTupleHeader(self, natts, bitmap);
-        newHeader.writeTo(page, tupleOffset);
+        RecordId newRid = new RecordId(record.pageId(), newSlotNo);
+        HeapTupleHeader newHeader = new HeapTupleHeader(newRid, natts, bitmap);
+        newHeader.setXmin(record.xid());
+        newHeader.writeTo(page, newTupleOffset);
 
         for (int i = 0; i < tupleDataSize; i++) {
-            page.put(tupleOffset + headerSize + i, tupleBytes[i]);
+            page.put(newTupleOffset + headerSize + i, tupleBytes[i]);
         }
 
-        int newItemId = ItemId.pack(tupleOffset, ItemId.FLAGS_NORMAL, tupleSize);
-        int newItemIdOffset = PageHeader.SIZE + newSlotNo * ItemId.SIZE;
-        BinaryUtil.writeU32(page, newItemIdOffset, newItemId);
+        int newItemId = ItemId.pack(newTupleOffset, ItemId.FLAGS_NORMAL, tupleSize);
+        BinaryUtil.writeU32(page, PageHeader.SIZE + newSlotNo * ItemId.SIZE, newItemId);
 
         short pdLower = BinaryUtil.readU16(page, PageHeader.OFFSET_PD_LOWER);
         if (newSlotNo >= (pdLower - PageHeader.SIZE) / ItemId.SIZE) {
             BinaryUtil.writeU16(page, PageHeader.OFFSET_PD_LOWER, (short) (pdLower + ItemId.SIZE));
         }
-        if (tupleOffset < pdUpper) {
-            BinaryUtil.writeU16(page, PageHeader.OFFSET_PD_UPPER, (short) tupleOffset);
+        BinaryUtil.writeU16(page, PageHeader.OFFSET_PD_UPPER, (short) newTupleOffset);
+
+        // Update old tuple in-place: xmax chains it to the new version.
+        // ItemId stays FLAGS_NORMAL — MVCC visibility governs which version readers see.
+        short currentPdLower = BinaryUtil.readU16(page, PageHeader.OFFSET_PD_LOWER);
+        int currentSlotCount = (currentPdLower - PageHeader.SIZE) / ItemId.SIZE;
+        if (oldSlotNo >= currentSlotCount) {
+            throw new CorruptionException(
+                "redoUpdate: oldSlotNo " + oldSlotNo + " out of bounds (slots=" + currentSlotCount + ")");
         }
+        int oldItemIdOffset = PageHeader.SIZE + oldSlotNo * ItemId.SIZE;
+        int oldRawItemId = page.getInt(oldItemIdOffset);
+        int oldTupleOffset = ItemId.offset(oldRawItemId);
+
+        HeapTupleHeader oldHeader = HeapTupleHeader.readFrom(page, oldTupleOffset);
+        oldHeader.setXmax(record.xid());
+        oldHeader.setCtid(newRid);
+        oldHeader.writeTo(page, oldTupleOffset);
     }
 }

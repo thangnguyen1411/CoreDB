@@ -2,6 +2,7 @@ package com.coredb.txn;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import com.coredb.util.CorruptionException;
 
 /**
  * Commit Log Manager interface (pg_xact equivalent).
@@ -28,7 +29,7 @@ public interface ClogManager extends AutoCloseable {
      * @param dataDir the data directory
      * @return a ClogManager instance with state loaded from disk
      * @throws IOException if file cannot be read
-     * @throws com.coredb.util.CorruptionException if magic or version check fails
+     * @throws CorruptionException if magic or version check fails
      */
     static ClogManager open(Path dataDir) throws IOException {
         return FileClogManager.open(dataDir);

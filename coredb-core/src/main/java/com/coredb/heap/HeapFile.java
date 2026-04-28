@@ -8,12 +8,14 @@ import com.coredb.fsm.FreeSpaceMap;
 import com.coredb.mvcc.Snapshot;
 import com.coredb.page.ItemId;
 import com.coredb.page.Page;
+import com.coredb.page.PageHeader;
 import com.coredb.page.PageIO;
 import com.coredb.page.PageType;
 import com.coredb.txn.ClogManager;
 import com.coredb.util.BinaryUtil;
 import com.coredb.util.Constants;
 import com.coredb.util.CorruptionException;
+import com.coredb.util.PageFullException;
 import com.coredb.util.StorageException;
 import com.coredb.wal.HeapResourceManager;
 import com.coredb.wal.XLogRecord;
@@ -508,7 +510,6 @@ public final class HeapFile implements AutoCloseable {
             return Optional.empty();
         }
 
-        // 1. Read Page
         PinnedPage pinned = readPage(recordId.pageId());
         Page page = pinned.page();
         if (page.pageType() != PageType.HEAP) {
@@ -518,29 +519,110 @@ public final class HeapFile implements AutoCloseable {
         HeapPage heapPage = new HeapPage(page);
 
         try {
-            // 2. Get raw bytes with visibility check
             Optional<byte[]> rawOpt = heapPage.get(recordId.slotNo(), snapshot, clog);
+            // Hint bits written to the page buffer must be flushed to disk eventually.
+            pinned.unpin(heapPage.wasHintBitsModified());
             if (rawOpt.isEmpty()) {
-                pinned.unpin(false);
                 return Optional.empty();
             }
             byte[] raw = rawOpt.get();
             HeapTupleHeader header = HeapTupleHeader.readFrom(
                     ByteBuffer.wrap(raw).order(ByteOrder.BIG_ENDIAN), 0);
 
-            // Extract data portion (after header)
             int hoff = header.hoff();
             byte[] data = new byte[raw.length - hoff];
             System.arraycopy(raw, hoff, data, 0, data.length);
 
-            Row row = RowSerializer.deserialize(data, schema, header);
-            pinned.unpin(false);
-            return Optional.of(row);
+            return Optional.of(RowSerializer.deserialize(data, schema, header));
         } catch (StorageException e) {
             log.debug("Failed to read row at {}: {}", recordId, e.getMessage());
-            pinned.unpin(false);
+            pinned.unpin(heapPage.wasHintBitsModified());
             return Optional.empty();
         }
+    }
+
+    /**
+     * Updates the row at {@code rid} by creating a new tuple version on the same page.
+     *
+     * <p>Sets {@code xmax=xid} and {@code ctid} on the old tuple to chain it to the
+     * new version. Emits a {@code HEAP_UPDATE} WAL record before mutating the page.</p>
+     *
+     * @param rid     RecordId of the existing tuple to supersede
+     * @param newRow  the replacement row data
+     * @param xid     transaction ID performing the update
+     * @return RecordId of the newly inserted version
+     * @throws PageFullException if the page has no room for the new version
+     */
+    public RecordId update(RecordId rid, Row newRow, int xid) throws IOException {
+        if (rid.pageId() < 1 || rid.pageId() >= pageCount()) {
+            throw new StorageException("page " + rid.pageId() + " does not exist");
+        }
+
+        SerializedRow serialized = RowSerializer.serialize(newRow, schema);
+        byte[] dataBytes = serialized.data();
+        byte[] nullBitmap = serialized.nullBitmap();
+        short natts = (short) schema.columnCount();
+
+        PinnedPage pinned = readPage(rid.pageId());
+        Page page = pinned.page();
+        if (page.pageType() != PageType.HEAP) {
+            pinned.unpin(false);
+            throw new StorageException("page " + rid.pageId() + " is not a heap page");
+        }
+        HeapPage heapPage = new HeapPage(page);
+
+        // Validate old slot is live before emitting WAL — a stale WAL record
+        // on a dead tuple would replay an invalid version chain during recovery.
+        int oldRaw = page.buffer().getInt(PageHeader.SIZE + rid.slotNo() * ItemId.SIZE);
+        if (ItemId.flags(oldRaw) != ItemId.FLAGS_NORMAL) {
+            pinned.unpin(false);
+            throw new StorageException("slot " + rid.slotNo() + " is not a live tuple");
+        }
+        int oldOffset = ItemId.offset(oldRaw);
+        HeapTupleHeader existingHeader = HeapTupleHeader.readFrom(page.buffer(), oldOffset);
+        if (existingHeader.xmax() != Constants.INVALID_XID) {
+            pinned.unpin(false);
+            throw new StorageException("slot " + rid.slotNo() + " is already deleted");
+        }
+
+        int headerSize = HeapTupleHeader.computeHeaderSize(natts);
+        int tupleSize = headerSize + dataBytes.length;
+        if (heapPage.freeBytes() < tupleSize + ItemId.SIZE) {
+            pinned.unpin(false);
+            throw new PageFullException("page " + rid.pageId() + " has no room for new tuple version");
+        }
+
+        int newSlotNo = heapPage.slotCount();
+
+        if (xlogWriter != null && pinned.frame() != null) {
+            byte[] walPayload = buildUpdateWalPayload(rid.slotNo(), newSlotNo, natts, nullBitmap, dataBytes);
+            appendWalWithFPW(
+                pinned.frame(),
+                page.buffer(),
+                XLogRecord.RMGR_HEAP,
+                HeapResourceManager.HEAP_UPDATE,
+                rid.pageId(),
+                walPayload
+            );
+        }
+
+        RecordId newRid = heapPage.update(rid.slotNo(), dataBytes, natts, nullBitmap, xid);
+        pinned.unpin(true);
+        fsm.updatePage(rid.pageId(), heapPage.freeBytes());
+        return newRid;
+    }
+
+    private byte[] buildUpdateWalPayload(int oldSlotNo, int newSlotNo, short natts,
+                                          byte[] nullBitmap, byte[] dataBytes) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        DataOutputStream dos = new DataOutputStream(baos);
+        dos.writeInt(oldSlotNo);
+        dos.writeInt(newSlotNo);
+        dos.writeShort(natts);
+        dos.write(nullBitmap);
+        dos.write(dataBytes);
+        dos.flush();
+        return baos.toByteArray();
     }
 
     public void delete(RecordId rid, int xmax) throws IOException {
@@ -825,6 +907,7 @@ public final class HeapFile implements AutoCloseable {
         private int nextPageId = 1;
         private PinnedPage currentPinned = null;
         private Page currentPage = null;
+        private HeapPage currentHeapPage = null;
         private Iterator<RecordId> currentPageRids = null;
         private Row nextRow = null;
 
@@ -867,11 +950,12 @@ public final class HeapFile implements AutoCloseable {
                     continue;
                 }
 
-                // Unpin previous page before loading next
+                // Unpin previous page before loading the next one.
                 if (currentPinned != null) {
-                    currentPinned.unpin(false);
+                    currentPinned.unpin(currentHeapPage != null && currentHeapPage.wasHintBitsModified());
                     currentPinned = null;
                     currentPage = null;
+                    currentHeapPage = null;
                 }
 
                 currentPinned = HeapFile.this.readPage(nextPageId);
@@ -881,25 +965,26 @@ public final class HeapFile implements AutoCloseable {
                     currentPinned.unpin(false);
                     currentPinned = null;
                     currentPage = null;
+                    currentHeapPage = null;
                     currentPageRids = null;
                     continue;
                 }
-                HeapPage heapPage = new HeapPage(currentPage);
-                currentPageRids = heapPage.scan(snapshot, clog).iterator();
+                currentHeapPage = new HeapPage(currentPage);
+                currentPageRids = currentHeapPage.scan(snapshot, clog).iterator();
             }
-            // End of iteration - unpin the last page
+            // End of iteration — unpin the last page.
             if (currentPinned != null) {
-                currentPinned.unpin(false);
+                currentPinned.unpin(currentHeapPage != null && currentHeapPage.wasHintBitsModified());
                 currentPinned = null;
                 currentPage = null;
+                currentHeapPage = null;
             }
             nextRow = null;
         }
 
         private Optional<Row> fetchFromCurrentPage(RecordId recordId) {
-            HeapPage heapPage = new HeapPage(currentPage);
             try {
-                Optional<byte[]> rawOpt = heapPage.get(recordId.slotNo(), snapshot, clog);
+                Optional<byte[]> rawOpt = currentHeapPage.get(recordId.slotNo(), snapshot, clog);
                 if (rawOpt.isEmpty()) {
                     return Optional.empty();
                 }
