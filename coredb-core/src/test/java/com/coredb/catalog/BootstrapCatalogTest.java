@@ -4,6 +4,8 @@ import com.coredb.api.CoreDBConfig;
 import com.coredb.api.Row;
 import com.coredb.config.EngineType;
 import com.coredb.heap.HeapFile;
+import com.coredb.mvcc.Snapshot;
+import com.coredb.txn.ClogManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -71,8 +73,9 @@ class BootstrapCatalogTest {
         BootstrapCatalog.initialize(tempDir, config);
 
         Path coreClassPath = tempDir.resolve("base/1/1000");
-        try (HeapFile hf = HeapFile.open(coreClassPath, 1000, BootstrapCatalog.CORE_CLASS_SCHEMA)) {
-            List<Row> rows = toList(hf.scan());
+        try (HeapFile hf = HeapFile.open(coreClassPath, 1000, BootstrapCatalog.CORE_CLASS_SCHEMA);
+             ClogManager clog = ClogManager.open(tempDir)) {
+            List<Row> rows = toList(hf.scan(Snapshot.BOOTSTRAP, clog));
             assertThat(rows).hasSize(2);
 
             // First row describes core_class itself
@@ -100,8 +103,9 @@ class BootstrapCatalogTest {
         BootstrapCatalog.initialize(tempDir, config);
 
         Path coreAttributePath = tempDir.resolve("base/1/1001");
-        try (HeapFile hf = HeapFile.open(coreAttributePath, 1001, BootstrapCatalog.CORE_ATTRIBUTE_SCHEMA)) {
-            List<Row> rows = toList(hf.scan());
+        try (HeapFile hf = HeapFile.open(coreAttributePath, 1001, BootstrapCatalog.CORE_ATTRIBUTE_SCHEMA);
+             ClogManager clog = ClogManager.open(tempDir)) {
+            List<Row> rows = toList(hf.scan(Snapshot.BOOTSTRAP, clog));
             assertThat(rows).hasSize(10);
 
             // Verify 5 columns for core_class (OID 1000)

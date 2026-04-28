@@ -3,22 +3,38 @@ package com.coredb.heap;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.coredb.mvcc.Snapshot;
 import com.coredb.page.Page;
+import com.coredb.txn.ClogManager;
 import com.coredb.util.Constants;
 import com.coredb.util.StorageException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class HeapPageTest {
 
+    @TempDir
+    Path tempDir;
+
     private HeapPage heapPage;
+    private ClogManager clog;
 
     @BeforeEach
-    void setUp() {
+    void setUp() throws Exception {
         heapPage = new HeapPage(Page.Factory.allocateHeapPage(1));
+        clog = ClogManager.create(tempDir);
+    }
+
+    @org.junit.jupiter.api.AfterEach
+    void tearDown() throws Exception {
+        if (clog != null) {
+            clog.close();
+        }
     }
 
     @Test
@@ -34,7 +50,7 @@ class HeapPageTest {
 
     @Test
     void insert_returnsCorrectRecordId() {
-        RecordId rid = heapPage.insert(new byte[]{1, 2, 3}, (short) 0);
+        RecordId rid = heapPage.insert(new byte[]{1, 2, 3}, (short) 0, Constants.BOOTSTRAP_XID);
 
         assertThat(rid.pageId()).isEqualTo(1);
         assertThat(rid.slotNo()).isEqualTo(0);
@@ -42,8 +58,8 @@ class HeapPageTest {
 
     @Test
     void insert_secondTuple_incrementsSlotNo() {
-        heapPage.insert(new byte[]{1}, (short) 0);
-        RecordId rid = heapPage.insert(new byte[]{2}, (short) 0);
+        heapPage.insert(new byte[]{1}, (short) 0, Constants.BOOTSTRAP_XID);
+        RecordId rid = heapPage.insert(new byte[]{2}, (short) 0, Constants.BOOTSTRAP_XID);
 
         assertThat(rid.slotNo()).isEqualTo(1);
     }
@@ -52,7 +68,7 @@ class HeapPageTest {
     void insert_reducesFreeBytes() {
         int before = heapPage.freeBytes();
         int dataLen = 10;
-        heapPage.insert(new byte[dataLen], (short) 0);
+        heapPage.insert(new byte[dataLen], (short) 0, Constants.BOOTSTRAP_XID);
 
         // natts=0 → headerSize=23; ItemId=4 bytes
         int expected = before - HeapTupleHeader.computeHeaderSize(0) - dataLen - 4;
@@ -63,7 +79,7 @@ class HeapPageTest {
     void insert_differentNatts_correctHeaderSize() {
         int before = heapPage.freeBytes();
         int dataLen = 5;
-        heapPage.insert(new byte[dataLen], (short) 9); // 9 cols → headerSize=25
+        heapPage.insert(new byte[dataLen], (short) 9, Constants.BOOTSTRAP_XID); // 9 cols → headerSize=25
 
         int expected = before - HeapTupleHeader.computeHeaderSize(9) - dataLen - 4;
         assertThat(heapPage.freeBytes()).isEqualTo(expected);
@@ -72,7 +88,7 @@ class HeapPageTest {
     @Test
     void get_returnsStoredDataBytes() {
         byte[] data = new byte[]{10, 20, 30, 40};
-        RecordId rid = heapPage.insert(data, (short) 0);
+        RecordId rid = heapPage.insert(data, (short) 0, Constants.BOOTSTRAP_XID);
 
         byte[] raw = heapPage.get(rid.slotNo());
 
@@ -88,7 +104,7 @@ class HeapPageTest {
     void get_dataOffset_usesHoffFromHeader() {
         byte[] data = new byte[]{10, 20, 30};
         // 4 columns → hsize=24 (1 bitmap byte)
-        RecordId rid = heapPage.insert(data, (short) 4);
+        RecordId rid = heapPage.insert(data, (short) 4, Constants.BOOTSTRAP_XID);
 
         byte[] raw = heapPage.get(rid.slotNo());
         ByteBuffer buf = ByteBuffer.wrap(raw).order(ByteOrder.BIG_ENDIAN);
@@ -103,7 +119,7 @@ class HeapPageTest {
     @Test
     void get_tupleHeader_hasBootstrapXminAndZeroXmax() {
         byte[] data = new byte[]{99};
-        RecordId rid = heapPage.insert(data, (short) 5);
+        RecordId rid = heapPage.insert(data, (short) 5, Constants.BOOTSTRAP_XID);
 
         byte[] raw = heapPage.get(rid.slotNo());
         HeapTupleHeader h = HeapTupleHeader.readFrom(
@@ -120,9 +136,9 @@ class HeapPageTest {
         byte[] a = {1, 2};
         byte[] b = {3, 4, 5};
         byte[] c = {6};
-        RecordId ridA = heapPage.insert(a, (short) 0);
-        RecordId ridB = heapPage.insert(b, (short) 0);
-        RecordId ridC = heapPage.insert(c, (short) 0);
+        RecordId ridA = heapPage.insert(a, (short) 0, Constants.BOOTSTRAP_XID);
+        RecordId ridB = heapPage.insert(b, (short) 0, Constants.BOOTSTRAP_XID);
+        RecordId ridC = heapPage.insert(c, (short) 0, Constants.BOOTSTRAP_XID);
 
         assertThat(dataOf(heapPage.get(ridA.slotNo()))).isEqualTo(a);
         assertThat(dataOf(heapPage.get(ridB.slotNo()))).isEqualTo(b);
@@ -138,24 +154,24 @@ class HeapPageTest {
     @Test
     void insert_manyTuples_incrementsSlotCount() {
         for (int i = 0; i < 50; i++) {
-            heapPage.insert(new byte[]{(byte) i}, (short) 0);
+            heapPage.insert(new byte[]{(byte) i}, (short) 0, Constants.BOOTSTRAP_XID);
         }
         assertThat(heapPage.slotCount()).isEqualTo(50);
     }
 
     @Test
-    void delete_marksSlotDead_getThrows() {
-        RecordId rid = heapPage.insert(new byte[]{1, 2, 3}, (short) 0);
-        heapPage.delete(rid.slotNo());
+    void delete_slotRemainsReadable_xmaxIsSet() {
+        RecordId rid = heapPage.insert(new byte[]{1, 2, 3}, (short) 0, Constants.BOOTSTRAP_XID);
+        heapPage.delete(rid.slotNo(), Constants.BOOTSTRAP_XID);
 
-        assertThatThrownBy(() -> heapPage.get(rid.slotNo()))
-                .isInstanceOf(StorageException.class);
+        // Raw get still works — slot is not marked dead, MVCC visibility filters it
+        assertThat(heapPage.get(rid.slotNo())).isNotNull();
     }
 
     @Test
     void delete_setsXmaxInTupleHeader() {
-        RecordId rid = heapPage.insert(new byte[]{5}, (short) 0);
-        heapPage.delete(rid.slotNo());
+        RecordId rid = heapPage.insert(new byte[]{5}, (short) 0, Constants.BOOTSTRAP_XID);
+        heapPage.delete(rid.slotNo(), Constants.BOOTSTRAP_XID);
 
         int raw = heapPage.page().readItemId(rid.slotNo());
         int offset = com.coredb.page.ItemId.offset(raw);
@@ -165,10 +181,10 @@ class HeapPageTest {
 
     @Test
     void delete_alreadyDead_throwsStorageException() {
-        RecordId rid = heapPage.insert(new byte[]{7}, (short) 0);
-        heapPage.delete(rid.slotNo());
+        RecordId rid = heapPage.insert(new byte[]{7}, (short) 0, Constants.BOOTSTRAP_XID);
+        heapPage.delete(rid.slotNo(), Constants.BOOTSTRAP_XID);
 
-        assertThatThrownBy(() -> heapPage.delete(rid.slotNo()))
+        assertThatThrownBy(() -> heapPage.delete(rid.slotNo(), Constants.BOOTSTRAP_XID))
                 .isInstanceOf(StorageException.class);
     }
 
@@ -179,44 +195,44 @@ class HeapPageTest {
 
     @Test
     void scan_afterInserts_returnsAllSlots() {
-        heapPage.insert(new byte[]{1}, (short) 0);
-        heapPage.insert(new byte[]{2}, (short) 0);
-        heapPage.insert(new byte[]{3}, (short) 0);
+        heapPage.insert(new byte[]{1}, (short) 0, Constants.BOOTSTRAP_XID);
+        heapPage.insert(new byte[]{2}, (short) 0, Constants.BOOTSTRAP_XID);
+        heapPage.insert(new byte[]{3}, (short) 0, Constants.BOOTSTRAP_XID);
 
         assertThat(heapPage.scan()).hasSize(3);
     }
 
     @Test
     void scan_afterDeleteSome_returnsOnlyLiveSlots() {
-        RecordId r0 = heapPage.insert(new byte[]{1}, (short) 0);
-        RecordId r1 = heapPage.insert(new byte[]{2}, (short) 0);
-        RecordId r2 = heapPage.insert(new byte[]{3}, (short) 0);
-        RecordId r3 = heapPage.insert(new byte[]{4}, (short) 0);
-        RecordId r4 = heapPage.insert(new byte[]{5}, (short) 0);
+        RecordId r0 = heapPage.insert(new byte[]{1}, (short) 0, Constants.BOOTSTRAP_XID);
+        RecordId r1 = heapPage.insert(new byte[]{2}, (short) 0, Constants.BOOTSTRAP_XID);
+        RecordId r2 = heapPage.insert(new byte[]{3}, (short) 0, Constants.BOOTSTRAP_XID);
+        RecordId r3 = heapPage.insert(new byte[]{4}, (short) 0, Constants.BOOTSTRAP_XID);
+        RecordId r4 = heapPage.insert(new byte[]{5}, (short) 0, Constants.BOOTSTRAP_XID);
 
-        heapPage.delete(r1.slotNo());
-        heapPage.delete(r3.slotNo());
+        heapPage.delete(r1.slotNo(), Constants.BOOTSTRAP_XID);
+        heapPage.delete(r3.slotNo(), Constants.BOOTSTRAP_XID);
 
-        List<RecordId> live = heapPage.scan();
+        List<RecordId> live = heapPage.scan(Snapshot.BOOTSTRAP, clog);
         assertThat(live).hasSize(3);
         assertThat(live).containsExactly(r0, r2, r4);
     }
 
     @Test
     void scan_deleteAll_returnsEmptyList() {
-        RecordId r0 = heapPage.insert(new byte[]{1}, (short) 0);
-        RecordId r1 = heapPage.insert(new byte[]{2}, (short) 0);
-        heapPage.delete(r0.slotNo());
-        heapPage.delete(r1.slotNo());
+        RecordId r0 = heapPage.insert(new byte[]{1}, (short) 0, Constants.BOOTSTRAP_XID);
+        RecordId r1 = heapPage.insert(new byte[]{2}, (short) 0, Constants.BOOTSTRAP_XID);
+        heapPage.delete(r0.slotNo(), Constants.BOOTSTRAP_XID);
+        heapPage.delete(r1.slotNo(), Constants.BOOTSTRAP_XID);
 
-        assertThat(heapPage.scan()).isEmpty();
+        assertThat(heapPage.scan(Snapshot.BOOTSTRAP, clog)).isEmpty();
     }
 
     @Test
     void insert_withExplicitBitmap_nullBitsPreservedInHeader() {
         // column 1 is null → bit 1 set → 0b00000010
         byte[] bitmap = {(byte) 0b00000010};
-        RecordId rid = heapPage.insert(new byte[]{42}, (short) 4, bitmap);
+        RecordId rid = heapPage.insert(new byte[]{42}, (short) 4, bitmap, Constants.BOOTSTRAP_XID);
 
         byte[] raw = heapPage.get(rid.slotNo());
         HeapTupleHeader h = HeapTupleHeader.readFrom(

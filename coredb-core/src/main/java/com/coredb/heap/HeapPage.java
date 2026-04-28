@@ -83,12 +83,14 @@ public final class HeapPage {
             throw new StorageException("slot " + slotNo + " is not a live tuple");
         }
         int offset = ItemId.offset(raw);
-        int length = ItemId.length(raw);
 
         HeapTupleHeader header = HeapTupleHeader.readFrom(page.buffer(), offset);
+        if (header.xmax() != com.coredb.util.Constants.INVALID_XID) {
+            throw new StorageException("slot " + slotNo + " is already deleted");
+        }
         header.setXmax(xmax);
         header.writeTo(page.buffer(), offset);
-        page.writeItemId(slotNo, ItemId.pack(offset, ItemId.FLAGS_DEAD, length));
+        // Keep ItemId as FLAGS_NORMAL — TupleVisibility filters deleted tuples via xmax
     }
 
     public List<RecordId> scan() {

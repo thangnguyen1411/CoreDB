@@ -169,48 +169,21 @@ public class BTreeStorageEngine implements StorageEngine {
         Iterator<Map.Entry<Long, RecordId>> indexIterator = pkIndex.rangeScan(fromPk, toPk);
 
         return new Iterator<>() {
-            @Override
-            public boolean hasNext() {
-                return indexIterator.hasNext();
-            }
+            private Map.Entry<Long, Row> nextEntry = computeNext();
 
-            @Override
-            public Map.Entry<Long, Row> next() {
-                Map.Entry<Long, RecordId> entry = indexIterator.next();
-                try {
-                    Optional<Row> rowOpt = heap.get(entry.getValue(), Snapshot.BOOTSTRAP, clog);
-                    if (rowOpt.isEmpty()) {
-                        throw new IllegalStateException("Index points to missing row: " + entry.getValue());
-                    }
-                    return new AbstractMap.SimpleEntry<>(entry.getKey(), rowOpt.get());
-                } catch (IOException e) {
-                    throw new java.io.UncheckedIOException(e);
-                }
-            }
-        };
-    }
-
-    @Override
-    public Iterator<Map.Entry<Long, Row>> fullScan() throws IOException {
-        Iterator<Row> heapIterator = heap.scan(Snapshot.BOOTSTRAP, clog);
-
-        return new Iterator<>() {
-            private Map.Entry<Long, Row> nextEntry = null;
-
-            {
-                advance();
-            }
-
-            private void advance() {
-                while (heapIterator.hasNext()) {
-                    Row row = heapIterator.next();
-                    Long pk = extractPk(row);
-                    if (pk != null) {
-                        nextEntry = new AbstractMap.SimpleEntry<>(pk, row);
-                        return;
+            private Map.Entry<Long, Row> computeNext() {
+                while (indexIterator.hasNext()) {
+                    Map.Entry<Long, RecordId> entry = indexIterator.next();
+                    try {
+                        Optional<Row> rowOpt = heap.get(entry.getValue(), Snapshot.BOOTSTRAP, clog);
+                        if (rowOpt.isPresent()) {
+                            return new AbstractMap.SimpleEntry<>(entry.getKey(), rowOpt.get());
+                        }
+                    } catch (IOException e) {
+                        throw new java.io.UncheckedIOException(e);
                     }
                 }
-                nextEntry = null;
+                return null;
             }
 
             @Override
@@ -224,7 +197,42 @@ public class BTreeStorageEngine implements StorageEngine {
                     throw new NoSuchElementException();
                 }
                 Map.Entry<Long, Row> result = nextEntry;
-                advance();
+                nextEntry = computeNext();
+                return result;
+            }
+        };
+    }
+
+    @Override
+    public Iterator<Map.Entry<Long, Row>> fullScan() throws IOException {
+        Iterator<Row> heapIterator = heap.scan(Snapshot.BOOTSTRAP, clog);
+
+        return new Iterator<>() {
+            private Map.Entry<Long, Row> nextEntry = computeNext();
+
+            private Map.Entry<Long, Row> computeNext() {
+                while (heapIterator.hasNext()) {
+                    Row row = heapIterator.next();
+                    Long pk = extractPk(row);
+                    if (pk != null) {
+                        return new AbstractMap.SimpleEntry<>(pk, row);
+                    }
+                }
+                return null;
+            }
+
+            @Override
+            public boolean hasNext() {
+                return nextEntry != null;
+            }
+
+            @Override
+            public Map.Entry<Long, Row> next() {
+                if (nextEntry == null) {
+                    throw new NoSuchElementException();
+                }
+                Map.Entry<Long, Row> result = nextEntry;
+                nextEntry = computeNext();
                 return result;
             }
         };

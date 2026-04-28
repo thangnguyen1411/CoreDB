@@ -69,7 +69,7 @@ class BTreeWalProducerTest {
         long walBefore = xlogWriter.currentLsn();
 
         try (HeapFile heap = HeapFile.create(heapPath, oid, schema, bufferPool, xlogWriter, Constants.BOOTSTRAP_XID)) {
-            heap.insert(Row.of(1L, "Alice"));
+            heap.insert(Row.of(1L, "Alice"), Constants.BOOTSTRAP_XID);
         }
 
         assertThat(xlogWriter.currentLsn()).isGreaterThan(walBefore);
@@ -81,7 +81,7 @@ class BTreeWalProducerTest {
         int oid = 1002;
 
         try (HeapFile heap = HeapFile.create(heapPath, oid, schema, bufferPool, xlogWriter, Constants.BOOTSTRAP_XID)) {
-            heap.insert(Row.of(1L, "Alice"));
+            heap.insert(Row.of(1L, "Alice"), Constants.BOOTSTRAP_XID);
         }
 
         try (XLogReader reader = XLogReader.open(walPath)) {
@@ -101,10 +101,10 @@ class BTreeWalProducerTest {
         int oid = 1002;
 
         try (HeapFile heap = HeapFile.create(heapPath, oid, schema, bufferPool, xlogWriter, Constants.BOOTSTRAP_XID)) {
-            RecordId rid = heap.insert(Row.of(1L, "Alice"));
+            RecordId rid = heap.insert(Row.of(1L, "Alice"), Constants.BOOTSTRAP_XID);
             long lsnAfterInsert = xlogWriter.currentLsn();
 
-            heap.delete(rid);
+            heap.delete(rid, Constants.BOOTSTRAP_XID);
 
             assertThat(xlogWriter.currentLsn()).isGreaterThan(lsnAfterInsert);
         }
@@ -177,7 +177,7 @@ class BTreeWalProducerTest {
         int oid = 1002;
 
         try (HeapFile heap = HeapFile.create(heapPath, oid, schema, bufferPool, xlogWriter, Constants.BOOTSTRAP_XID)) {
-            heap.insert(Row.of(1L, "Alice"));
+            heap.insert(Row.of(1L, "Alice"), Constants.BOOTSTRAP_XID);
 
             // flush() routes through BufferPool.flushAllForFile(), which calls
             // flushFrame() → xlogWriter.flushUpTo(pdLsn) before writing the page
@@ -193,7 +193,7 @@ class BTreeWalProducerTest {
         int oid = 1002;
 
         try (HeapFile heap = HeapFile.create(heapPath, oid, schema, bufferPool, xlogWriter, Constants.BOOTSTRAP_XID)) {
-            heap.insert(Row.of(1L, "Alice"));
+            heap.insert(Row.of(1L, "Alice"), Constants.BOOTSTRAP_XID);
             heap.flush();
         }
 
