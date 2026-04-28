@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Abstract contract test suite for {@link StorageEngine} implementations.
@@ -368,6 +369,19 @@ public abstract class StorageEngineContractTest {
             assertThat(result).isPresent();
             assertThat(result.get()).isEqualTo(replacement);
             commit(tx);
+        }
+    }
+
+    @Test
+    void engineCallWithoutTransaction_throwsIllegalStateException() throws IOException {
+        TableMeta meta = createTestTableMeta();
+        try (BufferPool pool = new BufferPool();
+             StorageEngine engine = createEngine(tempDir, meta)) {
+            engine.open(tempDir, meta, pool, null, clog, transactionManager);
+
+            assertThatThrownBy(() -> engine.put(1L, Row.of(1L, "Alice", 30)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("no active transaction");
         }
     }
 }

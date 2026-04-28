@@ -62,6 +62,13 @@ class TransactionManagerTest {
     }
 
     @Test
+    void beginTransaction_newXidVisibleInOwnSnapshot() throws IOException {
+        Transaction tx = transactionManager.beginTransaction();
+        assertThat(tx.snapshot().isActive(tx.xid())).isTrue();
+        transactionManager.rollback(tx);
+    }
+
+    @Test
     void activeXidVisibleInSnapshotTakenWhileTransactionRunning() throws IOException {
         Transaction t1 = transactionManager.beginTransaction();
         int xid = t1.xid();
