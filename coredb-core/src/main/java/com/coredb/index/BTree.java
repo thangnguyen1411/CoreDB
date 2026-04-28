@@ -332,6 +332,9 @@ public final class BTree {
      * RecordId. Used by VACUUM to clean up index entries for dead heap slots before
      * rewriting the page.</p>
      *
+     * <p>Stops after the first match. This is correct for a unique PK index where each
+     * RecordId appears at most once. Do not use for non-unique indexes.</p>
+     *
      * @param rid the heap RecordId to remove
      * @return the PK key of the removed entry, or empty if not found
      * @throws IOException if a page operation fails

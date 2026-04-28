@@ -2,6 +2,7 @@ package com.coredb.heap;
 
 import com.coredb.api.Row;
 import com.coredb.api.Schema;
+import com.coredb.vacuum.PageCompactor;
 import com.coredb.buffer.BufferDescriptor;
 import com.coredb.buffer.BufferPool;
 import com.coredb.fsm.FreeSpaceMap;
@@ -741,6 +742,43 @@ public final class HeapFile implements AutoCloseable {
 
     public FreeSpaceMap fsm() {
         return fsm;
+    }
+
+    /**
+     * Counts live and dead tuples across all heap pages.
+     *
+     * @param oldestXmin horizon for dead-tuple determination
+     * @param clog       transaction status lookup
+     * @return two-element array: [liveCount, deadCount]
+     */
+    public long[] countTuples(int oldestXmin, ClogManager clog) throws IOException {
+        long live = 0;
+        long dead = 0;
+        for (int pageId = 1; pageId < nextPageId; pageId++) {
+            PinnedPage pinned = readPage(pageId);
+            if (pinned.page().pageType() != PageType.HEAP) {
+                pinned.unpin(false);
+                continue;
+            }
+            ByteBuffer buf = pinned.page().buffer().duplicate().order(java.nio.ByteOrder.BIG_ENDIAN);
+            int pdLower = Short.toUnsignedInt(BinaryUtil.readU16(buf, PageHeader.OFFSET_PD_LOWER));
+            int slotCount = (pdLower - PageHeader.SIZE) / ItemId.SIZE;
+            for (int slot = 0; slot < slotCount; slot++) {
+                int rawItemId = buf.getInt(PageHeader.SIZE + slot * ItemId.SIZE);
+                if (ItemId.flags(rawItemId) != ItemId.FLAGS_NORMAL) {
+                    continue;
+                }
+                int offset = ItemId.offset(rawItemId);
+                HeapTupleHeader header = HeapTupleHeader.readFrom(buf, offset);
+                if (PageCompactor.isDead(header, oldestXmin, clog)) {
+                    dead++;
+                } else {
+                    live++;
+                }
+            }
+            pinned.unpin(false);
+        }
+        return new long[]{live, dead};
     }
 
     public void flush() throws IOException {

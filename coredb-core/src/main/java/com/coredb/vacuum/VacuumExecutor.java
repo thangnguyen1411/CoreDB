@@ -3,6 +3,7 @@ package com.coredb.vacuum;
 import com.coredb.heap.HeapFile;
 import com.coredb.heap.RecordId;
 import com.coredb.index.BTree;
+import com.coredb.page.ItemId;
 import com.coredb.page.PageHeader;
 import com.coredb.page.PageType;
 import com.coredb.txn.ClogManager;
@@ -122,6 +123,9 @@ public final class VacuumExecutor {
         }
 
         heap.flush();
+        for (BTree index : indexes) {
+            index.indexFile().flush();
+        }
 
         log.info("VACUUM complete: pages={} dead={} indexRemoved={} reclaimed={}B",
                 pagesScanned, deadTuples, indexEntriesRemoved, bytesReclaimed);
@@ -132,6 +136,12 @@ public final class VacuumExecutor {
     private boolean isPageEmpty(byte[] pageBytes) {
         ByteBuffer buf = ByteBuffer.wrap(pageBytes).order(ByteOrder.BIG_ENDIAN);
         int pdLower = Short.toUnsignedInt(BinaryUtil.readU16(buf, PageHeader.OFFSET_PD_LOWER));
-        return pdLower == PageHeader.SIZE;
+        int slotCount = (pdLower - PageHeader.SIZE) / ItemId.SIZE;
+        for (int i = 0; i < slotCount; i++) {
+            if (BinaryUtil.readU32(buf, PageHeader.SIZE + i * ItemId.SIZE) != 0) {
+                return false;
+            }
+        }
+        return true;
     }
 }
