@@ -7,6 +7,7 @@ import com.coredb.api.Schema;
 import com.coredb.config.EngineType;
 import com.coredb.heap.HeapFile;
 import com.coredb.heap.RecordId;
+import com.coredb.txn.ClogManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -100,7 +101,12 @@ public final class BootstrapCatalog {
         Files.createDirectories(baseDir);
         log.debug("Created directories: {}/, {}/", globalDir, baseDir);
 
-        // Step 2: Create control file (will be closed after creating heap files)
+        // Step 2: Create pg_xact commit log (needed before any heap operations with visibility)
+        ClogManager clog = ClogManager.create(dataDir);
+        clog.close();
+        log.debug("Created pg_xact commit log");
+
+        // Step 3: Create control file (will be closed after creating heap files)
         try (ControlFile controlFile = ControlFile.create(dataDir, config)) {
             log.debug("Created pg_control: nextOid={}, nextXid={}",
                 controlFile.nextOid(), controlFile.nextXid());

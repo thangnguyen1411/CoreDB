@@ -9,8 +9,10 @@ import com.coredb.config.EngineType;
 import com.coredb.heap.HeapFile;
 import com.coredb.heap.HeapPage;
 import com.coredb.heap.RecordId;
+import com.coredb.mvcc.Snapshot;
 import com.coredb.page.Page;
 import com.coredb.page.PageType;
+import com.coredb.txn.ClogManager;
 import com.coredb.wal.XLogWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -51,6 +53,7 @@ public final class Catalog implements AutoCloseable {
     private final BufferPool bufferPool;
     private final XLogWriter xlogWriter;
     private final int xid; // Transaction ID for WAL records
+    private final ClogManager clog;
     private final HeapFile coreClassFile;
     private final HeapFile coreAttributeFile;
 
@@ -63,8 +66,8 @@ public final class Catalog implements AutoCloseable {
      * @param bufferPool the buffer pool for caching pages
      * @throws IOException if the catalog files cannot be opened
      */
-    public Catalog(Path dataDir, ControlFile controlFile, BufferPool bufferPool) throws IOException {
-        this(dataDir, controlFile, bufferPool, null, com.coredb.util.Constants.BOOTSTRAP_XID);
+    public Catalog(Path dataDir, ControlFile controlFile, BufferPool bufferPool, ClogManager clog) throws IOException {
+        this(dataDir, controlFile, bufferPool, null, com.coredb.util.Constants.BOOTSTRAP_XID, clog);
     }
 
     /**
@@ -78,12 +81,13 @@ public final class Catalog implements AutoCloseable {
      * @throws IOException if the catalog files cannot be opened
      */
     public Catalog(Path dataDir, ControlFile controlFile, BufferPool bufferPool,
-                   XLogWriter xlogWriter, int xid) throws IOException {
+                   XLogWriter xlogWriter, int xid, ClogManager clog) throws IOException {
         this.dataDir = dataDir;
         this.controlFile = controlFile;
         this.bufferPool = bufferPool;
         this.xlogWriter = xlogWriter;
         this.xid = xid;
+        this.clog = clog;
 
         Path baseDir = dataDir.resolve("base").resolve("1");
         Path coreClassPath = baseDir.resolve(String.valueOf(BootstrapCatalog.CORE_CLASS_OID));
@@ -143,7 +147,7 @@ public final class Catalog implements AutoCloseable {
 
         // Insert into core_class: (tableId, tableName, pkColumn, engineType, rootPageId)
         Row classRow = Row.of((long) oid, name, pkColumn, EngineType.BTREE.ordinal(), 0L);
-        RecordId classRid = coreClassFile.insert(classRow);
+        RecordId classRid = coreClassFile.insert(classRow, xid);
         log.debug("Inserted into core_class: {} -> {}", name, classRid);
 
         // Insert into core_attribute: (tableId, attnum, attname, atttype, attnull)
@@ -151,7 +155,7 @@ public final class Catalog implements AutoCloseable {
             Column col = schema.column(i);
             int typeCode = columnTypeToCode(col.type());
             Row attrRow = Row.of((long) oid, i + 1, col.name(), typeCode, col.nullable());
-            coreAttributeFile.insert(attrRow);
+            coreAttributeFile.insert(attrRow, xid);
         }
         log.debug("Inserted {} columns into core_attribute for table {}", schema.columnCount(), name);
 
@@ -170,7 +174,7 @@ public final class Catalog implements AutoCloseable {
      * @throws IOException if scan fails
      */
     public Optional<TableMeta> openTable(String name) throws IOException {
-        Iterator<Row> it = coreClassFile.scan();
+        Iterator<Row> it = coreClassFile.scan(Snapshot.BOOTSTRAP, clog);
         while (it.hasNext()) {
             Row row = it.next();
             String tableName = row.getString(1);
@@ -193,7 +197,7 @@ public final class Catalog implements AutoCloseable {
      */
     public List<TableMeta> listTables() throws IOException {
         List<TableMeta> tables = new ArrayList<>();
-        Iterator<Row> it = coreClassFile.scan();
+        Iterator<Row> it = coreClassFile.scan(Snapshot.BOOTSTRAP, clog);
         while (it.hasNext()) {
             Row row = it.next();
             int oid = row.getLong(0).intValue();
@@ -220,7 +224,7 @@ public final class Catalog implements AutoCloseable {
             throw new IllegalArgumentException("Table not found: " + name);
         }
 
-        coreClassFile.delete(targetRid);
+        coreClassFile.delete(targetRid, xid);
 
         // DDL durability: flush WAL up to the last emitted LSN before returning
         if (xlogWriter != null) {
@@ -244,6 +248,7 @@ public final class Catalog implements AutoCloseable {
     public void close() throws IOException {
         coreClassFile.close();
         coreAttributeFile.close();
+        // Note: clog is shared across all components, do not close here
         log.debug("Catalog closed");
     }
 
@@ -266,8 +271,8 @@ public final class Catalog implements AutoCloseable {
                 continue;
             }
             HeapPage hp = new HeapPage(page);
-            for (RecordId rid : hp.scan()) {
-                Optional<Row> row = coreClassFile.get(rid);
+            for (RecordId rid : hp.scan(Snapshot.BOOTSTRAP, clog)) {
+                Optional<Row> row = coreClassFile.get(rid, Snapshot.BOOTSTRAP, clog);
                 if (row.isPresent() && name.equals(row.get().getString(1))) {
                     pinned.unpin(false);
                     return rid;
@@ -291,7 +296,7 @@ public final class Catalog implements AutoCloseable {
         record ColInfo(String name, ColumnType type, boolean nullable, int attnum) {}
         List<ColInfo> colInfos = new ArrayList<>();
 
-        Iterator<Row> attrIt = coreAttributeFile.scan();
+        Iterator<Row> attrIt = coreAttributeFile.scan(Snapshot.BOOTSTRAP, clog);
         while (attrIt.hasNext()) {
             Row attrRow = attrIt.next();
             long tableId = attrRow.getLong(0);

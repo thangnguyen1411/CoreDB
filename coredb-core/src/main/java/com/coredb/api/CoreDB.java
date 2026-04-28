@@ -9,6 +9,7 @@ import com.coredb.engine.StorageEngine;
 import com.coredb.engine.StorageEngineFactory;
 import com.coredb.recovery.RecoveryManager;
 import com.coredb.recovery.RecoveryStats;
+import com.coredb.txn.ClogManager;
 import com.coredb.util.Constants;
 import com.coredb.wal.XLogWriter;
 import java.io.IOException;
@@ -30,6 +31,7 @@ public final class CoreDB implements AutoCloseable {
     private final ControlFile controlFile;
     private final BufferPool bufferPool;
     private final XLogWriter xlogWriter;
+    private final ClogManager clog;
     private final Catalog catalog;
     private final Map<Integer, StorageEngine> engineCache;
     private final RecoveryStats lastRecoveryStats;
@@ -41,6 +43,7 @@ public final class CoreDB implements AutoCloseable {
         ControlFile controlFile,
         BufferPool bufferPool,
         XLogWriter xlogWriter,
+        ClogManager clog,
         Catalog catalog,
         RecoveryStats lastRecoveryStats
     ) {
@@ -49,6 +52,7 @@ public final class CoreDB implements AutoCloseable {
         this.controlFile = controlFile;
         this.bufferPool = bufferPool;
         this.xlogWriter = xlogWriter;
+        this.clog = clog;
         this.catalog = catalog;
         this.engineCache = new ConcurrentHashMap<>();
         this.lastRecoveryStats = lastRecoveryStats;
@@ -121,10 +125,13 @@ public final class CoreDB implements AutoCloseable {
             bufferPool.checkpoint(controlFile);
         }
 
-        // Create Catalog with WAL support (opens core_class and core_attribute heap files via buffer pool)
-        Catalog catalog = new Catalog(dataPath, controlFile, bufferPool, xlogWriter, Constants.BOOTSTRAP_XID);
+        // Open shared ClogManager (single instance per database)
+        ClogManager clog = ClogManager.open(dataPath);
 
-        return new CoreDB(dataPath, config, controlFile, bufferPool, xlogWriter, catalog, recoveryStats);
+        // Create Catalog with WAL support (opens core_class and core_attribute heap files via buffer pool)
+        Catalog catalog = new Catalog(dataPath, controlFile, bufferPool, xlogWriter, Constants.BOOTSTRAP_XID, clog);
+
+        return new CoreDB(dataPath, config, controlFile, bufferPool, xlogWriter, clog, catalog, recoveryStats);
     }
 
     public Path dataPath() {
@@ -170,7 +177,7 @@ public final class CoreDB implements AutoCloseable {
                     config.engineType(),
                     config
                 );
-                engine.open(dataPath, meta, bufferPool, xlogWriter);
+                engine.open(dataPath, meta, bufferPool, xlogWriter, clog);
                 log.debug(
                     "Opened StorageEngine for table {} (oid={})",
                     meta.name(),
@@ -263,7 +270,11 @@ public final class CoreDB implements AutoCloseable {
                     try {
                         xlogWriter.close();
                     } finally {
-                        controlFile.close();
+                        try {
+                            clog.close();
+                        } finally {
+                            controlFile.close();
+                        }
                     }
                 }
             }
