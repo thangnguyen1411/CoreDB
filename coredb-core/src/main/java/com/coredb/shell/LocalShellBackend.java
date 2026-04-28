@@ -14,7 +14,6 @@ import com.coredb.engine.BTreeStorageEngine;
 import com.coredb.engine.StorageEngine;
 import com.coredb.vacuum.VacuumExecutor;
 import com.coredb.vacuum.VacuumStats;
-import com.coredb.fsm.FreeSpaceMap;
 import com.coredb.heap.HeapFile;
 import com.coredb.heap.RecordId;
 import com.coredb.mvcc.Snapshot;
@@ -1226,14 +1225,10 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
                 return "error: vacuum-stats only supported for BTreeStorageEngine";
             }
             HeapFile heap = btEngine.heap();
-            FreeSpaceMap fsm = heap.fsm();
             int pages = heap.pageCount() - 1; // data pages (excluding header page 0)
-            long totalFree = fsm.totalFreeEstimate();
-            int pagesWithFree = fsm.pagesWithFreeSpace();
-            long avgFree = pages > 0 ? totalFree / pages : 0;
-            return String.format(
-                "pages=%d  pages-with-free=%d  total-free=%d KB  avg-free-per-page=%d KB",
-                pages, pagesWithFree, totalFree / 1024, avgFree / 1024);
+            int oldestXmin = db.snapshotManager().oldestActiveXmin();
+            long[] counts = heap.countTuples(oldestXmin, db.clog());
+            return String.format("pages=%d  live=%d  dead=%d", pages, counts[0], counts[1]);
         } catch (IOException e) {
             return "error: " + e.getMessage();
         }

@@ -271,7 +271,8 @@ public final class HeapResourceManager implements ResourceManager {
             }
 
             if (ItemId.flags(rawItemId) != ItemId.FLAGS_NORMAL) {
-                page.putInt(itemIdOff, 0); // non-normal non-dead → UNUSED
+                // Already LP_UNUSED (0) or LP_DEAD — carry it forward as UNUSED.
+                page.putInt(itemIdOff, 0);
                 continue;
             }
 
