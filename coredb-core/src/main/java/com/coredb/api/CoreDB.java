@@ -11,6 +11,8 @@ import com.coredb.mvcc.SnapshotManager;
 import com.coredb.recovery.RecoveryManager;
 import com.coredb.recovery.RecoveryStats;
 import com.coredb.txn.ClogManager;
+import com.coredb.txn.Transaction;
+import com.coredb.txn.TransactionManager;
 import com.coredb.util.Constants;
 import com.coredb.wal.XLogWriter;
 import java.io.IOException;
@@ -35,6 +37,7 @@ public final class CoreDB implements AutoCloseable {
     private final ClogManager clog;
     private final Catalog catalog;
     private final SnapshotManager snapshotManager;
+    private final TransactionManager transactionManager;
     private final Map<Integer, StorageEngine> engineCache;
     private final RecoveryStats lastRecoveryStats;
     private volatile boolean closed = false;
@@ -58,6 +61,7 @@ public final class CoreDB implements AutoCloseable {
         this.clog = clog;
         this.catalog = catalog;
         this.snapshotManager = snapshotManager;
+        this.transactionManager = new TransactionManager(controlFile, snapshotManager, clog);
         this.engineCache = new ConcurrentHashMap<>();
         this.lastRecoveryStats = lastRecoveryStats;
         log.debug(
@@ -186,7 +190,7 @@ public final class CoreDB implements AutoCloseable {
                     config.engineType(),
                     config
                 );
-                engine.open(dataPath, meta, bufferPool, xlogWriter, clog);
+                engine.open(dataPath, meta, bufferPool, xlogWriter, clog, transactionManager);
                 log.debug(
                     "Opened StorageEngine for table {} (oid={})",
                     meta.name(),
@@ -225,6 +229,25 @@ public final class CoreDB implements AutoCloseable {
      */
     public SnapshotManager snapshotManager() {
         return snapshotManager;
+    }
+
+    /**
+     * Returns the transaction manager for this database instance.
+     */
+    public TransactionManager transactionManager() {
+        return transactionManager;
+    }
+
+    /**
+     * Begins a new transaction and returns it.
+     *
+     * <p>The returned transaction is the active transaction for this instance.
+     * Use {@link Transaction#xid()} and {@link Transaction#snapshot()} on it,
+     * then call {@link TransactionManager#commit(Transaction)} or
+     * {@link TransactionManager#rollback(Transaction)} when done.</p>
+     */
+    public Transaction beginTransaction() throws java.io.IOException {
+        return transactionManager.beginTransaction();
     }
 
     public boolean isClosed() {

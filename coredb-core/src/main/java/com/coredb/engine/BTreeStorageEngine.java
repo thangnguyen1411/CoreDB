@@ -11,6 +11,8 @@ import com.coredb.index.BTree;
 import com.coredb.index.IndexFile;
 import com.coredb.mvcc.Snapshot;
 import com.coredb.txn.ClogManager;
+import com.coredb.txn.Transaction;
+import com.coredb.txn.TransactionManager;
 import com.coredb.util.Constants;
 import com.coredb.wal.XLogWriter;
 import org.slf4j.Logger;
@@ -50,6 +52,7 @@ public class BTreeStorageEngine implements StorageEngine {
     private BufferPool bufferPool;
     private XLogWriter xlogWriter;
     private ClogManager clog;
+    private TransactionManager transactionManager;
     private HeapFile heap;
     private IndexFile indexFile;
     private BTree pkIndex;
@@ -60,10 +63,12 @@ public class BTreeStorageEngine implements StorageEngine {
     }
 
     @Override
-    public void open(Path dataDir, TableMeta meta, BufferPool bufferPool, XLogWriter xlogWriter, ClogManager clog) throws IOException {
+    public void open(Path dataDir, TableMeta meta, BufferPool bufferPool, XLogWriter xlogWriter,
+                     ClogManager clog, TransactionManager transactionManager) throws IOException {
         this.bufferPool = bufferPool;
         this.xlogWriter = xlogWriter;
         this.clog = clog;
+        this.transactionManager = transactionManager;
         Schema schema = meta.schema();
         this.pkColumnIndex = schema.indexOf(meta.pkColumn());
         if (pkColumnIndex < 0) {
@@ -108,8 +113,9 @@ public class BTreeStorageEngine implements StorageEngine {
             heap.close();
             heap = null;
         }
-        // Note: clog is shared across all engines, do not close here
+        // clog and transactionManager are shared; do not close here
         clog = null;
+        transactionManager = null;
         pkIndex = null;
     }
 
@@ -123,8 +129,8 @@ public class BTreeStorageEngine implements StorageEngine {
 
     @Override
     public void put(long pk, Row row) throws IOException {
-        // Uses BOOTSTRAP_XID for now; wired to the real transaction XID later.
-        int currentXid = Constants.BOOTSTRAP_XID;
+        Transaction tx = requireActiveTransaction();
+        int currentXid = tx.xid();
 
         Optional<RecordId> existing = pkIndex.search(pk);
         if (existing.isPresent()) {
@@ -144,19 +150,19 @@ public class BTreeStorageEngine implements StorageEngine {
 
     @Override
     public Optional<Row> get(long pk) throws IOException {
+        Transaction tx = requireActiveTransaction();
         Optional<RecordId> ridOpt = pkIndex.search(pk);
         if (ridOpt.isEmpty()) {
             return Optional.empty();
         }
 
-        // Uses BOOTSTRAP snapshot for now
-        return heap.get(ridOpt.get(), Snapshot.BOOTSTRAP, clog);
+        return heap.get(ridOpt.get(), tx.snapshot(), clog, tx.xid());
     }
 
     @Override
     public void delete(long pk) throws IOException {
-        // Uses BOOTSTRAP_XID for now
-        int currentXid = Constants.BOOTSTRAP_XID;
+        Transaction tx = requireActiveTransaction();
+        int currentXid = tx.xid();
 
         Optional<RecordId> ridOpt = pkIndex.search(pk);
         if (ridOpt.isEmpty()) {
@@ -173,6 +179,9 @@ public class BTreeStorageEngine implements StorageEngine {
 
     @Override
     public Iterator<Map.Entry<Long, Row>> rangeScan(long fromPk, long toPk) throws IOException {
+        Transaction tx = requireActiveTransaction();
+        Snapshot snapshot = tx.snapshot();
+        int currentXid = tx.xid();
         Iterator<Map.Entry<Long, RecordId>> indexIterator = pkIndex.rangeScan(fromPk, toPk);
 
         return new Iterator<>() {
@@ -182,7 +191,7 @@ public class BTreeStorageEngine implements StorageEngine {
                 while (indexIterator.hasNext()) {
                     Map.Entry<Long, RecordId> entry = indexIterator.next();
                     try {
-                        Optional<Row> rowOpt = heap.get(entry.getValue(), Snapshot.BOOTSTRAP, clog);
+                        Optional<Row> rowOpt = heap.get(entry.getValue(), snapshot, clog, currentXid);
                         if (rowOpt.isPresent()) {
                             return new AbstractMap.SimpleEntry<>(entry.getKey(), rowOpt.get());
                         }
@@ -212,7 +221,8 @@ public class BTreeStorageEngine implements StorageEngine {
 
     @Override
     public Iterator<Map.Entry<Long, Row>> fullScan() throws IOException {
-        Iterator<Row> heapIterator = heap.scan(Snapshot.BOOTSTRAP, clog);
+        Transaction tx = requireActiveTransaction();
+        Iterator<Row> heapIterator = heap.scan(tx.snapshot(), clog, tx.xid());
 
         return new Iterator<>() {
             private Map.Entry<Long, Row> nextEntry = computeNext();
@@ -273,6 +283,17 @@ public class BTreeStorageEngine implements StorageEngine {
         if (indexFile != null) {
             indexFile.flush();
         }
+    }
+
+    private Transaction requireActiveTransaction() {
+        if (transactionManager == null) {
+            throw new IllegalStateException("no transaction manager configured");
+        }
+        Transaction tx = transactionManager.currentTransaction();
+        if (tx == null) {
+            throw new IllegalStateException("no active transaction");
+        }
+        return tx;
     }
 
     private Long extractPk(Row row) {

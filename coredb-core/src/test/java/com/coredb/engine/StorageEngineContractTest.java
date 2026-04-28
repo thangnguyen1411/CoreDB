@@ -1,17 +1,24 @@
 package com.coredb.engine;
 
+import com.coredb.api.CoreDBConfig;
 import com.coredb.api.Row;
 import com.coredb.api.Schema;
 import com.coredb.buffer.BufferPool;
+import com.coredb.catalog.ControlFile;
 import com.coredb.catalog.TableMeta;
 import com.coredb.config.EngineType;
+import com.coredb.mvcc.SnapshotManager;
 import com.coredb.txn.ClogManager;
+import com.coredb.txn.Transaction;
+import com.coredb.txn.TransactionManager;
+import com.coredb.util.Constants;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Iterator;
 import java.util.Map;
@@ -38,11 +45,18 @@ public abstract class StorageEngineContractTest {
     @TempDir
     protected Path tempDir;
 
-    private ClogManager clog;
+    protected ClogManager clog;
+    protected ControlFile controlFile;
+    protected SnapshotManager snapshotManager;
+    protected TransactionManager transactionManager;
 
     @BeforeEach
     void setUp() throws Exception {
+        Files.createDirectories(tempDir.resolve("global"));
         clog = ClogManager.create(tempDir);
+        controlFile = ControlFile.create(tempDir, CoreDBConfig.defaults());
+        snapshotManager = new SnapshotManager(Constants.FIRST_NORMAL_XID);
+        transactionManager = new TransactionManager(controlFile, snapshotManager, clog);
     }
 
     @AfterEach
@@ -50,14 +64,13 @@ public abstract class StorageEngineContractTest {
         if (clog != null) {
             clog.close();
         }
+        if (controlFile != null) {
+            controlFile.close();
+        }
     }
 
     /**
      * Factory method for creating the storage engine under test.
-     *
-     * @param dataDir the data directory
-     * @param meta    table metadata
-     * @return a new storage engine instance
      */
     protected abstract StorageEngine createEngine(Path dataDir, TableMeta meta) throws IOException;
 
@@ -65,14 +78,10 @@ public abstract class StorageEngineContractTest {
      * Abstract hook for concrete subclasses to verify that a dead tuple version exists.
      * Every storage engine implementation MUST override this to prove MVCC semantics
      * by scanning the raw heap and asserting two physical tuples exist after upsert.
-     *
-     * @param dataDir the data directory
-     * @param meta    table metadata
-     * @param pk      the primary key that was updated
      */
     protected abstract void assertDeadVersionExists(Path dataDir, TableMeta meta, long pk);
 
-    private TableMeta createTestTableMeta() {
+    protected TableMeta createTestTableMeta() {
         Schema schema = Schema.of(
             com.coredb.api.Column.longCol("id").withNullable(false),
             com.coredb.api.Column.stringCol("name"),
@@ -81,19 +90,36 @@ public abstract class StorageEngineContractTest {
         return new TableMeta(1002, "test_table", schema, "id", EngineType.BTREE);
     }
 
+    /** Begins a transaction via the shared manager. */
+    protected Transaction begin() throws IOException {
+        return transactionManager.beginTransaction();
+    }
+
+    /** Commits the given transaction. */
+    protected void commit(Transaction tx) {
+        transactionManager.commit(tx);
+    }
+
+    /** Rolls back the given transaction. */
+    protected void rollback(Transaction tx) {
+        transactionManager.rollback(tx);
+    }
+
     @Test
     void putOfNewKey_thenGet_returnsRow() throws IOException {
         TableMeta meta = createTestTableMeta();
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta, pool, null, clog);
+            engine.open(tempDir, meta, pool, null, clog, transactionManager);
 
+            Transaction tx = begin();
             Row row = Row.of(1L, "Alice", 30);
             engine.put(1L, row);
 
             Optional<Row> result = engine.get(1L);
             assertThat(result).isPresent();
             assertThat(result.get()).isEqualTo(row);
+            commit(tx);
         }
     }
 
@@ -101,27 +127,32 @@ public abstract class StorageEngineContractTest {
     void putOfExistingKey_replacesVisibleRow_andLeavesDeadOldVersion() throws IOException {
         TableMeta meta = createTestTableMeta();
         Path dataDir = tempDir.resolve("data");
-        java.nio.file.Files.createDirectories(dataDir);
+        Files.createDirectories(dataDir);
+        Files.createDirectories(dataDir.resolve("global"));
 
-        // First put
+        // First put in session 1
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(dataDir, meta)) {
-            engine.open(dataDir, meta, pool, null, clog);
+            engine.open(dataDir, meta, pool, null, clog, transactionManager);
+            Transaction tx = begin();
             Row original = Row.of(1L, "Alice", 30);
             engine.put(1L, original);
+            commit(tx);
         }
 
-        // Second put (upsert)
+        // Second put in session 2 (upsert)
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(dataDir, meta)) {
-            engine.open(dataDir, meta, pool, null, clog);
+            engine.open(dataDir, meta, pool, null, clog, transactionManager);
+            Transaction tx = begin();
             Row updated = Row.of(1L, "Bob", 31);
             engine.put(1L, updated);
 
-            // get returns the new visible row
+            // get returns the new visible row (own write)
             Optional<Row> result = engine.get(1L);
             assertThat(result).isPresent();
             assertThat(result.get()).isEqualTo(updated);
+            commit(tx);
         }
 
         // Verify that a dead version exists (MVCC upsert, not in-place overwrite)
@@ -133,8 +164,9 @@ public abstract class StorageEngineContractTest {
         TableMeta meta = createTestTableMeta();
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta, pool, null, clog);
+            engine.open(tempDir, meta, pool, null, clog, transactionManager);
 
+            Transaction tx = begin();
             Row row = Row.of(1L, "Alice", 30);
             engine.put(1L, row);
             assertThat(engine.get(1L)).isPresent();
@@ -142,6 +174,7 @@ public abstract class StorageEngineContractTest {
             engine.delete(1L);
 
             assertThat(engine.get(1L)).isEmpty();
+            commit(tx);
         }
     }
 
@@ -150,12 +183,13 @@ public abstract class StorageEngineContractTest {
         TableMeta meta = createTestTableMeta();
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta, pool, null, clog);
+            engine.open(tempDir, meta, pool, null, clog, transactionManager);
 
+            Transaction tx = begin();
             // Should not throw
             engine.delete(999L);
-
             assertThat(engine.get(999L)).isEmpty();
+            commit(tx);
         }
     }
 
@@ -164,8 +198,9 @@ public abstract class StorageEngineContractTest {
         TableMeta meta = createTestTableMeta();
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta, pool, null, clog);
+            engine.open(tempDir, meta, pool, null, clog, transactionManager);
 
+            Transaction tx = begin();
             // Insert in scrambled order
             engine.put(5L, Row.of(5L, "Eve", 25));
             engine.put(1L, Row.of(1L, "Alice", 30));
@@ -189,6 +224,7 @@ public abstract class StorageEngineContractTest {
             assertThat(third.getKey()).isEqualTo(4L);
 
             assertThat(it.hasNext()).isFalse();
+            commit(tx);
         }
     }
 
@@ -197,14 +233,16 @@ public abstract class StorageEngineContractTest {
         TableMeta meta = createTestTableMeta();
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta, pool, null, clog);
+            engine.open(tempDir, meta, pool, null, clog, transactionManager);
 
+            Transaction tx = begin();
             engine.put(1L, Row.of(1L, "Alice", 30));
             engine.put(5L, Row.of(5L, "Eve", 25));
 
             // Range with from > to should return empty
             Iterator<Map.Entry<Long, Row>> it = engine.rangeScan(10L, 1L);
             assertThat(it.hasNext()).isFalse();
+            commit(tx);
         }
     }
 
@@ -213,12 +251,14 @@ public abstract class StorageEngineContractTest {
         TableMeta meta = createTestTableMeta();
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta, pool, null, clog);
+            engine.open(tempDir, meta, pool, null, clog, transactionManager);
 
+            Transaction tx = begin();
             engine.put(1L, Row.of(1L, "Alice", 30));
 
             Iterator<Map.Entry<Long, Row>> it = engine.rangeScan(100L, 200L);
             assertThat(it.hasNext()).isFalse();
+            commit(tx);
         }
     }
 
@@ -227,8 +267,9 @@ public abstract class StorageEngineContractTest {
         TableMeta meta = createTestTableMeta();
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta, pool, null, clog);
+            engine.open(tempDir, meta, pool, null, clog, transactionManager);
 
+            Transaction tx = begin();
             engine.put(1L, Row.of(1L, "Alice", 30));
             engine.put(2L, Row.of(2L, "Bob", 25));
             engine.put(3L, Row.of(3L, "Charlie", 35));
@@ -241,6 +282,7 @@ public abstract class StorageEngineContractTest {
             }
 
             assertThat(count).isEqualTo(3);
+            commit(tx);
         }
     }
 
@@ -249,8 +291,9 @@ public abstract class StorageEngineContractTest {
         TableMeta meta = createTestTableMeta();
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta, pool, null, clog);
+            engine.open(tempDir, meta, pool, null, clog, transactionManager);
 
+            Transaction tx = begin();
             engine.put(1L, Row.of(1L, "Alice", 30));
             engine.put(2L, Row.of(2L, "Bob", 25));
             engine.put(3L, Row.of(3L, "Charlie", 35));
@@ -265,6 +308,7 @@ public abstract class StorageEngineContractTest {
             }
 
             assertThat(count).isEqualTo(2);
+            commit(tx);
         }
     }
 
@@ -272,21 +316,25 @@ public abstract class StorageEngineContractTest {
     void closeThenReopen_preservesAllVisibleRows() throws IOException {
         TableMeta meta = createTestTableMeta();
         Path dataDir = tempDir.resolve("persistent");
-        java.nio.file.Files.createDirectories(dataDir);
+        Files.createDirectories(dataDir);
+        Files.createDirectories(dataDir.resolve("global"));
 
         // First session: insert rows
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(dataDir, meta)) {
-            engine.open(dataDir, meta, pool, null, clog);
+            engine.open(dataDir, meta, pool, null, clog, transactionManager);
+            Transaction tx = begin();
             engine.put(1L, Row.of(1L, "Alice", 30));
             engine.put(2L, Row.of(2L, "Bob", 25));
+            commit(tx);
             engine.flush();
         }
 
-        // Second session: verify persistence
+        // Second session: verify persistence (same transactionManager — shared ControlFile tracks nextXid)
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(dataDir, meta)) {
-            engine.open(dataDir, meta, pool, null, clog);
+            engine.open(dataDir, meta, pool, null, clog, transactionManager);
+            Transaction tx = begin();
 
             Optional<Row> alice = engine.get(1L);
             assertThat(alice).isPresent();
@@ -295,6 +343,7 @@ public abstract class StorageEngineContractTest {
             Optional<Row> bob = engine.get(2L);
             assertThat(bob).isPresent();
             assertThat(bob.get()).isEqualTo(Row.of(2L, "Bob", 25));
+            commit(tx);
         }
     }
 
@@ -303,8 +352,9 @@ public abstract class StorageEngineContractTest {
         TableMeta meta = createTestTableMeta();
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta, pool, null, clog);
+            engine.open(tempDir, meta, pool, null, clog, transactionManager);
 
+            Transaction tx = begin();
             // Insert, delete, re-insert with same PK
             Row original = Row.of(1L, "Alice", 30);
             engine.put(1L, original);
@@ -317,6 +367,7 @@ public abstract class StorageEngineContractTest {
             Optional<Row> result = engine.get(1L);
             assertThat(result).isPresent();
             assertThat(result.get()).isEqualTo(replacement);
+            commit(tx);
         }
     }
 }

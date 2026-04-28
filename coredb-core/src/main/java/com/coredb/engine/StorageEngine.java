@@ -4,6 +4,7 @@ import com.coredb.api.Row;
 import com.coredb.buffer.BufferPool;
 import com.coredb.catalog.TableMeta;
 import com.coredb.txn.ClogManager;
+import com.coredb.txn.TransactionManager;
 import com.coredb.wal.XLogWriter;
 import java.io.IOException;
 import java.nio.file.Path;
@@ -30,14 +31,17 @@ public interface StorageEngine extends AutoCloseable {
     /**
      * Opens or initializes this storage engine for the given table.
      *
-     * @param dataDir the data directory path
-     * @param meta    table metadata including OID, schema, and engine type
+     * @param dataDir    the data directory path
+     * @param meta       table metadata including OID, schema, and engine type
      * @param bufferPool the buffer pool for caching pages
      * @param xlogWriter the WAL writer for durability
-     * @param clog the commit log manager (shared across all engines)
+     * @param clog       the commit log manager (shared across all engines)
+     * @param transactionManager     the transaction manager; engine reads the active transaction's
+     *                   XID and snapshot from here for every mutation and read
      * @throws IOException if opening fails
      */
-    void open(Path dataDir, TableMeta meta, BufferPool bufferPool, XLogWriter xlogWriter, ClogManager clog)
+    void open(Path dataDir, TableMeta meta, BufferPool bufferPool, XLogWriter xlogWriter,
+              ClogManager clog, TransactionManager transactionManager)
         throws IOException;
 
     /**

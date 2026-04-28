@@ -507,6 +507,10 @@ public final class HeapFile implements AutoCloseable {
     }
 
     public Optional<Row> get(RecordId recordId, Snapshot snapshot, ClogManager clog) throws IOException {
+        return get(recordId, snapshot, clog, Constants.INVALID_XID);
+    }
+
+    public Optional<Row> get(RecordId recordId, Snapshot snapshot, ClogManager clog, int currentXid) throws IOException {
         if (recordId.pageId() < 1 || recordId.pageId() >= pageCount()) {
             return Optional.empty();
         }
@@ -520,7 +524,7 @@ public final class HeapFile implements AutoCloseable {
         HeapPage heapPage = new HeapPage(page);
 
         try {
-            Optional<byte[]> rawOpt = heapPage.get(recordId.slotNo(), snapshot, clog);
+            Optional<byte[]> rawOpt = heapPage.get(recordId.slotNo(), snapshot, clog, currentXid);
             // Hint bits written to the page buffer must be flushed to disk eventually.
             pinned.unpin(heapPage.wasHintBitsModified());
             if (rawOpt.isEmpty()) {
@@ -671,8 +675,12 @@ public final class HeapFile implements AutoCloseable {
     }
 
     public Iterator<Row> scan(Snapshot snapshot, ClogManager clog) throws IOException {
+        return scan(snapshot, clog, Constants.INVALID_XID);
+    }
+
+    public Iterator<Row> scan(Snapshot snapshot, ClogManager clog, int currentXid) throws IOException {
         // Lazy iterator: one page in memory at a time for large scans
-        return new LazyRowIterator(snapshot, clog);
+        return new LazyRowIterator(snapshot, clog, currentXid);
     }
 
     /**
@@ -1007,6 +1015,7 @@ public final class HeapFile implements AutoCloseable {
     private final class LazyRowIterator implements Iterator<Row> {
         private final Snapshot snapshot;
         private final ClogManager clog;
+        private final int currentXid;
         private int nextPageId = 1;
         private PinnedPage currentPinned = null;
         private Page currentPage = null;
@@ -1014,9 +1023,10 @@ public final class HeapFile implements AutoCloseable {
         private Iterator<RecordId> currentPageRids = null;
         private Row nextRow = null;
 
-        LazyRowIterator(Snapshot snapshot, ClogManager clog) throws IOException {
+        LazyRowIterator(Snapshot snapshot, ClogManager clog, int currentXid) throws IOException {
             this.snapshot = snapshot;
             this.clog = clog;
+            this.currentXid = currentXid;
             advance();
         }
 
@@ -1073,7 +1083,7 @@ public final class HeapFile implements AutoCloseable {
                     continue;
                 }
                 currentHeapPage = new HeapPage(currentPage);
-                currentPageRids = currentHeapPage.scan(snapshot, clog).iterator();
+                currentPageRids = currentHeapPage.scan(snapshot, clog, currentXid).iterator();
             }
             // End of iteration — unpin the last page.
             if (currentPinned != null) {
@@ -1087,7 +1097,7 @@ public final class HeapFile implements AutoCloseable {
 
         private Optional<Row> fetchFromCurrentPage(RecordId recordId) {
             try {
-                Optional<byte[]> rawOpt = currentHeapPage.get(recordId.slotNo(), snapshot, clog);
+                Optional<byte[]> rawOpt = currentHeapPage.get(recordId.slotNo(), snapshot, clog, currentXid);
                 if (rawOpt.isEmpty()) {
                     return Optional.empty();
                 }
