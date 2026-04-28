@@ -83,30 +83,20 @@ public final class TransactionManager {
         validateActive(tx);
 
         if (xlogWriter != null) {
-            // 1. Encode payload: (xid, timestamp)
             byte[] payload = encodeCommitPayload(tx.xid(), System.currentTimeMillis());
-
-            // 2. Append XACT_COMMIT WAL record
             long commitLsn = xlogWriter.append(
                 XLogRecord.RMGR_XLOG,
                 XLogResourceManager.XACT_COMMIT,
                 tx.xid(),
-                0,  // tableOid = 0 (no specific table)
-                0,  // pageId = 0 (no specific page)
+                0,
+                0,
                 payload
             );
-
-            // 3. Flush WAL - this is the durability point
             xlogWriter.flushUpTo(commitLsn);
         }
 
-        // 4. Mark committed in clog
         clog.setCommitted(tx.xid());
-
-        // 5. Flush clog
         clog.flush();
-
-        // 6-7. Remove from active set and set state
         finishTransaction(tx, Transaction.State.COMMITTED);
     }
 
@@ -127,36 +117,23 @@ public final class TransactionManager {
         validateActive(tx);
 
         if (xlogWriter != null) {
-            // 1. Encode payload: (xid)
             byte[] payload = encodeAbortPayload(tx.xid());
-
-            // 2. Append XACT_ABORT WAL record
             long abortLsn = xlogWriter.append(
                 XLogRecord.RMGR_XLOG,
                 XLogResourceManager.XACT_ABORT,
                 tx.xid(),
-                0,  // tableOid = 0
-                0,  // pageId = 0
+                0,
+                0,
                 payload
             );
-
-            // 3. Flush WAL (optional but makes clog match WAL)
             xlogWriter.flushUpTo(abortLsn);
         }
 
-        // 4. Mark aborted in clog
         clog.setAborted(tx.xid());
-
-        // 5. Flush clog
         clog.flush();
-
-        // 6-7. Remove from active set and set state
         finishTransaction(tx, Transaction.State.ABORTED);
     }
 
-    /**
-     * Encodes commit payload: (xid as int, timestamp as long) = 12 bytes.
-     */
     private byte[] encodeCommitPayload(int xid, long timestamp) {
         ByteBuffer buf = ByteBuffer.allocate(12).order(ByteOrder.BIG_ENDIAN);
         buf.putInt(xid);
@@ -164,18 +141,12 @@ public final class TransactionManager {
         return buf.array();
     }
 
-    /**
-     * Encodes abort payload: (xid as int) = 4 bytes.
-     */
     private byte[] encodeAbortPayload(int xid) {
         ByteBuffer buf = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN);
         buf.putInt(xid);
         return buf.array();
     }
 
-    /**
-     * Returns the currently active transaction, or {@code null} if none.
-     */
     public Transaction currentTransaction() {
         return currentTx;
     }

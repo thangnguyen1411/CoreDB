@@ -55,7 +55,6 @@ class TransactionManagerTest {
         if (controlFile != null) controlFile.close();
     }
 
-    // Helper to read all WAL records
     private List<XLogRecord> readAllWalRecords() throws IOException {
         List<XLogRecord> records = new ArrayList<>();
         try (XLogReader reader = XLogReader.open(tempDir.resolve("global/pg_wal"))) {
@@ -97,7 +96,6 @@ class TransactionManagerTest {
         Transaction t1 = transactionManager.beginTransaction();
         int xid = t1.xid();
 
-        // A snapshot taken while T1 is active must include T1's xid in the active set
         Snapshot snap = snapshotManager.takeSnapshot();
         assertThat(snap.isActive(xid)).isTrue();
 
@@ -205,7 +203,6 @@ class TransactionManagerTest {
         Transaction tx2 = transactionManager.beginTransaction();
         transactionManager.commit(tx2);
 
-        // Verify WAL contains XACT_COMMIT record
         List<XLogRecord> records = readAllWalRecords();
         assertThat(records).isNotEmpty();
 
@@ -228,7 +225,6 @@ class TransactionManagerTest {
         Transaction tx = transactionManager.beginTransaction();
         transactionManager.rollback(tx);
 
-        // Verify WAL contains XACT_ABORT record
         List<XLogRecord> records = readAllWalRecords();
         assertThat(records).isNotEmpty();
 
@@ -302,55 +298,43 @@ class TransactionManagerTest {
         xlogWriter = XLogWriter.open(tempDir.resolve("global/pg_wal"));
         transactionManager = new TransactionManager(controlFile, snapshotManager, clog, xlogWriter);
 
-        // First transaction and commit
         Transaction t1 = transactionManager.beginTransaction();
         int xid1 = t1.xid();
         transactionManager.commit(t1);
 
-        // Second transaction and commit (using same manager since first is done)
         Transaction t2 = transactionManager.beginTransaction();
         int xid2 = t2.xid();
         transactionManager.commit(t2);
 
         List<XLogRecord> records = readAllWalRecords();
-
-        // Should have 2 XACT_COMMIT records
         List<XLogRecord> commitRecords = records.stream()
             .filter(r -> r.info() == XLogResourceManager.XACT_COMMIT)
             .toList();
 
         assertThat(commitRecords).hasSize(2);
-
-        // Verify ordering: first commit record has lower LSN than second
         assertThat(commitRecords.get(0).lsn()).isLessThan(commitRecords.get(1).lsn());
-
-        // Verify correct XIDs
         assertThat(commitRecords.get(0).xid()).isEqualTo(xid1);
         assertThat(commitRecords.get(1).xid()).isEqualTo(xid2);
     }
 
     @Test
     void commit_noWAL_whenXLogWriterIsNull() throws IOException {
-        // Create manager without WAL writer
         TransactionManager noWalManager = new TransactionManager(controlFile, snapshotManager, clog, null);
 
         Transaction tx = noWalManager.beginTransaction();
         noWalManager.commit(tx);
 
-        // Should complete without exception even though no WAL writer
         assertThat(tx.state()).isEqualTo(Transaction.State.COMMITTED);
         assertThat(clog.getStatus(tx.xid())).isEqualTo(ClogManager.Status.COMMITTED);
     }
 
     @Test
     void rollback_noWAL_whenXLogWriterIsNull() throws IOException {
-        // Create manager without WAL writer
         TransactionManager noWalManager = new TransactionManager(controlFile, snapshotManager, clog, null);
 
         Transaction tx = noWalManager.beginTransaction();
         noWalManager.rollback(tx);
 
-        // Should complete without exception even though no WAL writer
         assertThat(tx.state()).isEqualTo(Transaction.State.ABORTED);
         assertThat(clog.getStatus(tx.xid())).isEqualTo(ClogManager.Status.ABORTED);
     }
