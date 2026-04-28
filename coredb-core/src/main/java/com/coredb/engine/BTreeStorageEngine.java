@@ -115,18 +115,17 @@ public class BTreeStorageEngine implements StorageEngine {
 
     @Override
     public void put(long pk, Row row) throws IOException {
-        // Uses BOOTSTRAP_XID for now
+        // Uses BOOTSTRAP_XID for now; wired to the real transaction XID later.
         int currentXid = Constants.BOOTSTRAP_XID;
 
         Optional<RecordId> existing = pkIndex.search(pk);
         if (existing.isPresent()) {
             RecordId oldRid = existing.get();
-
-            RecordId newRid = heap.insert(row, currentXid);
+            // Update creates a version chain: old tuple gets xmax=currentXid and
+            // ctid pointing to the new tuple; new tuple gets xmin=currentXid.
+            RecordId newRid = heap.update(oldRid, row, currentXid);
             pkIndex.delete(pk);
             pkIndex.insert(pk, newRid);
-            heap.delete(oldRid, currentXid);
-
             log.debug("Updated row with pk={}: oldRid={} -> newRid={}", pk, oldRid, newRid);
         } else {
             RecordId rid = heap.insert(row, currentXid);

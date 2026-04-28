@@ -205,14 +205,114 @@ class TupleVisibilityTest {
 
     @Test
     void bootstrapXidWithXmaxStillVisible() {
-        // Even with xmax set, BOOTSTRAP_XID tuples are always visible
-        // (this shouldn't happen in practice, but test the invariant)
         HeapTupleHeader header = createHeader(Constants.BOOTSTRAP_XID, 100);
 
         Snapshot snap = new Snapshot(10, 20, Collections.emptySet());
 
-        // xmin is BOOTSTRAP_XID, so xminVisible returns true
-        // xmax is 100, which > 20, so xmaxCommittedAndVisible returns false
+        // xmin is BOOTSTRAP_XID → always visible; xmax=100 >= snap.xmax=20 → delete not visible
         assertThat(TupleVisibility.isVisible(header, snap, clog)).isTrue();
+    }
+
+    // ─── hint bits ─────────────────────────────────────────────────────────────
+
+    @Test
+    void hintBit_xminCommitted_setAfterClogLookup() {
+        HeapTupleHeader header = createHeader(5, Constants.INVALID_XID);
+        clog.setCommitted(5);
+
+        Snapshot snap = new Snapshot(10, 20, Collections.emptySet());
+        TupleVisibility.isVisible(header, snap, clog);
+
+        assertThat(header.hasInfomaskFlag(HeapTupleHeader.XMIN_COMMITTED)).isTrue();
+        assertThat(header.hasInfomaskFlag(HeapTupleHeader.XMIN_INVALID)).isFalse();
+    }
+
+    @Test
+    void hintBit_xminInvalid_setForAbortedInsert() {
+        HeapTupleHeader header = createHeader(5, Constants.INVALID_XID);
+        clog.setAborted(5);
+
+        Snapshot snap = new Snapshot(10, 20, Collections.emptySet());
+        TupleVisibility.isVisible(header, snap, clog);
+
+        assertThat(header.hasInfomaskFlag(HeapTupleHeader.XMIN_INVALID)).isTrue();
+        assertThat(header.hasInfomaskFlag(HeapTupleHeader.XMIN_COMMITTED)).isFalse();
+    }
+
+    @Test
+    void hintBit_xmaxCommitted_setAfterDeleteLookup() {
+        HeapTupleHeader header = createHeader(5, 12);
+        clog.setCommitted(5);
+        clog.setCommitted(12);
+
+        Snapshot snap = new Snapshot(15, 20, Collections.emptySet());
+        TupleVisibility.isVisible(header, snap, clog);
+
+        assertThat(header.hasInfomaskFlag(HeapTupleHeader.XMAX_COMMITTED)).isTrue();
+        assertThat(header.hasInfomaskFlag(HeapTupleHeader.XMAX_INVALID)).isFalse();
+    }
+
+    @Test
+    void hintBit_xmaxInvalid_setForAbortedDelete() {
+        HeapTupleHeader header = createHeader(5, 12);
+        clog.setCommitted(5);
+        clog.setAborted(12);
+
+        Snapshot snap = new Snapshot(15, 20, Collections.emptySet());
+        TupleVisibility.isVisible(header, snap, clog);
+
+        assertThat(header.hasInfomaskFlag(HeapTupleHeader.XMAX_INVALID)).isTrue();
+        assertThat(header.hasInfomaskFlag(HeapTupleHeader.XMAX_COMMITTED)).isFalse();
+    }
+
+    @Test
+    void hintBit_xminCommitted_skipsClogOnSecondCheck() {
+        HeapTupleHeader header = createHeader(5, Constants.INVALID_XID);
+        clog.setCommitted(5);
+
+        Snapshot snap = new Snapshot(10, 20, Collections.emptySet());
+        // First check: queries clog, sets XMIN_COMMITTED
+        assertThat(TupleVisibility.isVisible(header, snap, clog)).isTrue();
+        assertThat(header.hasInfomaskFlag(HeapTupleHeader.XMIN_COMMITTED)).isTrue();
+
+        // Second check: hint bit is already set — same result without clog
+        assertThat(TupleVisibility.isVisible(header, snap, clog)).isTrue();
+    }
+
+    @Test
+    void hintBit_notSetWhenXidIsInFuture() {
+        // xmin=25 >= snap.xmax=20 → filtered before clog
+        HeapTupleHeader header = createHeader(25, Constants.INVALID_XID);
+        clog.setCommitted(25);
+
+        Snapshot snap = new Snapshot(10, 20, Collections.emptySet());
+        assertThat(TupleVisibility.isVisible(header, snap, clog)).isFalse();
+
+        assertThat(header.hasInfomaskFlag(HeapTupleHeader.XMIN_COMMITTED)).isFalse();
+        assertThat(header.hasInfomaskFlag(HeapTupleHeader.XMIN_INVALID)).isFalse();
+    }
+
+    @Test
+    void hintBit_notSetWhenXidIsInActiveSet() {
+        // xmin=15 in activeXids → filtered before clog
+        HeapTupleHeader header = createHeader(15, Constants.INVALID_XID);
+        clog.setCommitted(15);
+
+        Snapshot snap = new Snapshot(10, 20, Set.of(15));
+        assertThat(TupleVisibility.isVisible(header, snap, clog)).isFalse();
+
+        assertThat(header.hasInfomaskFlag(HeapTupleHeader.XMIN_COMMITTED)).isFalse();
+    }
+
+    @Test
+    void hintBit_xminCommitted_visibilityStillRespectsFutureXid() {
+        // Hint says committed, but xmin is in the future for this snapshot
+        HeapTupleHeader header = createHeader(25, Constants.INVALID_XID);
+        // Manually set the hint bit as if a previous check saw it committed
+        header.setInfomaskFlag(HeapTupleHeader.XMIN_COMMITTED);
+
+        // Snapshot where xmin=25 is in the future (xmax=20)
+        Snapshot snap = new Snapshot(10, 20, Collections.emptySet());
+        assertThat(TupleVisibility.isVisible(header, snap, clog)).isFalse();
     }
 }
