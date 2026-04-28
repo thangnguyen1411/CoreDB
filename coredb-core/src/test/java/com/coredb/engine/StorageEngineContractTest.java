@@ -5,6 +5,9 @@ import com.coredb.api.Schema;
 import com.coredb.buffer.BufferPool;
 import com.coredb.catalog.TableMeta;
 import com.coredb.config.EngineType;
+import com.coredb.txn.ClogManager;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -34,6 +37,20 @@ public abstract class StorageEngineContractTest {
 
     @TempDir
     protected Path tempDir;
+
+    private ClogManager clog;
+
+    @BeforeEach
+    void setUp() throws Exception {
+        clog = ClogManager.create(tempDir);
+    }
+
+    @AfterEach
+    void tearDown() throws Exception {
+        if (clog != null) {
+            clog.close();
+        }
+    }
 
     /**
      * Factory method for creating the storage engine under test.
@@ -69,7 +86,7 @@ public abstract class StorageEngineContractTest {
         TableMeta meta = createTestTableMeta();
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta, pool, null);
+            engine.open(tempDir, meta, pool, null, clog);
 
             Row row = Row.of(1L, "Alice", 30);
             engine.put(1L, row);
@@ -89,7 +106,7 @@ public abstract class StorageEngineContractTest {
         // First put
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(dataDir, meta)) {
-            engine.open(dataDir, meta, pool, null);
+            engine.open(dataDir, meta, pool, null, clog);
             Row original = Row.of(1L, "Alice", 30);
             engine.put(1L, original);
         }
@@ -97,7 +114,7 @@ public abstract class StorageEngineContractTest {
         // Second put (upsert)
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(dataDir, meta)) {
-            engine.open(dataDir, meta, pool, null);
+            engine.open(dataDir, meta, pool, null, clog);
             Row updated = Row.of(1L, "Bob", 31);
             engine.put(1L, updated);
 
@@ -116,7 +133,7 @@ public abstract class StorageEngineContractTest {
         TableMeta meta = createTestTableMeta();
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta, pool, null);
+            engine.open(tempDir, meta, pool, null, clog);
 
             Row row = Row.of(1L, "Alice", 30);
             engine.put(1L, row);
@@ -133,7 +150,7 @@ public abstract class StorageEngineContractTest {
         TableMeta meta = createTestTableMeta();
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta, pool, null);
+            engine.open(tempDir, meta, pool, null, clog);
 
             // Should not throw
             engine.delete(999L);
@@ -147,7 +164,7 @@ public abstract class StorageEngineContractTest {
         TableMeta meta = createTestTableMeta();
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta, pool, null);
+            engine.open(tempDir, meta, pool, null, clog);
 
             // Insert in scrambled order
             engine.put(5L, Row.of(5L, "Eve", 25));
@@ -180,7 +197,7 @@ public abstract class StorageEngineContractTest {
         TableMeta meta = createTestTableMeta();
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta, pool, null);
+            engine.open(tempDir, meta, pool, null, clog);
 
             engine.put(1L, Row.of(1L, "Alice", 30));
             engine.put(5L, Row.of(5L, "Eve", 25));
@@ -196,7 +213,7 @@ public abstract class StorageEngineContractTest {
         TableMeta meta = createTestTableMeta();
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta, pool, null);
+            engine.open(tempDir, meta, pool, null, clog);
 
             engine.put(1L, Row.of(1L, "Alice", 30));
 
@@ -210,7 +227,7 @@ public abstract class StorageEngineContractTest {
         TableMeta meta = createTestTableMeta();
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta, pool, null);
+            engine.open(tempDir, meta, pool, null, clog);
 
             engine.put(1L, Row.of(1L, "Alice", 30));
             engine.put(2L, Row.of(2L, "Bob", 25));
@@ -232,7 +249,7 @@ public abstract class StorageEngineContractTest {
         TableMeta meta = createTestTableMeta();
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta, pool, null);
+            engine.open(tempDir, meta, pool, null, clog);
 
             engine.put(1L, Row.of(1L, "Alice", 30));
             engine.put(2L, Row.of(2L, "Bob", 25));
@@ -260,7 +277,7 @@ public abstract class StorageEngineContractTest {
         // First session: insert rows
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(dataDir, meta)) {
-            engine.open(dataDir, meta, pool, null);
+            engine.open(dataDir, meta, pool, null, clog);
             engine.put(1L, Row.of(1L, "Alice", 30));
             engine.put(2L, Row.of(2L, "Bob", 25));
             engine.flush();
@@ -269,7 +286,7 @@ public abstract class StorageEngineContractTest {
         // Second session: verify persistence
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(dataDir, meta)) {
-            engine.open(dataDir, meta, pool, null);
+            engine.open(dataDir, meta, pool, null, clog);
 
             Optional<Row> alice = engine.get(1L);
             assertThat(alice).isPresent();
@@ -286,7 +303,7 @@ public abstract class StorageEngineContractTest {
         TableMeta meta = createTestTableMeta();
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(tempDir, meta)) {
-            engine.open(tempDir, meta, pool, null);
+            engine.open(tempDir, meta, pool, null, clog);
 
             // Insert, delete, re-insert with same PK
             Row original = Row.of(1L, "Alice", 30);

@@ -2,6 +2,7 @@ package com.coredb.catalog;
 
 import com.coredb.api.CoreDBConfig;
 import com.coredb.buffer.BufferPool;
+import com.coredb.txn.ClogManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -26,7 +27,8 @@ class CatalogTest {
         ControlFile cf = ControlFile.load(tempDir);
 
         try (BufferPool pool = new BufferPool();
-             Catalog catalog = new Catalog(tempDir, cf, pool)) {
+             ClogManager clog = ClogManager.open(tempDir);
+             Catalog catalog = new Catalog(tempDir, cf, pool, clog)) {
             // Initially no user tables (only system catalogs which are filtered)
             List<TableMeta> tables = catalog.listTables();
             assertThat(tables).isEmpty();
@@ -53,7 +55,8 @@ class CatalogTest {
         ControlFile cf = ControlFile.load(tempDir);
 
         try (BufferPool pool = new BufferPool();
-             Catalog catalog = new Catalog(tempDir, cf, pool)) {
+             ClogManager clog = ClogManager.open(tempDir);
+             Catalog catalog = new Catalog(tempDir, cf, pool, clog)) {
             // Create a table
             ColumnDefParser.ParsedSchema parsed = parse("id:long name:string pk:id");
             catalog.createTable("products", parsed.schema(), parsed.pkColumn());
@@ -76,7 +79,8 @@ class CatalogTest {
         ControlFile cf = ControlFile.load(tempDir);
 
         try (BufferPool pool = new BufferPool();
-             Catalog catalog = new Catalog(tempDir, cf, pool)) {
+             ClogManager clog = ClogManager.open(tempDir);
+             Catalog catalog = new Catalog(tempDir, cf, pool, clog)) {
             ColumnDefParser.ParsedSchema parsed = parse("id:long pk:id");
             catalog.createTable("items", parsed.schema(), parsed.pkColumn());
 
@@ -94,7 +98,8 @@ class CatalogTest {
 
         // Create table in first session
         try (BufferPool pool = new BufferPool();
-             Catalog catalog = new Catalog(tempDir, cf, pool)) {
+             ClogManager clog = ClogManager.open(tempDir);
+             Catalog catalog = new Catalog(tempDir, cf, pool, clog)) {
             ColumnDefParser.ParsedSchema parsed = parse("id:long name:string pk:id");
             catalog.createTable("customers", parsed.schema(), parsed.pkColumn());
         }
@@ -102,7 +107,8 @@ class CatalogTest {
         // Reopen and verify
         ControlFile cf2 = ControlFile.load(tempDir);
         try (BufferPool pool2 = new BufferPool();
-             Catalog catalog2 = new Catalog(tempDir, cf2, pool2)) {
+             ClogManager clog2 = ClogManager.open(tempDir);
+             Catalog catalog2 = new Catalog(tempDir, cf2, pool2, clog2)) {
             Optional<TableMeta> metaOpt = catalog2.openTable("customers");
             assertThat(metaOpt).isPresent();
             assertThat(metaOpt.get().name()).isEqualTo("customers");
@@ -116,7 +122,8 @@ class CatalogTest {
         ControlFile cf = ControlFile.load(tempDir);
 
         try (BufferPool pool = new BufferPool();
-             Catalog catalog = new Catalog(tempDir, cf, pool)) {
+             ClogManager clog = ClogManager.open(tempDir);
+             Catalog catalog = new Catalog(tempDir, cf, pool, clog)) {
             // Create and drop a table
             ColumnDefParser.ParsedSchema parsed = parse("id:long name:string pk:id");
             catalog.createTable("temp", parsed.schema(), parsed.pkColumn());
@@ -142,7 +149,8 @@ class CatalogTest {
         ControlFile cf = ControlFile.load(tempDir);
 
         try (BufferPool pool = new BufferPool();
-             Catalog catalog = new Catalog(tempDir, cf, pool)) {
+             ClogManager clog = ClogManager.open(tempDir);
+             Catalog catalog = new Catalog(tempDir, cf, pool, clog)) {
             // Create a table
             ColumnDefParser.ParsedSchema parsed = parse("id:long name:string pk:id");
             catalog.createTable("reusable", parsed.schema(), parsed.pkColumn());
@@ -168,7 +176,8 @@ class CatalogTest {
         ControlFile cf = ControlFile.load(tempDir);
 
         try (BufferPool pool = new BufferPool();
-             Catalog catalog = new Catalog(tempDir, cf, pool)) {
+             ClogManager clog = ClogManager.open(tempDir);
+             Catalog catalog = new Catalog(tempDir, cf, pool, clog)) {
             // Create a table without PK
             ColumnDefParser.ParsedSchema parsed = parse("level:string message:string");
             catalog.createTable("logs", parsed.schema(), parsed.pkColumn());
@@ -192,7 +201,8 @@ class CatalogTest {
         ControlFile cf = ControlFile.load(tempDir);
 
         try (BufferPool pool = new BufferPool();
-             Catalog catalog = new Catalog(tempDir, cf, pool)) {
+             ClogManager clog = ClogManager.open(tempDir);
+             Catalog catalog = new Catalog(tempDir, cf, pool, clog)) {
             assertThatThrownBy(() -> catalog.dropTable("nonexistent"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Table not found");
