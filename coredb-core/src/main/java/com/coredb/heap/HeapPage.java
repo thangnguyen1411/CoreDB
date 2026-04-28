@@ -137,6 +137,11 @@ public final class HeapPage {
         }
         int oldOffset = ItemId.offset(oldRaw);
 
+        HeapTupleHeader oldHeader = HeapTupleHeader.readFrom(page.buffer(), oldOffset);
+        if (oldHeader.xmax() != com.coredb.util.Constants.INVALID_XID) {
+            throw new StorageException("slot " + slotNo + " is already deleted");
+        }
+
         int headerSize = HeapTupleHeader.computeHeaderSize(natts);
         int tupleSize = headerSize + dataBytes.length;
         if (freeBytes() < tupleSize + ItemId.SIZE) {
@@ -161,7 +166,6 @@ public final class HeapPage {
         page.setPdUpper((short) newUpper);
 
         // Update old tuple in-place: xmax marks it deleted, ctid chains to new version.
-        HeapTupleHeader oldHeader = HeapTupleHeader.readFrom(page.buffer(), oldOffset);
         oldHeader.setXmax(xid);
         oldHeader.setCtid(newRid);
         oldHeader.writeTo(page.buffer(), oldOffset);

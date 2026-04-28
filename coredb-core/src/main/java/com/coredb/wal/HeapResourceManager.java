@@ -118,7 +118,7 @@ public final class HeapResourceManager implements ResourceManager {
      * 0       4     slotNo         slot to delete
      * </pre>
      *
-     * <p>Sets the tuple's t_xmax to BOOTSTRAP_XID and marks the ItemId as DEAD.</p>
+     * <p>Sets the tuple's t_xmax to the deleting XID; ItemId stays FLAGS_NORMAL.</p>
      */
     private void redoDelete(XLogRecord record, ByteBuffer page) {
         byte[] data = record.data();
@@ -132,14 +132,10 @@ public final class HeapResourceManager implements ResourceManager {
         int tupleOffset = ItemId.offset(rawItemId);
         int tupleLength = ItemId.length(rawItemId);
 
-        // Read and update the tuple header
+        // Set xmax so MVCC visibility governs this tuple; ItemId stays FLAGS_NORMAL.
         HeapTupleHeader header = HeapTupleHeader.readFrom(page, tupleOffset);
-        header.setXmax(com.coredb.util.Constants.BOOTSTRAP_XID);
+        header.setXmax(record.xid());
         header.writeTo(page, tupleOffset);
-
-        // Mark ItemId as DEAD (keep same offset and length)
-        int deadItemId = ItemId.pack(tupleOffset, ItemId.FLAGS_DEAD, tupleLength);
-        page.putInt(itemIdOffset, deadItemId);
     }
 
     /**

@@ -8,6 +8,7 @@ import com.coredb.fsm.FreeSpaceMap;
 import com.coredb.mvcc.Snapshot;
 import com.coredb.page.ItemId;
 import com.coredb.page.Page;
+import com.coredb.page.PageHeader;
 import com.coredb.page.PageIO;
 import com.coredb.page.PageType;
 import com.coredb.txn.ClogManager;
@@ -568,6 +569,20 @@ public final class HeapFile implements AutoCloseable {
             throw new StorageException("page " + rid.pageId() + " is not a heap page");
         }
         HeapPage heapPage = new HeapPage(page);
+
+        // Validate old slot is live before emitting WAL — a stale WAL record
+        // on a dead tuple would replay an invalid version chain during recovery.
+        int oldRaw = page.buffer().getInt(PageHeader.SIZE + rid.slotNo() * ItemId.SIZE);
+        if (ItemId.flags(oldRaw) != ItemId.FLAGS_NORMAL) {
+            pinned.unpin(false);
+            throw new StorageException("slot " + rid.slotNo() + " is not a live tuple");
+        }
+        int oldOffset = ItemId.offset(oldRaw);
+        HeapTupleHeader existingHeader = HeapTupleHeader.readFrom(page.buffer(), oldOffset);
+        if (existingHeader.xmax() != Constants.INVALID_XID) {
+            pinned.unpin(false);
+            throw new StorageException("slot " + rid.slotNo() + " is already deleted");
+        }
 
         int newSlotNo = heapPage.slotCount();
 
