@@ -5,6 +5,7 @@ import com.coredb.heap.RecordId;
 import com.coredb.page.ItemId;
 import com.coredb.page.PageHeader;
 import com.coredb.util.BinaryUtil;
+import com.coredb.util.CorruptionException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -131,6 +132,10 @@ public final class HeapResourceManager implements ResourceManager {
         // Read the ItemId to find tuple offset
         int itemIdOffset = PageHeader.SIZE + slotNo * ItemId.SIZE;
         int rawItemId = page.getInt(itemIdOffset);
+        if (ItemId.flags(rawItemId) != ItemId.FLAGS_NORMAL) {
+            throw new CorruptionException(
+                "redoDelete: slot " + slotNo + " is not FLAGS_NORMAL (flags=" + ItemId.flags(rawItemId) + ")");
+        }
         int tupleOffset = ItemId.offset(rawItemId);
 
         // Set xmax so MVCC visibility governs this tuple; ItemId stays FLAGS_NORMAL.
@@ -201,7 +206,7 @@ public final class HeapResourceManager implements ResourceManager {
         short currentPdLower = BinaryUtil.readU16(page, PageHeader.OFFSET_PD_LOWER);
         int currentSlotCount = (currentPdLower - PageHeader.SIZE) / ItemId.SIZE;
         if (oldSlotNo >= currentSlotCount) {
-            throw new com.coredb.util.CorruptionException(
+            throw new CorruptionException(
                 "redoUpdate: oldSlotNo " + oldSlotNo + " out of bounds (slots=" + currentSlotCount + ")");
         }
         int oldItemIdOffset = PageHeader.SIZE + oldSlotNo * ItemId.SIZE;

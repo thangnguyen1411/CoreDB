@@ -121,10 +121,10 @@ public class BTreeStorageEngine implements StorageEngine {
         Optional<RecordId> existing = pkIndex.search(pk);
         if (existing.isPresent()) {
             RecordId oldRid = existing.get();
-            // Update creates a version chain: old tuple gets xmax=currentXid and
-            // ctid pointing to the new tuple; new tuple gets xmin=currentXid.
-            RecordId newRid = heap.update(oldRid, row, currentXid);
+            // Delete index entry first: if heap.update() fails, old tuple is still
+            // live (xmax not set) so the row remains findable via scan.
             pkIndex.delete(pk);
+            RecordId newRid = heap.update(oldRid, row, currentXid);
             pkIndex.insert(pk, newRid);
             log.debug("Updated row with pk={}: oldRid={} -> newRid={}", pk, oldRid, newRid);
         } else {
