@@ -67,15 +67,10 @@ class BTreeStorageEngineTest extends StorageEngineContractTest {
                         ByteBuffer buf = pageData.buffer();
                         HeapTupleHeader header = HeapTupleHeader.readFrom(buf, offset);
 
-                        // In our stub visibility model:
-                        // - xmin = BOOTSTRAP_XID, xmax = INVALID_XID  => live
-                        // - xmin = BOOTSTRAP_XID, xmax != INVALID_XID => dead (deleted)
-                        if (header.xmin() == com.coredb.util.Constants.BOOTSTRAP_XID) {
-                            if (header.xmax() == com.coredb.util.Constants.INVALID_XID) {
-                                liveCount++;
-                            } else {
-                                deadCount++;
-                            }
+                        if (header.xmax() == com.coredb.util.Constants.INVALID_XID) {
+                            liveCount++;
+                        } else {
+                            deadCount++;
                         }
                     } catch (Exception e) {
                         // Skip invalid slots

@@ -73,6 +73,10 @@ public final class HeapPage {
     }
 
     public Optional<byte[]> get(int slotNo, Snapshot snapshot, ClogManager clog) {
+        return get(slotNo, snapshot, clog, com.coredb.util.Constants.INVALID_XID);
+    }
+
+    public Optional<byte[]> get(int slotNo, Snapshot snapshot, ClogManager clog, int currentXid) {
         checkSlot(slotNo);
         int raw = page.readItemId(slotNo);
         if (ItemId.flags(raw) != ItemId.FLAGS_NORMAL) {
@@ -82,7 +86,7 @@ public final class HeapPage {
         HeapTupleHeader header = HeapTupleHeader.readFrom(page.buffer(), offset);
 
         short infomaskBefore = header.infomask();
-        boolean visible = TupleVisibility.isVisible(header, snapshot, clog);
+        boolean visible = TupleVisibility.isVisible(header, snapshot, clog, currentXid);
         if (header.infomask() != infomaskBefore) {
             // Hint bits were set during visibility check — write back to page buffer.
             // No WAL emitted: hint bits are a recomputable clog cache.
@@ -187,6 +191,10 @@ public final class HeapPage {
     }
 
     public List<RecordId> scan(Snapshot snapshot, ClogManager clog) {
+        return scan(snapshot, clog, com.coredb.util.Constants.INVALID_XID);
+    }
+
+    public List<RecordId> scan(Snapshot snapshot, ClogManager clog, int currentXid) {
         List<RecordId> visible = new ArrayList<>();
         int count = slotCount();
         for (int slotNo = 0; slotNo < count; slotNo++) {
@@ -197,7 +205,7 @@ public final class HeapPage {
             int offset = ItemId.offset(raw);
             HeapTupleHeader header = HeapTupleHeader.readFrom(page.buffer(), offset);
             short infomaskBefore = header.infomask();
-            boolean vis = TupleVisibility.isVisible(header, snapshot, clog);
+            boolean vis = TupleVisibility.isVisible(header, snapshot, clog, currentXid);
             if (header.infomask() != infomaskBefore) {
                 // Hint bits were set — write back to page buffer (no WAL).
                 header.writeTo(page.buffer(), offset);
