@@ -83,6 +83,30 @@ class PageCompactorTest {
     }
 
     @Test
+    void isDead_returnsFalse_whenXminIsInvalidXid() {
+        // A malformed tuple with xmin=0 must not cause a clog lookup (which would throw).
+        HeapTupleHeader h = headerWithXminXmax(Constants.INVALID_XID, Constants.INVALID_XID);
+        assertThat(PageCompactor.isDead(h, 10, clog)).isFalse();
+    }
+
+    @Test
+    void isDead_returnsTrue_whenXmaxCommittedHintBitSetAndLtOldestXmin() {
+        // XMAX_COMMITTED hint bit should skip clog lookup and still detect dead tuple.
+        HeapTupleHeader h = headerWithXminXmax(Constants.BOOTSTRAP_XID, 5);
+        h.setInfomaskFlag(HeapTupleHeader.XMAX_COMMITTED);
+        // xmax=5 is flagged committed via hint bit, no clog entry required
+        assertThat(PageCompactor.isDead(h, 10, clog)).isTrue();
+    }
+
+    @Test
+    void isDead_returnsFalse_whenXmaxInvalidHintBitSet() {
+        // XMAX_INVALID hint bit means the delete was rolled back — tuple is live.
+        HeapTupleHeader h = headerWithXminXmax(Constants.BOOTSTRAP_XID, 5);
+        h.setInfomaskFlag(HeapTupleHeader.XMAX_INVALID);
+        assertThat(PageCompactor.isDead(h, 10, clog)).isFalse();
+    }
+
+    @Test
     void isDead_returnsFalse_forBootstrapXmin() {
         // Bootstrap tuples (catalog rows) are always visible — never dead
         HeapTupleHeader h = headerWithXminXmax(Constants.BOOTSTRAP_XID, Constants.INVALID_XID);
@@ -188,7 +212,7 @@ class PageCompactorTest {
     }
 
     @Test
-    void compact_doesNotReclaimDeleteWithUncommittedXmax() throws Exception {
+    void compact_doesNotReclaimDeleteWhenXmaxGteOldestXmin() throws Exception {
         // xmax is committed but >= oldestXmin — some reader may still see the old version
         HeapPage hp = freshHeapPage(1);
         hp.insert(new byte[]{1, 2, 3}, (short) 1, Constants.BOOTSTRAP_XID);
@@ -198,7 +222,7 @@ class PageCompactorTest {
 
         byte[] pageBytes = pageBytes(hp);
 
-        // oldestXmin=50 — delete xid equals horizon, so tuple is still potentially visible
+        // oldestXmin=50 — delete xid equals the horizon, not strictly behind it
         CompactionResult result = PageCompactor.compact(pageBytes, 50, clog);
 
         assertThat(result.deadSlots()).isEmpty();

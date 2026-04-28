@@ -55,7 +55,17 @@ public final class PageCompactor {
         if (xmax == Constants.INVALID_XID) {
             return false;
         }
-        if (clog.getStatus(xmax) != ClogManager.Status.COMMITTED) {
+        // Fast-path: hint bits cached from a prior visibility check skip the clog.
+        if (header.hasInfomaskFlag(HeapTupleHeader.XMAX_INVALID)) {
+            return false;
+        }
+        boolean xmaxCommitted;
+        if (header.hasInfomaskFlag(HeapTupleHeader.XMAX_COMMITTED)) {
+            xmaxCommitted = true;
+        } else {
+            xmaxCommitted = clog.getStatus(xmax) == ClogManager.Status.COMMITTED;
+        }
+        if (!xmaxCommitted) {
             return false;
         }
         return Integer.compareUnsigned(xmax, oldestXmin) < 0;
@@ -67,7 +77,9 @@ public final class PageCompactor {
      */
     public static boolean isInsertAborted(HeapTupleHeader header, ClogManager clog) {
         int xmin = header.xmin();
-        if (xmin == Constants.BOOTSTRAP_XID || xmin == Constants.FROZEN_XID) {
+        if (xmin == Constants.INVALID_XID
+                || xmin == Constants.BOOTSTRAP_XID
+                || xmin == Constants.FROZEN_XID) {
             return false;
         }
         if (header.hasInfomaskFlag(HeapTupleHeader.XMIN_COMMITTED)) {
