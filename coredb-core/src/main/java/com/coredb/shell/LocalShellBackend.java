@@ -25,6 +25,8 @@ import com.coredb.wal.XLogReader;
 import com.coredb.wal.XLogRecord;
 import com.coredb.wal.XLogResourceManager;
 import com.coredb.txn.ClogManager;
+import com.coredb.txn.Transaction;
+import com.coredb.txn.TransactionManager;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
@@ -69,6 +71,59 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         String command = parts[0].toLowerCase();
         String args = parts.length > 1 ? parts[1] : "";
 
+        // Transaction control commands are never auto-committed
+        return switch (command) {
+            case "begin"    -> handleBegin();
+            case "commit"   -> handleCommit();
+            case "rollback" -> handleRollback();
+            default         -> executeWithAutoCommit(command, args);
+        };
+    }
+
+    /**
+     * Runs a command inside an auto-commit transaction when no transaction is active.
+     *
+     * <p>If the caller has already issued {@code begin}, the command runs inside that
+     * transaction and the caller is responsible for {@code commit} or {@code rollback}.
+     * Otherwise a transaction is begun, the command runs, and it is committed on success
+     * or rolled back if an unchecked exception propagates.
+     *
+     * <p>The engine requires an active transaction for every mutation or read. This
+     * wrapper satisfies that requirement transparently for single-statement shell usage.
+     */
+    private String executeWithAutoCommit(String command, String args) {
+        TransactionManager txnMgr = db.transactionManager();
+        boolean autoCommit = txnMgr.currentTransaction() == null;
+
+        Transaction tx = null;
+        if (autoCommit) {
+            try {
+                tx = txnMgr.beginTransaction();
+            } catch (IOException e) {
+                return "error: failed to begin transaction: " + e.getMessage();
+            }
+        }
+
+        try {
+            String result = dispatch(command, args);
+            if (autoCommit) {
+                txnMgr.commit(tx);
+            }
+            return result;
+        } catch (RuntimeException e) {
+            if (autoCommit && tx != null) {
+                try { txnMgr.rollback(tx); } catch (IOException ignored) {}
+            }
+            throw e;
+        } catch (Exception e) {
+            if (autoCommit && tx != null) {
+                try { txnMgr.rollback(tx); } catch (IOException ignored) {}
+            }
+            return "error: " + e.getMessage();
+        }
+    }
+
+    private String dispatch(String command, String args) {
         return switch (command) {
             case "version" -> formatVersion();
             case "status" -> formatStatus();
@@ -101,10 +156,51 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             case "vacuum" -> handleVacuum(args);
             case "vacuum-stats" -> handleVacuumStats(args);
             case "help" -> formatHelp();
-            default -> "unknown command: " +
-            command +
-            "  (type 'help' for available commands)";
+            default -> "unknown command: " + command + "  (type 'help' for available commands)";
         };
+    }
+
+    private String handleBegin() {
+        TransactionManager txnMgr = db.transactionManager();
+        if (txnMgr.currentTransaction() != null) {
+            return "error: transaction already active (xid=" + txnMgr.currentTransaction().xid() + ")";
+        }
+        try {
+            Transaction tx = txnMgr.beginTransaction();
+            return "xid=" + tx.xid() + " started";
+        } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    private String handleCommit() {
+        TransactionManager txnMgr = db.transactionManager();
+        Transaction tx = txnMgr.currentTransaction();
+        if (tx == null) {
+            return "error: no active transaction";
+        }
+        int xid = tx.xid();
+        try {
+            txnMgr.commit(tx);
+            return "xid=" + xid + " committed";
+        } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
+    }
+
+    private String handleRollback() {
+        TransactionManager txnMgr = db.transactionManager();
+        Transaction tx = txnMgr.currentTransaction();
+        if (tx == null) {
+            return "error: no active transaction";
+        }
+        int xid = tx.xid();
+        try {
+            txnMgr.rollback(tx);
+            return "xid=" + xid + " aborted";
+        } catch (IOException e) {
+            return "error: " + e.getMessage();
+        }
     }
 
     private String formatVersion() {
@@ -169,6 +265,9 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
           recovery-status            show last recovery statistics
 
         Transaction commands:
+          begin                      start a new transaction
+          commit                     commit the current transaction
+          rollback                   abort the current transaction
           clog-status [xid]          show transaction status log summary or specific XID status
         """;
     }

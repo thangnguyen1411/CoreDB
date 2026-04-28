@@ -11,11 +11,10 @@ import java.time.Instant;
  *   <li>Count of records redone</li>
  *   <li>Count of full-page writes restored</li>
  *   <li>Count of records skipped by pd_lsn check (already applied)</li>
+ *   <li>Count of XACT_COMMIT / XACT_ABORT records replayed into clog</li>
+ *   <li>Count of in-progress XIDs swept to ABORTED at startup</li>
  *   <li>Timing information</li>
  * </ul>
- *
- * <p>This matches PostgreSQL's recovery statistics reporting in
- * startup logs.</p>
  */
 public final class RecoveryStats {
 
@@ -24,22 +23,37 @@ public final class RecoveryStats {
     private final int redone;
     private final int fpwRestored;
     private final int skippedByPdLsn;
+    private final int xactCommitReplayed;
+    private final int xactAbortReplayed;
+    private final int xidsSweptToAborted;
     private final Instant ranAt;
     private final long elapsedMillis;
     private final String noRecoveryReason;
 
     public RecoveryStats(long startLsn, long endLsn, int redone, int fpwRestored, int skippedByPdLsn,
                          Instant ranAt, long elapsedMillis) {
-        this(startLsn, endLsn, redone, fpwRestored, skippedByPdLsn, ranAt, elapsedMillis, null);
+        this(startLsn, endLsn, redone, fpwRestored, skippedByPdLsn, 0, 0, 0, ranAt, elapsedMillis, null);
+    }
+
+    public RecoveryStats(long startLsn, long endLsn, int redone, int fpwRestored, int skippedByPdLsn,
+                         int xactCommitReplayed, int xactAbortReplayed, int xidsSweptToAborted,
+                         Instant ranAt, long elapsedMillis) {
+        this(startLsn, endLsn, redone, fpwRestored, skippedByPdLsn,
+             xactCommitReplayed, xactAbortReplayed, xidsSweptToAborted,
+             ranAt, elapsedMillis, null);
     }
 
     private RecoveryStats(long startLsn, long endLsn, int redone, int fpwRestored, int skippedByPdLsn,
+                          int xactCommitReplayed, int xactAbortReplayed, int xidsSweptToAborted,
                           Instant ranAt, long elapsedMillis, String noRecoveryReason) {
         this.startLsn = startLsn;
         this.endLsn = endLsn;
         this.redone = redone;
         this.fpwRestored = fpwRestored;
         this.skippedByPdLsn = skippedByPdLsn;
+        this.xactCommitReplayed = xactCommitReplayed;
+        this.xactAbortReplayed = xactAbortReplayed;
+        this.xidsSweptToAborted = xidsSweptToAborted;
         this.ranAt = ranAt;
         this.elapsedMillis = elapsedMillis;
         this.noRecoveryReason = noRecoveryReason;
@@ -50,40 +64,28 @@ public final class RecoveryStats {
     public int redone() { return redone; }
     public int fpwRestored() { return fpwRestored; }
     public int skippedByPdLsn() { return skippedByPdLsn; }
+    public int xactCommitReplayed() { return xactCommitReplayed; }
+    public int xactAbortReplayed() { return xactAbortReplayed; }
+    public int xidsSweptToAborted() { return xidsSweptToAborted; }
     public Instant ranAt() { return ranAt; }
     public long elapsedMillis() { return elapsedMillis; }
 
-    /**
-     * Creates stats indicating no recovery was needed (clean shutdown or fresh bootstrap).
-     */
     public static RecoveryStats noRecoveryNeeded(String reason) {
-        return new RecoveryStats(0, 0, 0, 0, 0, Instant.now(), 0, reason);
+        return new RecoveryStats(0, 0, 0, 0, 0, 0, 0, 0, Instant.now(), 0, reason);
     }
 
-    /**
-     * Returns true if this represents a "no recovery needed" scenario.
-     */
     public boolean isNoRecovery() {
         return noRecoveryReason != null;
     }
 
-    /**
-     * Returns the reason why no recovery was needed, or null if recovery ran.
-     */
     public String noRecoveryReason() {
         return noRecoveryReason;
     }
 
-    /**
-     * Total number of WAL records processed.
-     */
     public int totalRecords() {
-        return redone + fpwRestored + skippedByPdLsn;
+        return redone + fpwRestored + skippedByPdLsn + xactCommitReplayed + xactAbortReplayed;
     }
 
-    /**
-     * Formats the recovery statistics for display.
-     */
     public String format() {
         if (isNoRecovery()) {
             return "no recovery on last open (" + noRecoveryReason + ")";
@@ -91,9 +93,11 @@ public final class RecoveryStats {
         return String.format(
             "last-recovery: replayed-from=lsn=%d  to=lsn=%d%n" +
             "   redone=%d  fpw-restored=%d  skipped-by-pd_lsn=%d%n" +
+            "   xact-commit-replayed=%d  xact-abort-replayed=%d  xids-swept-to-aborted=%d%n" +
             "   ran-at=%s  elapsed=%dms",
             startLsn, endLsn,
             redone, fpwRestored, skippedByPdLsn,
+            xactCommitReplayed, xactAbortReplayed, xidsSweptToAborted,
             ranAt, elapsedMillis
         );
     }

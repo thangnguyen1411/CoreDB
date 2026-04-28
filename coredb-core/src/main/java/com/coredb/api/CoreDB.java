@@ -61,7 +61,7 @@ public final class CoreDB implements AutoCloseable {
         this.clog = clog;
         this.catalog = catalog;
         this.snapshotManager = snapshotManager;
-        this.transactionManager = new TransactionManager(controlFile, snapshotManager, clog);
+        this.transactionManager = new TransactionManager(controlFile, snapshotManager, clog, xlogWriter);
         this.engineCache = new ConcurrentHashMap<>();
         this.lastRecoveryStats = lastRecoveryStats;
         log.debug(
