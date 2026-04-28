@@ -70,9 +70,6 @@ public abstract class StorageEngineContractTest {
         }
     }
 
-    /**
-     * Factory method for creating the storage engine under test.
-     */
     protected abstract StorageEngine createEngine(Path dataDir, TableMeta meta) throws IOException;
 
     /**
@@ -91,18 +88,15 @@ public abstract class StorageEngineContractTest {
         return new TableMeta(1002, "test_table", schema, "id", EngineType.BTREE);
     }
 
-    /** Begins a transaction via the shared manager. */
     protected Transaction begin() throws IOException {
         return transactionManager.beginTransaction();
     }
 
-    /** Commits the given transaction. */
-    protected void commit(Transaction tx) {
+    protected void commit(Transaction tx) throws IOException {
         transactionManager.commit(tx);
     }
 
-    /** Rolls back the given transaction. */
-    protected void rollback(Transaction tx) {
+    protected void rollback(Transaction tx) throws IOException {
         transactionManager.rollback(tx);
     }
 
@@ -131,7 +125,6 @@ public abstract class StorageEngineContractTest {
         Files.createDirectories(dataDir);
         Files.createDirectories(dataDir.resolve("global"));
 
-        // First put in session 1
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(dataDir, meta)) {
             engine.open(dataDir, meta, pool, null, clog, transactionManager);
@@ -141,7 +134,6 @@ public abstract class StorageEngineContractTest {
             commit(tx);
         }
 
-        // Second put in session 2 (upsert)
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(dataDir, meta)) {
             engine.open(dataDir, meta, pool, null, clog, transactionManager);
@@ -187,7 +179,6 @@ public abstract class StorageEngineContractTest {
             engine.open(tempDir, meta, pool, null, clog, transactionManager);
 
             Transaction tx = begin();
-            // Should not throw
             engine.delete(999L);
             assertThat(engine.get(999L)).isEmpty();
             commit(tx);
@@ -202,7 +193,6 @@ public abstract class StorageEngineContractTest {
             engine.open(tempDir, meta, pool, null, clog, transactionManager);
 
             Transaction tx = begin();
-            // Insert in scrambled order
             engine.put(5L, Row.of(5L, "Eve", 25));
             engine.put(1L, Row.of(1L, "Alice", 30));
             engine.put(3L, Row.of(3L, "Charlie", 35));
@@ -211,7 +201,6 @@ public abstract class StorageEngineContractTest {
 
             Iterator<Map.Entry<Long, Row>> it = engine.rangeScan(2L, 4L);
 
-            // Should return keys 2, 3, 4 in order
             assertThat(it.hasNext()).isTrue();
             Map.Entry<Long, Row> first = it.next();
             assertThat(first.getKey()).isEqualTo(2L);
@@ -240,7 +229,6 @@ public abstract class StorageEngineContractTest {
             engine.put(1L, Row.of(1L, "Alice", 30));
             engine.put(5L, Row.of(5L, "Eve", 25));
 
-            // Range with from > to should return empty
             Iterator<Map.Entry<Long, Row>> it = engine.rangeScan(10L, 1L);
             assertThat(it.hasNext()).isFalse();
             commit(tx);
@@ -320,7 +308,6 @@ public abstract class StorageEngineContractTest {
         Files.createDirectories(dataDir);
         Files.createDirectories(dataDir.resolve("global"));
 
-        // First session: insert rows
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(dataDir, meta)) {
             engine.open(dataDir, meta, pool, null, clog, transactionManager);
@@ -331,7 +318,7 @@ public abstract class StorageEngineContractTest {
             engine.flush();
         }
 
-        // Second session: verify persistence (same transactionManager — shared ControlFile tracks nextXid)
+        // same transactionManager — shared ControlFile tracks nextXid across sessions
         try (BufferPool pool = new BufferPool();
              StorageEngine engine = createEngine(dataDir, meta)) {
             engine.open(dataDir, meta, pool, null, clog, transactionManager);
@@ -356,7 +343,6 @@ public abstract class StorageEngineContractTest {
             engine.open(tempDir, meta, pool, null, clog, transactionManager);
 
             Transaction tx = begin();
-            // Insert, delete, re-insert with same PK
             Row original = Row.of(1L, "Alice", 30);
             engine.put(1L, original);
             engine.delete(1L);
@@ -369,6 +355,23 @@ public abstract class StorageEngineContractTest {
             assertThat(result).isPresent();
             assertThat(result.get()).isEqualTo(replacement);
             commit(tx);
+        }
+    }
+
+    @Test
+    void rollback_thenGet_rowIsInvisibleToNewTransaction() throws IOException {
+        TableMeta meta = createTestTableMeta();
+        try (BufferPool pool = new BufferPool();
+             StorageEngine engine = createEngine(tempDir, meta)) {
+            engine.open(tempDir, meta, pool, null, clog, transactionManager);
+
+            Transaction tx = begin();
+            engine.put(1L, Row.of(1L, "Alice", 30));
+            rollback(tx);
+
+            Transaction tx2 = begin();
+            assertThat(engine.get(1L)).isEmpty();
+            commit(tx2);
         }
     }
 

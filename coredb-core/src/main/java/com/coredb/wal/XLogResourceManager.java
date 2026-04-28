@@ -14,8 +14,9 @@ import java.nio.ByteBuffer;
  */
 public final class XLogResourceManager implements ResourceManager {
 
-    // Operation codes
     public static final byte CHECKPOINT = 0x20;
+    public static final byte XACT_COMMIT = 0x30;
+    public static final byte XACT_ABORT = 0x31;
 
     @Override
     public byte getResourceManagerId() {
@@ -24,16 +25,10 @@ public final class XLogResourceManager implements ResourceManager {
 
     @Override
     public void redo(XLogRecord record, ByteBuffer targetPage) throws IOException {
-        // XLOG operations typically don't modify pages directly.
-        // CHECKPOINT records affect the control file, which is handled
-        // separately by RecoveryManager.
-        //
-        // If we were to support more complex XLOG operations (like timeline
-        // switches), they would be implemented here.
-
         switch (record.info()) {
             case CHECKPOINT:
-                // No-op - control file is updated by RecoveryManager separately
+            case XACT_COMMIT:
+            case XACT_ABORT:
                 break;
             default:
                 throw new UnsupportedOperationException(
@@ -41,15 +36,11 @@ public final class XLogResourceManager implements ResourceManager {
         }
     }
 
-    /**
-     * Returns the human-readable name for an XLOG operation.
-     *
-     * @param info the operation code
-     * @return the operation name
-     */
     public static String operationName(byte info) {
         return switch (info) {
             case CHECKPOINT -> "CHECKPOINT";
+            case XACT_COMMIT -> "XACT_COMMIT";
+            case XACT_ABORT -> "XACT_ABORT";
             default -> "UNKNOWN(0x" + Integer.toHexString(info & 0xFF) + ")";
         };
     }

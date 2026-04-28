@@ -77,6 +77,11 @@ public final class SnapshotManager {
      */
     public synchronized void registerActiveXid(int xid) {
         activeXids.add(xid);
+        // Keep nextXid ahead of the highest allocated xid so takeSnapshot() produces a correct xmax.
+        // ControlFile.allocateXid() owns allocation; SnapshotManager must track how far it has gone.
+        if (xid >= nextXid.get()) {
+            nextXid.set(xid + 1);
+        }
     }
 
     /**
