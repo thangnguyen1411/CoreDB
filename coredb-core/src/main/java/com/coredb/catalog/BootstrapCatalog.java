@@ -7,6 +7,8 @@ import com.coredb.api.Schema;
 import com.coredb.config.EngineType;
 import com.coredb.heap.HeapFile;
 import com.coredb.heap.RecordId;
+import com.coredb.txn.ClogManager;
+import com.coredb.util.Constants;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -100,7 +102,12 @@ public final class BootstrapCatalog {
         Files.createDirectories(baseDir);
         log.debug("Created directories: {}/, {}/", globalDir, baseDir);
 
-        // Step 2: Create control file (will be closed after creating heap files)
+        // Step 2: Create pg_xact commit log (needed before any heap operations with visibility)
+        ClogManager clog = ClogManager.create(dataDir);
+        clog.close();
+        log.debug("Created pg_xact commit log");
+
+        // Step 3: Create control file (will be closed after creating heap files)
         try (ControlFile controlFile = ControlFile.create(dataDir, config)) {
             log.debug("Created pg_control: nextOid={}, nextXid={}",
                 controlFile.nextOid(), controlFile.nextXid());
@@ -117,29 +124,29 @@ public final class BootstrapCatalog {
 
                 // Insert into core_class: rows describing core_class and core_attribute themselves
                 RecordId rid1 = coreClassFile.insert(Row.of(
-                    (long) CORE_CLASS_OID, "core_class", "tableId", EngineType.BTREE.ordinal(), 0L));
+                    (long) CORE_CLASS_OID, "core_class", "tableId", EngineType.BTREE.ordinal(), 0L), Constants.BOOTSTRAP_XID);
                 log.info("Inserted core_class row: {}", rid1);
 
                 RecordId rid2 = coreClassFile.insert(Row.of(
-                    (long) CORE_ATTRIBUTE_OID, "core_attribute", "tableId", EngineType.BTREE.ordinal(), 0L));
+                    (long) CORE_ATTRIBUTE_OID, "core_attribute", "tableId", EngineType.BTREE.ordinal(), 0L), Constants.BOOTSTRAP_XID);
                 log.info("Inserted core_attribute row: {}", rid2);
 
                 // Insert into core_attribute: 5 columns for core_class + 5 for core_attribute = 10 rows
                 final int TYPE_INT = 1, TYPE_LONG = 2, TYPE_STRING = 3, TYPE_BOOL = 4;
 
                 // Columns for core_class (OID 1000)
-                coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 1, "tableId", TYPE_LONG, false));
-                coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 2, "tableName", TYPE_STRING, false));
-                coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 3, "pkColumn", TYPE_STRING, true));
-                coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 4, "engineType", TYPE_INT, false));
-                coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 5, "rootPageId", TYPE_LONG, false));
+                coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 1, "tableId", TYPE_LONG, false), Constants.BOOTSTRAP_XID);
+                coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 2, "tableName", TYPE_STRING, false), Constants.BOOTSTRAP_XID);
+                coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 3, "pkColumn", TYPE_STRING, true), Constants.BOOTSTRAP_XID);
+                coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 4, "engineType", TYPE_INT, false), Constants.BOOTSTRAP_XID);
+                coreAttributeFile.insert(Row.of((long) CORE_CLASS_OID, 5, "rootPageId", TYPE_LONG, false), Constants.BOOTSTRAP_XID);
 
                 // Columns for core_attribute (OID 1001)
-                coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 1, "tableId", TYPE_LONG, false));
-                coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 2, "attnum", TYPE_INT, false));
-                coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 3, "attname", TYPE_STRING, false));
-                coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 4, "atttype", TYPE_INT, false));
-                coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 5, "attnull", TYPE_BOOL, false));
+                coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 1, "tableId", TYPE_LONG, false), Constants.BOOTSTRAP_XID);
+                coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 2, "attnum", TYPE_INT, false), Constants.BOOTSTRAP_XID);
+                coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 3, "attname", TYPE_STRING, false), Constants.BOOTSTRAP_XID);
+                coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 4, "atttype", TYPE_INT, false), Constants.BOOTSTRAP_XID);
+                coreAttributeFile.insert(Row.of((long) CORE_ATTRIBUTE_OID, 5, "attnull", TYPE_BOOL, false), Constants.BOOTSTRAP_XID);
 
                 log.info("Inserted bootstrap rows: 2 rows into core_class, 10 rows into core_attribute");
             } // HeapFiles auto-close here (fsync on close)

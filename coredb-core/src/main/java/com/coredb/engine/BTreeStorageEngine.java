@@ -9,6 +9,8 @@ import com.coredb.heap.HeapFile;
 import com.coredb.heap.RecordId;
 import com.coredb.index.BTree;
 import com.coredb.index.IndexFile;
+import com.coredb.mvcc.Snapshot;
+import com.coredb.txn.ClogManager;
 import com.coredb.util.Constants;
 import com.coredb.wal.XLogWriter;
 import org.slf4j.Logger;
@@ -47,6 +49,7 @@ public class BTreeStorageEngine implements StorageEngine {
     // Engine state (valid after open())
     private BufferPool bufferPool;
     private XLogWriter xlogWriter;
+    private ClogManager clog;
     private HeapFile heap;
     private IndexFile indexFile;
     private BTree pkIndex;
@@ -57,9 +60,10 @@ public class BTreeStorageEngine implements StorageEngine {
     }
 
     @Override
-    public void open(Path dataDir, TableMeta meta, BufferPool bufferPool, XLogWriter xlogWriter) throws IOException {
+    public void open(Path dataDir, TableMeta meta, BufferPool bufferPool, XLogWriter xlogWriter, ClogManager clog) throws IOException {
         this.bufferPool = bufferPool;
         this.xlogWriter = xlogWriter;
+        this.clog = clog;
         Schema schema = meta.schema();
         this.pkColumnIndex = schema.indexOf(meta.pkColumn());
         if (pkColumnIndex < 0) {
@@ -104,23 +108,28 @@ public class BTreeStorageEngine implements StorageEngine {
             heap.close();
             heap = null;
         }
+        // Note: clog is shared across all engines, do not close here
+        clog = null;
         pkIndex = null;
     }
 
     @Override
     public void put(long pk, Row row) throws IOException {
+        // Uses BOOTSTRAP_XID for now
+        int currentXid = Constants.BOOTSTRAP_XID;
+
         Optional<RecordId> existing = pkIndex.search(pk);
         if (existing.isPresent()) {
             RecordId oldRid = existing.get();
 
-            RecordId newRid = heap.insert(row);
+            RecordId newRid = heap.insert(row, currentXid);
             pkIndex.delete(pk);
             pkIndex.insert(pk, newRid);
-            heap.delete(oldRid);
+            heap.delete(oldRid, currentXid);
 
             log.debug("Updated row with pk={}: oldRid={} -> newRid={}", pk, oldRid, newRid);
         } else {
-            RecordId rid = heap.insert(row);
+            RecordId rid = heap.insert(row, currentXid);
             pkIndex.insert(pk, rid);
             log.debug("Inserted row with pk={} at rid={}", pk, rid);
         }
@@ -133,11 +142,15 @@ public class BTreeStorageEngine implements StorageEngine {
             return Optional.empty();
         }
 
-        return heap.get(ridOpt.get());
+        // Uses BOOTSTRAP snapshot for now
+        return heap.get(ridOpt.get(), Snapshot.BOOTSTRAP, clog);
     }
 
     @Override
     public void delete(long pk) throws IOException {
+        // Uses BOOTSTRAP_XID for now
+        int currentXid = Constants.BOOTSTRAP_XID;
+
         Optional<RecordId> ridOpt = pkIndex.search(pk);
         if (ridOpt.isEmpty()) {
             return;
@@ -145,7 +158,7 @@ public class BTreeStorageEngine implements StorageEngine {
 
         RecordId rid = ridOpt.get();
 
-        heap.delete(rid);
+        heap.delete(rid, currentXid);
         pkIndex.delete(pk);
 
         log.debug("Deleted row with pk={} at rid={}", pk, rid);
@@ -156,48 +169,21 @@ public class BTreeStorageEngine implements StorageEngine {
         Iterator<Map.Entry<Long, RecordId>> indexIterator = pkIndex.rangeScan(fromPk, toPk);
 
         return new Iterator<>() {
-            @Override
-            public boolean hasNext() {
-                return indexIterator.hasNext();
-            }
+            private Map.Entry<Long, Row> nextEntry = computeNext();
 
-            @Override
-            public Map.Entry<Long, Row> next() {
-                Map.Entry<Long, RecordId> entry = indexIterator.next();
-                try {
-                    Optional<Row> rowOpt = heap.get(entry.getValue());
-                    if (rowOpt.isEmpty()) {
-                        throw new IllegalStateException("Index points to missing row: " + entry.getValue());
-                    }
-                    return new AbstractMap.SimpleEntry<>(entry.getKey(), rowOpt.get());
-                } catch (IOException e) {
-                    throw new java.io.UncheckedIOException(e);
-                }
-            }
-        };
-    }
-
-    @Override
-    public Iterator<Map.Entry<Long, Row>> fullScan() throws IOException {
-        Iterator<Row> heapIterator = heap.scan();
-
-        return new Iterator<>() {
-            private Map.Entry<Long, Row> nextEntry = null;
-
-            {
-                advance();
-            }
-
-            private void advance() {
-                while (heapIterator.hasNext()) {
-                    Row row = heapIterator.next();
-                    Long pk = extractPk(row);
-                    if (pk != null) {
-                        nextEntry = new AbstractMap.SimpleEntry<>(pk, row);
-                        return;
+            private Map.Entry<Long, Row> computeNext() {
+                while (indexIterator.hasNext()) {
+                    Map.Entry<Long, RecordId> entry = indexIterator.next();
+                    try {
+                        Optional<Row> rowOpt = heap.get(entry.getValue(), Snapshot.BOOTSTRAP, clog);
+                        if (rowOpt.isPresent()) {
+                            return new AbstractMap.SimpleEntry<>(entry.getKey(), rowOpt.get());
+                        }
+                    } catch (IOException e) {
+                        throw new java.io.UncheckedIOException(e);
                     }
                 }
-                nextEntry = null;
+                return null;
             }
 
             @Override
@@ -211,7 +197,42 @@ public class BTreeStorageEngine implements StorageEngine {
                     throw new NoSuchElementException();
                 }
                 Map.Entry<Long, Row> result = nextEntry;
-                advance();
+                nextEntry = computeNext();
+                return result;
+            }
+        };
+    }
+
+    @Override
+    public Iterator<Map.Entry<Long, Row>> fullScan() throws IOException {
+        Iterator<Row> heapIterator = heap.scan(Snapshot.BOOTSTRAP, clog);
+
+        return new Iterator<>() {
+            private Map.Entry<Long, Row> nextEntry = computeNext();
+
+            private Map.Entry<Long, Row> computeNext() {
+                while (heapIterator.hasNext()) {
+                    Row row = heapIterator.next();
+                    Long pk = extractPk(row);
+                    if (pk != null) {
+                        return new AbstractMap.SimpleEntry<>(pk, row);
+                    }
+                }
+                return null;
+            }
+
+            @Override
+            public boolean hasNext() {
+                return nextEntry != null;
+            }
+
+            @Override
+            public Map.Entry<Long, Row> next() {
+                if (nextEntry == null) {
+                    throw new NoSuchElementException();
+                }
+                Map.Entry<Long, Row> result = nextEntry;
+                nextEntry = computeNext();
                 return result;
             }
         };

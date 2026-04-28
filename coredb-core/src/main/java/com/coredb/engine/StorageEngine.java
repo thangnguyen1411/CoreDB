@@ -3,6 +3,7 @@ package com.coredb.engine;
 import com.coredb.api.Row;
 import com.coredb.buffer.BufferPool;
 import com.coredb.catalog.TableMeta;
+import com.coredb.txn.ClogManager;
 import com.coredb.wal.XLogWriter;
 import java.io.IOException;
 import java.nio.file.Path;
@@ -32,9 +33,11 @@ public interface StorageEngine extends AutoCloseable {
      * @param dataDir the data directory path
      * @param meta    table metadata including OID, schema, and engine type
      * @param bufferPool the buffer pool for caching pages
+     * @param xlogWriter the WAL writer for durability
+     * @param clog the commit log manager (shared across all engines)
      * @throws IOException if opening fails
      */
-    void open(Path dataDir, TableMeta meta, BufferPool bufferPool, XLogWriter xlogWriter)
+    void open(Path dataDir, TableMeta meta, BufferPool bufferPool, XLogWriter xlogWriter, ClogManager clog)
         throws IOException;
 
     /**

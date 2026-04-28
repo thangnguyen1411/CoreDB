@@ -1,14 +1,17 @@
 package com.coredb.heap;
 
+import com.coredb.mvcc.Snapshot;
+import com.coredb.mvcc.TupleVisibility;
 import com.coredb.page.ItemId;
 import com.coredb.page.Page;
 import com.coredb.page.PageHeader;
-import com.coredb.util.Constants;
+import com.coredb.txn.ClogManager;
 import com.coredb.util.StorageException;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 public final class HeapPage {
 
@@ -18,7 +21,7 @@ public final class HeapPage {
         this.page = page;
     }
 
-    public RecordId insert(byte[] dataBytes, short natts, byte[] bitmap) {
+    public RecordId insert(byte[] dataBytes, short natts, byte[] bitmap, int xmin) {
         int headerSize = HeapTupleHeader.computeHeaderSize(natts);
         int tupleSize = headerSize + dataBytes.length;
         if (freeBytes() < tupleSize + ItemId.SIZE) {
@@ -29,7 +32,9 @@ public final class HeapPage {
         int newUpper = pdUpper() - tupleSize;
 
         RecordId self = new RecordId(page.pageId(), slotNo);
-        new HeapTupleHeader(self, natts, bitmap).writeTo(page.buffer(), newUpper);
+        HeapTupleHeader header = new HeapTupleHeader(self, natts, bitmap);
+        header.setXmin(xmin);
+        header.writeTo(page.buffer(), newUpper);
 
         ByteBuffer buf = page.buffer();
         for (int i = 0; i < dataBytes.length; i++) {
@@ -43,8 +48,8 @@ public final class HeapPage {
         return self;
     }
 
-    public RecordId insert(byte[] dataBytes, short natts) {
-        return insert(dataBytes, natts, new byte[(natts + 7) / 8]);
+    public RecordId insert(byte[] dataBytes, short natts, int xmin) {
+        return insert(dataBytes, natts, new byte[(natts + 7) / 8], xmin);
     }
 
     public byte[] get(int slotNo) {
@@ -56,20 +61,36 @@ public final class HeapPage {
         return readTupleBytes(raw);
     }
 
-    public void delete(int slotNo) {
+    public Optional<byte[]> get(int slotNo, Snapshot snapshot, ClogManager clog) {
+        checkSlot(slotNo);
+        int raw = page.readItemId(slotNo);
+        if (ItemId.flags(raw) != ItemId.FLAGS_NORMAL) {
+            return Optional.empty();
+        }
+        int offset = ItemId.offset(raw);
+        HeapTupleHeader header = HeapTupleHeader.readFrom(page.buffer(), offset);
+
+        if (!TupleVisibility.isVisible(header, snapshot, clog)) {
+            return Optional.empty();
+        }
+        return Optional.of(readTupleBytes(raw));
+    }
+
+    public void delete(int slotNo, int xmax) {
         checkSlot(slotNo);
         int raw = page.readItemId(slotNo);
         if (ItemId.flags(raw) != ItemId.FLAGS_NORMAL) {
             throw new StorageException("slot " + slotNo + " is not a live tuple");
         }
         int offset = ItemId.offset(raw);
-        int length = ItemId.length(raw);
 
-        // t_xmax records which transaction deleted the tuple; ItemId FLAGS_DEAD is the visibility gate.
         HeapTupleHeader header = HeapTupleHeader.readFrom(page.buffer(), offset);
-        header.setXmax(Constants.BOOTSTRAP_XID);
+        if (header.xmax() != com.coredb.util.Constants.INVALID_XID) {
+            throw new StorageException("slot " + slotNo + " is already deleted");
+        }
+        header.setXmax(xmax);
         header.writeTo(page.buffer(), offset);
-        page.writeItemId(slotNo, ItemId.pack(offset, ItemId.FLAGS_DEAD, length));
+        // Keep ItemId as FLAGS_NORMAL — TupleVisibility filters deleted tuples via xmax
     }
 
     public List<RecordId> scan() {
@@ -80,13 +101,26 @@ public final class HeapPage {
             if (ItemId.flags(raw) != ItemId.FLAGS_NORMAL) {
                 continue;
             }
-            int offset = ItemId.offset(raw);
-            HeapTupleHeader header = HeapTupleHeader.readFrom(page.buffer(), offset);
-            if (header.xmin() == Constants.BOOTSTRAP_XID) {
-                live.add(new RecordId(page.pageId(), slotNo));
-            }
+            live.add(new RecordId(page.pageId(), slotNo));
         }
         return live;
+    }
+
+    public List<RecordId> scan(Snapshot snapshot, ClogManager clog) {
+        List<RecordId> visible = new ArrayList<>();
+        int count = slotCount();
+        for (int slotNo = 0; slotNo < count; slotNo++) {
+            int raw = page.readItemId(slotNo);
+            if (ItemId.flags(raw) != ItemId.FLAGS_NORMAL) {
+                continue;
+            }
+            int offset = ItemId.offset(raw);
+            HeapTupleHeader header = HeapTupleHeader.readFrom(page.buffer(), offset);
+            if (TupleVisibility.isVisible(header, snapshot, clog)) {
+                visible.add(new RecordId(page.pageId(), slotNo));
+            }
+        }
+        return visible;
     }
 
     public int freeBytes() {

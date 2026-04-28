@@ -193,6 +193,7 @@ public final class HeapTupleHeader {
         return (tBits[col / 8] & (1 << (col % 8))) != 0;
     }
 
+    public void setXmin(int xmin)       { this.xmin = xmin; }
     public void setXmax(int xmax)       { this.xmax = xmax; }
     public void setCtid(RecordId ctid)  { this.ctid = ctid; }
 

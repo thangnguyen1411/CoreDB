@@ -6,6 +6,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.coredb.api.Column;
 import com.coredb.api.Row;
 import com.coredb.api.Schema;
+import com.coredb.mvcc.Snapshot;
+import com.coredb.txn.ClogManager;
 import com.coredb.util.Constants;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -13,6 +15,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -25,15 +28,24 @@ class HeapFileTest {
     private HeapFile heapFile;
     private Schema schema;
     private Path tablePath;
+    private ClogManager clog;
 
     @BeforeEach
-    void setUp() {
+    void setUp() throws Exception {
         schema = Schema.of(
             Column.longCol("id"),
             Column.stringCol("name"),
             Column.intCol("age")
         );
         tablePath = tempDir.resolve("base").resolve("1").resolve("1000");
+        clog = ClogManager.create(tempDir);
+    }
+
+    @AfterEach
+    void tearDown() throws Exception {
+        if (clog != null) {
+            clog.close();
+        }
     }
 
     @Test
@@ -41,7 +53,7 @@ class HeapFileTest {
         heapFile = HeapFile.create(tablePath, 1000, schema);
 
         Row row = Row.of(1L, "Alice", 30);
-        RecordId rid = heapFile.insert(row);
+        RecordId rid = heapFile.insert(row, Constants.BOOTSTRAP_XID);
 
         assertThat(rid.pageId()).isGreaterThanOrEqualTo(1);
         assertThat(rid.slotNo()).isZero();
@@ -54,9 +66,9 @@ class HeapFileTest {
         heapFile = HeapFile.create(tablePath, 1000, schema);
 
         Row original = Row.of(1L, "Alice", 30);
-        RecordId rid = heapFile.insert(original);
+        RecordId rid = heapFile.insert(original, Constants.BOOTSTRAP_XID);
 
-        Optional<Row> fetched = heapFile.get(rid);
+        Optional<Row> fetched = heapFile.get(rid, Snapshot.BOOTSTRAP, clog);
 
         assertThat(fetched).isPresent();
         assertThat(fetched.get()).isEqualTo(original);
@@ -69,7 +81,7 @@ class HeapFileTest {
         heapFile = HeapFile.create(tablePath, 1000, schema);
 
         RecordId rid = new RecordId(1, 99);
-        Optional<Row> fetched = heapFile.get(rid);
+        Optional<Row> fetched = heapFile.get(rid, Snapshot.BOOTSTRAP, clog);
 
         assertThat(fetched).isEmpty();
 
@@ -85,11 +97,11 @@ class HeapFileTest {
 
         for (int i = 0; i < count; i++) {
             Row row = Row.of((long) i, "User" + i, i % 100);
-            rids.add(heapFile.insert(row));
+            rids.add(heapFile.insert(row, Constants.BOOTSTRAP_XID));
         }
 
         for (int i = 0; i < count; i++) {
-            Optional<Row> fetched = heapFile.get(rids.get(i));
+            Optional<Row> fetched = heapFile.get(rids.get(i), Snapshot.BOOTSTRAP, clog);
             assertThat(fetched).isPresent();
             assertThat(fetched.get().getLong(0)).isEqualTo((long) i);
             assertThat(fetched.get().getString(1)).isEqualTo("User" + i);
@@ -106,7 +118,7 @@ class HeapFileTest {
         int count = 200;
         for (int i = 0; i < count; i++) {
             Row row = Row.of((long) i, "User" + i, i);
-            heapFile.insert(row);
+            heapFile.insert(row, Constants.BOOTSTRAP_XID);
         }
 
         assertThat(heapFile.pageCount()).isGreaterThan(2);
@@ -119,11 +131,11 @@ class HeapFileTest {
         heapFile = HeapFile.create(tablePath, 1000, schema);
 
         Row row = Row.of(1L, "Alice", 30);
-        RecordId rid = heapFile.insert(row);
+        RecordId rid = heapFile.insert(row, Constants.BOOTSTRAP_XID);
 
-        heapFile.delete(rid);
+        heapFile.delete(rid, Constants.BOOTSTRAP_XID);
 
-        Optional<Row> fetched = heapFile.get(rid);
+        Optional<Row> fetched = heapFile.get(rid, Snapshot.BOOTSTRAP, clog);
         assertThat(fetched).isEmpty();
 
         heapFile.close();
@@ -134,7 +146,7 @@ class HeapFileTest {
         heapFile = HeapFile.create(tablePath, 1000, schema);
 
         List<Row> rows = new ArrayList<>();
-        heapFile.scan().forEachRemaining(rows::add);
+        heapFile.scan(Snapshot.BOOTSTRAP, clog).forEachRemaining(rows::add);
 
         assertThat(rows).isEmpty();
 
@@ -147,11 +159,11 @@ class HeapFileTest {
 
         int count = 50;
         for (int i = 0; i < count; i++) {
-            heapFile.insert(Row.of((long) i, "User" + i, i));
+            heapFile.insert(Row.of((long) i, "User" + i, i), Constants.BOOTSTRAP_XID);
         }
 
         List<Row> rows = new ArrayList<>();
-        heapFile.scan().forEachRemaining(rows::add);
+        heapFile.scan(Snapshot.BOOTSTRAP, clog).forEachRemaining(rows::add);
 
         assertThat(rows).hasSize(count);
 
@@ -166,15 +178,15 @@ class HeapFileTest {
         int count = 20;
 
         for (int i = 0; i < count; i++) {
-            rids.add(heapFile.insert(Row.of((long) i, "User" + i, i)));
+            rids.add(heapFile.insert(Row.of((long) i, "User" + i, i), Constants.BOOTSTRAP_XID));
         }
 
         for (int i = 0; i < count; i += 2) {
-            heapFile.delete(rids.get(i));
+            heapFile.delete(rids.get(i), Constants.BOOTSTRAP_XID);
         }
 
         List<Row> rows = new ArrayList<>();
-        heapFile.scan().forEachRemaining(rows::add);
+        heapFile.scan(Snapshot.BOOTSTRAP, clog).forEachRemaining(rows::add);
 
         assertThat(rows).hasSize(count / 2);
 
@@ -186,9 +198,9 @@ class HeapFileTest {
         heapFile = HeapFile.create(tablePath, 1000, schema);
 
         Row row = Row.of(1L, null, 30);
-        RecordId rid = heapFile.insert(row);
+        RecordId rid = heapFile.insert(row, Constants.BOOTSTRAP_XID);
 
-        Optional<Row> fetched = heapFile.get(rid);
+        Optional<Row> fetched = heapFile.get(rid, Snapshot.BOOTSTRAP, clog);
 
         assertThat(fetched).isPresent();
         assertThat(fetched.get().getLong(0)).isEqualTo(1L);
@@ -204,7 +216,7 @@ class HeapFileTest {
 
         RecordId rid = new RecordId(99, 0);
 
-        assertThatThrownBy(() -> heapFile.delete(rid))
+        assertThatThrownBy(() -> heapFile.delete(rid, Constants.BOOTSTRAP_XID))
             .isInstanceOf(com.coredb.util.StorageException.class)
             .hasMessageContaining("page 99 does not exist");
 
@@ -219,7 +231,7 @@ class HeapFileTest {
         int count = 50;
 
         for (int i = 0; i < count; i++) {
-            rids.add(heapFile.insert(Row.of((long) i, "User" + i, i)));
+            rids.add(heapFile.insert(Row.of((long) i, "User" + i, i), Constants.BOOTSTRAP_XID));
         }
 
         heapFile.close();
@@ -228,7 +240,7 @@ class HeapFileTest {
         heapFile = HeapFile.open(tablePath, 1000, schema);
 
         for (int i = 0; i < count; i++) {
-            Optional<Row> fetched = heapFile.get(rids.get(i));
+            Optional<Row> fetched = heapFile.get(rids.get(i), Snapshot.BOOTSTRAP, clog);
             assertThat(fetched).isPresent();
             assertThat(fetched.get().getLong(0)).isEqualTo((long) i);
         }
@@ -245,12 +257,12 @@ class HeapFileTest {
         int count = 10_000;
 
         for (int i = 0; i < count; i++) {
-            rids.add(heapFile.insert(Row.of((long) i, "User" + i, i % 100)));
+            rids.add(heapFile.insert(Row.of((long) i, "User" + i, i % 100), Constants.BOOTSTRAP_XID));
         }
 
         // Delete every 5th row (20% of total)
         for (int i = 0; i < count; i += 5) {
-            heapFile.delete(rids.get(i));
+            heapFile.delete(rids.get(i), Constants.BOOTSTRAP_XID);
         }
 
         heapFile.close();
@@ -260,20 +272,20 @@ class HeapFileTest {
 
         // Verify deleted rows are not accessible
         for (int i = 0; i < count; i += 5) {
-            Optional<Row> fetched = heapFile.get(rids.get(i));
+            Optional<Row> fetched = heapFile.get(rids.get(i), Snapshot.BOOTSTRAP, clog);
             assertThat(fetched).isEmpty();
         }
 
         // Verify live rows are still accessible
         for (int i = 1; i < count; i += 5) {
-            Optional<Row> fetched = heapFile.get(rids.get(i));
+            Optional<Row> fetched = heapFile.get(rids.get(i), Snapshot.BOOTSTRAP, clog);
             assertThat(fetched).isPresent();
             assertThat(fetched.get().getLong(0)).isEqualTo((long) i);
         }
 
         // Scan should return only live rows
         List<Row> scannedRows = new ArrayList<>();
-        heapFile.scan().forEachRemaining(scannedRows::add);
+        heapFile.scan(Snapshot.BOOTSTRAP, clog).forEachRemaining(scannedRows::add);
 
         int expectedLive = count - (count / 5); // 8000 live rows
         assertThat(scannedRows).hasSize(expectedLive);
@@ -287,7 +299,7 @@ class HeapFileTest {
 
         int count = 100;
         for (int i = 0; i < count; i++) {
-            heapFile.insert(Row.of((long) i, "User" + i, i));
+            heapFile.insert(Row.of((long) i, "User" + i, i), Constants.BOOTSTRAP_XID);
         }
         heapFile.close();
 
