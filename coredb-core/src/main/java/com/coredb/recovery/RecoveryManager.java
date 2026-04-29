@@ -2,6 +2,7 @@ package com.coredb.recovery;
 
 import com.coredb.catalog.ControlFile;
 import com.coredb.page.PageHeader;
+import com.coredb.txn.ClogManager;
 import com.coredb.util.BinaryUtil;
 import com.coredb.util.Constants;
 import com.coredb.wal.ResourceManagerRegistry;
@@ -12,6 +13,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Instant;
@@ -21,83 +23,78 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * RecoveryManager handles redo-only crash recovery.
- *
- * <p>Replays WAL records on startup to recover from crashes.
- * Uses pd_lsn checks for idempotency and handles full-page writes.
- * Matches PostgreSQL's startup/redo.c design.</p>
+ * Performs redo-only crash recovery from the WAL.
  *
  * <p>Recovery procedure:
  * <ol>
- *   <li>Load ControlFile to get checkpoint LSN</li>
- *   <li>Seek WAL reader to checkpoint LSN (or FIRST_LSN if no checkpoint)</li>
- *   <li>Loop reading WAL records:</li>
- *   <li>Skip CHECKPOINT records (metadata only)</li>
- *   <li>For FPW records: restore full page image</li>
- *   <li>Otherwise: apply redo if pd_lsn < record LSN</li>
- *   <li>Return RecoveryStats with counts</li>
+ *   <li>Load ControlFile to find checkpoint LSN and nextXid</li>
+ *   <li>Open pg_xact for clog reconstruction</li>
+ *   <li>Seek WAL reader to checkpoint LSN</li>
+ *   <li>For each record: handle XACT records, FPW restores, or page redo</li>
+ *   <li>Sweep any remaining IN_PROGRESS XIDs to ABORTED (they can't resume)</li>
+ *   <li>Flush and close clog</li>
  * </ol>
+ *
+ * <p>No undo pass is required: uncommitted tuples have t_xmin set to an in-progress
+ * XID that is absent from pg_xact after recovery, so the MVCC visibility check
+ * treats them as aborted without any WAL undo.
  */
 public final class RecoveryManager {
 
     private static final Logger log = LoggerFactory.getLogger(RecoveryManager.class);
 
-    // Resource manager IDs for dispatch
     public static final byte RMGR_HEAP = XLogRecord.RMGR_HEAP;
     public static final byte RMGR_BTREE = XLogRecord.RMGR_BTREE;
     public static final byte RMGR_XLOG = XLogRecord.RMGR_XLOG;
 
-    // First LSN in a WAL file (after 16-byte header)
     public static final long FIRST_LSN = 16;
-
-    // WAL file header size
     public static final int WAL_HEADER_SIZE = 16;
+
+    // Index files use heap OID + this offset (must match BTreeStorageEngine)
+    public static final int INDEX_OID_OFFSET = 0x00100000;
 
     private RecoveryManager() {}
 
-    /**
-     * Performs redo-only recovery from the WAL.
-     *
-     * @param dataDir the database data directory
-     * @return RecoveryStats with counts of records processed
-     * @throws IOException if recovery fails
-     */
     public static RecoveryStats recover(Path dataDir) throws IOException {
         Instant startTime = Instant.now();
 
         Path controlPath = dataDir.resolve("global/pg_control");
         if (!controlPath.toFile().exists()) {
-            // Fresh database - no recovery needed
             return RecoveryStats.noRecoveryNeeded("fresh database");
         }
 
-        // Load ControlFile
         ControlFile controlFile = ControlFile.load(dataDir);
-
-        // Get start LSN for recovery
         long startLsn = controlFile.checkpointLsn();
+        int nextXid = controlFile.nextXid();
         if (startLsn == 0) {
-            // No checkpoint yet - start from FIRST_LSN
             startLsn = FIRST_LSN;
         }
 
         Path walPath = dataDir.resolve("global/pg_wal");
         if (!walPath.toFile().exists()) {
-            // WAL file doesn't exist yet - no recovery needed
             controlFile.close();
             return RecoveryStats.noRecoveryNeeded("WAL file not found");
         }
 
-        // Create resource manager registry for dispatch
         ResourceManagerRegistry rmgrRegistry = ResourceManagerRegistry.createStandard();
 
-        // Open WAL reader and seek to start LSN
+        // Open clog for XACT record replay and in-progress sweep.
+        // pg_xact is always present on an existing database (created during bootstrap).
+        ClogManager clog = null;
+        Path pgXactPath = dataDir.resolve("global/pg_xact");
+        if (Files.exists(pgXactPath)) {
+            clog = ClogManager.open(dataDir);
+        }
+
         XLogReader reader = XLogReader.open(walPath);
         reader.seek(startLsn);
 
         int redone = 0;
         int fpwRestored = 0;
         int skippedByPdLsn = 0;
+        int xactCommitReplayed = 0;
+        int xactAbortReplayed = 0;
+        int xidsSweptToAborted = 0;
         long lastLsn = startLsn;
 
         try {
@@ -108,21 +105,42 @@ public final class RecoveryManager {
                 XLogRecord record = optRecord.get();
                 lastLsn = record.lsn();
 
-                // Skip CHECKPOINT records - they are metadata only
+                // Skip CHECKPOINT — metadata only, no page mutations
                 if (record.resourceManager() == RMGR_XLOG &&
                     (record.info() & 0x7F) == XLogResourceManager.CHECKPOINT) {
                     log.debug("Skipping CHECKPOINT record at LSN={}", record.lsn());
                     continue;
                 }
 
-                // Handle full-page write records
+                // Rebuild clog from XACT_COMMIT records.
+                // Any commit whose WAL record survived a crash is durable.
+                if (record.resourceManager() == RMGR_XLOG &&
+                    (record.info() & 0x7F) == XLogResourceManager.XACT_COMMIT) {
+                    if (clog != null) {
+                        clog.setCommitted(record.xid());
+                        xactCommitReplayed++;
+                        log.debug("Replayed XACT_COMMIT xid={} at LSN={}", record.xid(), record.lsn());
+                    }
+                    continue;
+                }
+
+                // Rebuild clog from XACT_ABORT records.
+                if (record.resourceManager() == RMGR_XLOG &&
+                    (record.info() & 0x7F) == XLogResourceManager.XACT_ABORT) {
+                    if (clog != null) {
+                        clog.setAborted(record.xid());
+                        xactAbortReplayed++;
+                        log.debug("Replayed XACT_ABORT xid={} at LSN={}", record.xid(), record.lsn());
+                    }
+                    continue;
+                }
+
                 if (record.isFullPageWrite()) {
                     restoreFullPage(dataDir, record, rmgrRegistry);
                     fpwRestored++;
                     continue;
                 }
 
-                // Apply regular redo (with idempotency check)
                 boolean applied = applyRedo(dataDir, record, rmgrRegistry);
                 if (applied) {
                     redone++;
@@ -131,42 +149,50 @@ public final class RecoveryManager {
                 }
             }
 
+            // Sweep: any XID from FIRST_NORMAL_XID up to nextXid that is still
+            // IN_PROGRESS could not have committed (no commit record in WAL), so
+            // it is effectively aborted. Mark it so future visibility checks agree.
+            if (clog != null) {
+                for (int xid = Constants.FIRST_NORMAL_XID; xid < nextXid; xid++) {
+                    if (clog.getStatus(xid) == ClogManager.Status.IN_PROGRESS) {
+                        clog.setAborted(xid);
+                        xidsSweptToAborted++;
+                    }
+                }
+                if (xidsSweptToAborted > 0) {
+                    log.info("Swept {} in-progress XIDs to ABORTED", xidsSweptToAborted);
+                }
+                clog.flush();
+            }
+
         } finally {
             reader.close();
+            if (clog != null) clog.close();
             controlFile.close();
         }
 
         long elapsedMillis = java.time.Duration.between(startTime, Instant.now()).toMillis();
 
-        log.info("Recovery complete: redone={}, fpwRestored={}, skipped={}, elapsed={}ms",
-                 redone, fpwRestored, skippedByPdLsn, elapsedMillis);
+        log.info("Recovery complete: redone={}, fpwRestored={}, skipped={}, " +
+                 "xactCommit={}, xactAbort={}, swept={}, elapsed={}ms",
+                 redone, fpwRestored, skippedByPdLsn,
+                 xactCommitReplayed, xactAbortReplayed, xidsSweptToAborted, elapsedMillis);
 
         return new RecoveryStats(startLsn, lastLsn, redone, fpwRestored, skippedByPdLsn,
+                                 xactCommitReplayed, xactAbortReplayed, xidsSweptToAborted,
                                  Instant.now(), elapsedMillis);
     }
 
-    /**
-     * Restores a full page image from a full-page write record.
-     *
-     * <p>Extracts the full page image from the record and writes it to
-     * the correct file offset. This short-circuits the need for redo.</p>
-     *
-     * @param dataDir the database data directory
-     * @param record the full-page write WAL record
-     * @throws IOException if page restoration fails
-     */
     private static void restoreFullPage(Path dataDir, XLogRecord record,
                                          ResourceManagerRegistry rmgrRegistry) throws IOException {
         byte[] data = record.data();
 
-        // FPW payload: [PAGE_SIZE bytes pre-mutation image][mutation payload bytes]
         byte[] pageImage = new byte[Constants.PAGE_SIZE];
         ByteBuffer.wrap(data).get(pageImage);
 
         ByteBuffer pageBuffer = ByteBuffer.wrap(Arrays.copyOf(pageImage, pageImage.length))
                                           .order(ByteOrder.BIG_ENDIAN);
 
-        // Apply the embedded mutation on top of the restored image
         if (data.length > Constants.PAGE_SIZE) {
             byte[] mutationPayload = Arrays.copyOfRange(data, Constants.PAGE_SIZE, data.length);
             byte infoWithoutFpw = (byte) (record.info() & ~XLogRecord.XLOG_FPW);
@@ -197,40 +223,22 @@ public final class RecoveryManager {
             channel.force(true);
         }
 
-        log.debug("Restored full page: tableOid={}, pageId={}",
-                  record.tableOid(), record.pageId());
+        log.debug("Restored full page: tableOid={}, pageId={}", record.tableOid(), record.pageId());
     }
 
-    /**
-     * Applies a redo operation to a page.
-     *
-     * <p>Implements idempotency check: skips if page's pd_lsn >= record LSN.
-     * Reads page, dispatches to resource manager, updates pd_lsn, writes back.</p>
-     *
-     * @param dataDir the database data directory
-     * @param record the WAL record to redo
-     * @param rmgrRegistry the resource manager registry
-     * @return true if the redo was applied, false if skipped due to pd_lsn
-     * @throws IOException if redo fails
-     */
     private static boolean applyRedo(Path dataDir, XLogRecord record,
                                        ResourceManagerRegistry rmgrRegistry) throws IOException {
-        // Determine file path from tableOid
         Path filePath = resolveFilePath(dataDir, record.tableOid());
 
-        // Create page buffer for the target page
         ByteBuffer pageBuffer = ByteBuffer.allocate(Constants.PAGE_SIZE).order(ByteOrder.BIG_ENDIAN);
 
-        // Read the page from disk
         long fileOffset = (long) record.pageId() * Constants.PAGE_SIZE;
 
         try (FileChannel channel = FileChannel.open(filePath,
                 StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE)) {
 
-            // Ensure file is large enough
             long currentSize = channel.size();
             if (fileOffset + Constants.PAGE_SIZE > currentSize) {
-                // Page doesn't exist yet - extend file and initialize with zeros
                 channel.position(fileOffset + Constants.PAGE_SIZE - 1);
                 channel.write(ByteBuffer.wrap(new byte[1]));
             }
@@ -239,7 +247,6 @@ public final class RecoveryManager {
             int bytesRead = channel.read(pageBuffer);
 
             if (bytesRead < Constants.PAGE_SIZE) {
-                // Initialize remaining bytes to zero
                 pageBuffer.position(bytesRead);
                 while (pageBuffer.hasRemaining()) {
                     pageBuffer.put((byte) 0);
@@ -248,15 +255,12 @@ public final class RecoveryManager {
 
             pageBuffer.flip();
 
-            // Check pd_lsn for idempotency
             long pdLsn = BinaryUtil.readU64(pageBuffer, PageHeader.OFFSET_LSN);
             if (pdLsn >= record.lsn()) {
-                // Already applied - skip
                 log.debug("Skipping redo: pd_lsn={} >= record_lsn={}", pdLsn, record.lsn());
                 return false;
             }
 
-            // Initialize new page: pd_lower=0 on a zero page means header was never written
             if (pdLsn == 0 && BinaryUtil.readU16(pageBuffer, PageHeader.OFFSET_PD_LOWER) == 0) {
                 boolean isIndex = record.tableOid() >= INDEX_OID_OFFSET;
                 short flags = isIndex ? (short) 0x0300 : (short) 0x0100;
@@ -264,48 +268,27 @@ public final class RecoveryManager {
                 BinaryUtil.writeU16(pageBuffer, PageHeader.OFFSET_PD_UPPER, (short) Constants.PAGE_SIZE);
                 BinaryUtil.writeU16(pageBuffer, PageHeader.OFFSET_PD_SPECIAL, (short) Constants.PAGE_SIZE);
                 BinaryUtil.writeU16(pageBuffer, PageHeader.OFFSET_PD_FLAGS, flags);
-                log.debug("Initialized fresh page for redo: tableOid={}, pageId={}",
-                          record.tableOid(), record.pageId());
             }
 
-            // Dispatch to resource manager
             rmgrRegistry.dispatch(record, pageBuffer);
 
-            // Update page's pd_lsn
             BinaryUtil.writeU64(pageBuffer, PageHeader.OFFSET_LSN, record.lsn());
 
-            // Write page back to disk
             pageBuffer.rewind();
             channel.position(fileOffset);
             channel.write(pageBuffer);
-            channel.force(true); // fsync
+            channel.force(true);
         }
 
-        log.debug("Applied redo: tableOid={}, pageId={}, lsn={}",
-                  record.tableOid(), record.pageId(), record.lsn());
+        log.debug("Applied redo: tableOid={}, pageId={}, lsn={}", record.tableOid(), record.pageId(), record.lsn());
         return true;
     }
 
-    // Index files use heap OID + this offset (must match BTreeStorageEngine)
-    public static final int INDEX_OID_OFFSET = 0x00100000;
-
-    /**
-     * Resolves a table OID to a file path.
-     *
-     * <p>All heap table files are in base/1/&lt;oid&gt;.
-     * Index files (OID >= INDEX_OID_OFFSET) are in base/1/&lt;baseOid&gt;_pk.</p>
-     *
-     * @param dataDir the database data directory
-     * @param tableOid the table OID
-     * @return the path to the file
-     */
     private static Path resolveFilePath(Path dataDir, int tableOid) {
-        // Check if this is an index OID (has the offset applied)
         if (tableOid >= INDEX_OID_OFFSET) {
             int baseOid = tableOid - INDEX_OID_OFFSET;
             return dataDir.resolve("base/1/" + baseOid + "_pk");
         }
-        // Regular heap table file
         return dataDir.resolve("base/1/" + tableOid);
     }
 }
