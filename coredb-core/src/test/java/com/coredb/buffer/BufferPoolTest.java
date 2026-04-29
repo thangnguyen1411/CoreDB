@@ -151,11 +151,10 @@ class BufferPoolTest {
 
         BufferDescriptor frame0 = pool.fetchPage(TEST_OID, 0);
         BufferDescriptor frame1 = pool.fetchPage(TEST_OID, 1);
-        pool.fetchPage(TEST_OID, 2); // frame2 - stays pinned
+        pool.fetchPage(TEST_OID, 2); // stays pinned
 
         pool.unpinPage(frame0, false);
         pool.unpinPage(frame1, false);
-        // frame2 stays pinned!
 
         BufferDescriptor frame0Again = pool.fetchPage(TEST_OID, 0);
         assertThat(frame0Again).isSameAs(frame0);
@@ -168,10 +167,49 @@ class BufferPoolTest {
         pool.close();
     }
 
+    /**
+     * All frames pinned — fetchPage must block until one is released.
+     * A background thread releases a pin after 50 ms; the main thread's
+     * fetch should then succeed.
+     */
     @Test
-    void clockSweep_allPinned_throwsException() throws IOException {
+    void clockSweep_allPinned_blocksUntilUnpin() throws IOException, InterruptedException {
         Path file = createTestFile(5);
         BufferPool pool = new BufferPool(3);
+        pool.registerFile(TEST_OID, file);
+
+        BufferDescriptor frame0 = pool.fetchPage(TEST_OID, 0);
+        BufferDescriptor frame1 = pool.fetchPage(TEST_OID, 1);
+        pool.fetchPage(TEST_OID, 2); // pinned, not held in a local var
+
+        // Background thread releases frame0 after a short delay.
+        Thread releaser = new Thread(() -> {
+            try {
+                Thread.sleep(50);
+                pool.unpinPage(frame0, false);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        releaser.start();
+
+        // Should succeed once the releaser unpins frame0.
+        BufferDescriptor frame3 = pool.fetchPage(TEST_OID, 3);
+        assertThat(frame3).isNotNull();
+
+        releaser.join();
+        pool.close();
+    }
+
+    /**
+     * All frames permanently pinned — fetchPage must eventually throw StorageException
+     * after the sweep timeout expires.
+     */
+    @Test
+    void clockSweep_allPinned_throwsAfterTimeout() throws IOException {
+        Path file = createTestFile(5);
+        // Short sweep timeout so the test doesn't wait too long.
+        BufferPool pool = new BufferPool(3, 200);
         pool.registerFile(TEST_OID, file);
 
         pool.fetchPage(TEST_OID, 0);
@@ -179,8 +217,7 @@ class BufferPoolTest {
         pool.fetchPage(TEST_OID, 2);
 
         assertThatThrownBy(() -> pool.fetchPage(TEST_OID, 3))
-            .isInstanceOf(StorageException.class)
-            .hasMessageContaining("No evictable frame found");
+            .isInstanceOf(StorageException.class);
 
         pool.close();
     }
@@ -213,10 +250,15 @@ class BufferPoolTest {
 
         BufferDescriptor frame = pool.fetchPage(TEST_OID, 0);
 
-        ByteBuffer buf = frame.page();
-        buf.clear();
-        buf.putInt(0xDEADBEEF);
-        buf.flip();
+        frame.contentLock().writeLock().lock();
+        try {
+            ByteBuffer buf = frame.page();
+            buf.clear();
+            buf.putInt(0xDEADBEEF);
+            buf.flip();
+        } finally {
+            frame.contentLock().writeLock().unlock();
+        }
 
         pool.unpinPage(frame, true);
         assertThat(frame.dirty()).isTrue();
@@ -236,9 +278,8 @@ class BufferPoolTest {
         pool.registerFile(TEST_OID, file);
 
         BufferDescriptor frame = pool.fetchPage(TEST_OID, 0);
-        pool.unpinPage(frame, true); // mark dirty
+        pool.unpinPage(frame, true);
 
-        // close() should auto-flush dirty pages and not throw
         pool.close();
     }
 
@@ -249,11 +290,10 @@ class BufferPoolTest {
         pool.registerFile(TEST_OID, file);
 
         BufferDescriptor frame = pool.fetchPage(TEST_OID, 0);
-        pool.unpinPage(frame, true); // mark dirty
+        pool.unpinPage(frame, true);
 
         pool.flushAllDirty();
-
-        pool.close(); // should not throw
+        pool.close();
     }
 
     @Test
@@ -285,6 +325,7 @@ class BufferPoolTest {
         assertThat(stats).contains("hits=1");
         assertThat(stats).contains("misses=2");
         assertThat(stats).contains("hit-rate=33.");
+        assertThat(stats).contains("partitions=16");
 
         pool.close();
     }
@@ -309,11 +350,9 @@ class BufferPoolTest {
     }
 
     @Test
-    void defaultConstructor_creates1024Frames() throws IOException {
+    void defaultConstructor_creates1024Frames() {
         BufferPool pool = new BufferPool();
 
         assertThat(pool.frameCount()).isEqualTo(1024);
-
-        pool.close();
     }
 }
