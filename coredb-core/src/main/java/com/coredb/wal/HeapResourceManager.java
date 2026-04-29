@@ -96,6 +96,7 @@ public final class HeapResourceManager implements ResourceManager {
         // Write the tuple header
         RecordId self = new RecordId(record.pageId(), slotNo);
         HeapTupleHeader header = new HeapTupleHeader(self, natts, bitmap);
+        header.setXmin(record.xid());
         header.writeTo(page, tupleOffset);
 
         // Write the tuple data after the header
