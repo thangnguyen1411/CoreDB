@@ -247,6 +247,23 @@ public final class BTreeLeafPage {
         layout.setBtpoNext(next);
     }
 
+    public long highKey() {
+        return layout.highKey();
+    }
+
+    public void setHighKey(long key) {
+        layout.setHighKey(key);
+    }
+
+    /**
+     * Lehman-Yao boundary check. Returns true if {@code searchKey} is bounded by
+     * this page's high key (or this page is the rightmost on its level). When this
+     * returns false, a search must follow {@link #btpoNext()} to the right sibling.
+     */
+    public boolean keyBelongsHere(long searchKey) {
+        return btpoNext() == 0 || searchKey < highKey();
+    }
+
     /**
      * Splits this leaf page into two, allocating a new right sibling.
      *
@@ -286,6 +303,10 @@ public final class BTreeLeafPage {
             entries[i] = new Entry(keyAt(i), ridAt(i));
         }
 
+        // Capture the existing high key before reinitializing
+        int oldRightSiblingForHighKey = this.btpoNext();
+        long oldHighKey = (oldRightSiblingForHighKey != 0) ? this.layout.highKey() : 0L;
+
         // Split point: upper half goes to new page
         // For even counts: split exactly in half
         // For odd counts: left page gets one more (ceiling division)
@@ -315,6 +336,15 @@ public final class BTreeLeafPage {
         // Point new page at this page (left) and old right sibling
         rightPage.setBtpoPrev(leftPageId);
         rightPage.setBtpoNext(oldRightSibling);
+        // The right page inherits the old high key (if there is a sibling beyond it).
+        // Lehman-Yao: a page's high key bounds the keys present on the page itself;
+        // since the right page now holds the upper half plus owns the chain to the
+        // old right sibling, its high key is the same as the original page's was.
+        if (oldRightSibling != 0) {
+            rightPage.layout.setHighKey(oldHighKey);
+        } else {
+            rightPage.layout.setHighKey(0L);
+        }
 
         // Save left sibling pointer before reinitializing
         int leftSibling = this.btpoPrev();
@@ -326,6 +356,9 @@ public final class BTreeLeafPage {
         // Restore sibling pointers (initializeAsLeaf resets them)
         this.setBtpoPrev(leftSibling);
         this.setBtpoNext(newRightPageId);
+        // Lehman-Yao high key: the smallest key now living on the right sibling.
+        // A descender that lands here with searchKey >= highKey must follow btpoNext.
+        this.layout.setHighKey(separatorKey);
 
         for (int i = 0; i < splitPoint; i++) {
             InsertResult result = this.insert(entries[i].key, entries[i].rid);

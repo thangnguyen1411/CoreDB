@@ -22,7 +22,7 @@ class BTreeResourceManagerTest {
 
     private static final int TABLE_OID = 1002;
     private static final int PAGE_ID = 1;
-    private static final int BTOPAQUE_OFFSET = Constants.PAGE_SIZE - 12;
+    private static final int BTOPAQUE_OFFSET = Constants.PAGE_SIZE - com.coredb.index.BTPageOpaque.SIZE;
 
     @Test
     void redoLeafInsert_shouldAddEntryToPage() {

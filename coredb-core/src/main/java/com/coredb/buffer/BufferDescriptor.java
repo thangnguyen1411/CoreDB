@@ -67,6 +67,14 @@ public final class BufferDescriptor {
     Condition ioCondition() { return ioCondition; }
     ReentrantReadWriteLock contentLock() { return contentLock; }
 
+    // ==================== Public content-lock helpers ====================
+    // Used by access methods (e.g. B-tree) for fine-grained page latching.
+
+    public void lockShared() { contentLock.readLock().lock(); }
+    public void unlockShared() { contentLock.readLock().unlock(); }
+    public void lockExclusive() { contentLock.writeLock().lock(); }
+    public void unlockExclusive() { contentLock.writeLock().unlock(); }
+
     // ==================== Header-mutex-protected mutations ====================
 
     /** Caller must hold headerMutex. */
