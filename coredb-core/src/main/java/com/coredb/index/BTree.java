@@ -196,18 +196,24 @@ public final class BTree {
             this.closed = false;
 
             // Descend with shared latches; the leaf is pinned and shared-locked.
-            currentPinned = descendToLeafShared(from);
-            // Walk right-links if a concurrent split moved 'from' rightward.
-            while (true) {
-                BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(currentPinned.page()));
-                if (leaf.keyBelongsHere(from)) {
-                    this.currentLeaf = leaf;
-                    break;
+            // If anything below throws, release the latch+pin we are holding —
+            // the caller has no reference to call close() on a half-built iterator.
+            try {
+                currentPinned = descendToLeafShared(from);
+                while (true) {
+                    BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(currentPinned.page()));
+                    if (leaf.keyBelongsHere(from)) {
+                        this.currentLeaf = leaf;
+                        break;
+                    }
+                    currentPinned = handOverShared(currentPinned, leaf.btpoNext());
                 }
-                currentPinned = handOverShared(currentPinned, leaf.btpoNext());
+                this.currentSlot = currentLeaf.findFirstSlotGe(from);
+                advance();
+            } catch (RuntimeException | IOException e) {
+                releaseCurrent();
+                throw e;
             }
-            this.currentSlot = currentLeaf.findFirstSlotGe(from);
-            advance();
         }
 
         private void advance() throws IOException {
@@ -263,7 +269,11 @@ public final class BTree {
             try {
                 advance();
             } catch (IOException e) {
+                releaseCurrent();
                 throw new java.io.UncheckedIOException(e);
+            } catch (RuntimeException e) {
+                releaseCurrent();
+                throw e;
             }
             return result;
         }
