@@ -241,6 +241,9 @@ public final class XLogWriter implements AutoCloseable {
         channel.close();
     }
 
+    // Called under flushMutex. Acquiring insertLock here is safe: the only
+    // latch-order direction in this class is flushMutex → insertLock.
+    // append() holds insertLock and never touches flushMutex, so no cycle.
     private long snapshotCurrentLsn() {
         insertLock.lock();
         try {
