@@ -28,19 +28,26 @@ public final class TransactionManager {
     private final SnapshotManager snapshotManager;
     private final ClogManager clog;
     private final XLogWriter xlogWriter;
+    private final LockManager lockManager;
 
     private Transaction currentTx;
 
     public TransactionManager(ControlFile controlFile, SnapshotManager snapshotManager, ClogManager clog) {
-        this(controlFile, snapshotManager, clog, null);
+        this(controlFile, snapshotManager, clog, null, null);
     }
 
     public TransactionManager(ControlFile controlFile, SnapshotManager snapshotManager,
                                ClogManager clog, XLogWriter xlogWriter) {
+        this(controlFile, snapshotManager, clog, xlogWriter, null);
+    }
+
+    public TransactionManager(ControlFile controlFile, SnapshotManager snapshotManager,
+                               ClogManager clog, XLogWriter xlogWriter, LockManager lockManager) {
         this.controlFile = controlFile;
         this.snapshotManager = snapshotManager;
         this.clog = clog;
         this.xlogWriter = xlogWriter;
+        this.lockManager = lockManager;
     }
 
     /**
@@ -97,6 +104,9 @@ public final class TransactionManager {
 
         clog.setCommitted(tx.xid());
         clog.flush();
+        if (lockManager != null) {
+            lockManager.releaseAll(tx.xid());
+        }
         finishTransaction(tx, Transaction.State.COMMITTED);
     }
 
@@ -131,6 +141,9 @@ public final class TransactionManager {
 
         clog.setAborted(tx.xid());
         clog.flush();
+        if (lockManager != null) {
+            lockManager.releaseAll(tx.xid());
+        }
         finishTransaction(tx, Transaction.State.ABORTED);
     }
 
@@ -160,6 +173,9 @@ public final class TransactionManager {
      */
     public void clearCurrentTransaction() {
         if (currentTx != null) {
+            if (lockManager != null) {
+                lockManager.releaseAll(currentTx.xid());
+            }
             finishTransaction(currentTx, Transaction.State.ABORTED);
         }
     }
