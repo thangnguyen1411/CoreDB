@@ -5,6 +5,7 @@ import com.coredb.catalog.BootstrapCatalog;
 import com.coredb.catalog.Catalog;
 import com.coredb.catalog.ControlFile;
 import com.coredb.catalog.TableMeta;
+import com.coredb.engine.ConcurrentStorageEngine;
 import com.coredb.engine.StorageEngine;
 import com.coredb.engine.StorageEngineFactory;
 import com.coredb.mvcc.SnapshotManager;
@@ -64,7 +65,7 @@ public final class CoreDB implements AutoCloseable {
         this.catalog = catalog;
         this.snapshotManager = snapshotManager;
         this.lockManager = new LockManager();
-        this.transactionManager = new TransactionManager(controlFile, snapshotManager, clog, xlogWriter);
+        this.transactionManager = new TransactionManager(controlFile, snapshotManager, clog, xlogWriter, lockManager);
         this.engineCache = new ConcurrentHashMap<>();
         this.lastRecoveryStats = lastRecoveryStats;
         log.debug(
@@ -189,10 +190,11 @@ public final class CoreDB implements AutoCloseable {
         }
         return engineCache.computeIfAbsent(meta.oid(), oid -> {
             try {
-                StorageEngine engine = StorageEngineFactory.create(
+                StorageEngine inner = StorageEngineFactory.create(
                     config.engineType(),
                     config
                 );
+                StorageEngine engine = new ConcurrentStorageEngine(inner, lockManager);
                 engine.open(dataPath, meta, bufferPool, xlogWriter, clog, transactionManager);
                 log.debug(
                     "Opened StorageEngine for table {} (oid={})",
