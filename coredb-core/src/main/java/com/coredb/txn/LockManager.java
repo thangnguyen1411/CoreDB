@@ -1,5 +1,8 @@
 package com.coredb.txn;
 
+import com.coredb.util.DeadlockException;
+import com.coredb.util.LockTimeoutException;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -25,12 +28,11 @@ public final class LockManager {
     /**
      * Acquires a lock for xid on the given tag in the given mode.
      *
-     * <p>Returns true immediately if the lock can be granted (including re-entrant
-     * acquisition by the same xid). If blocked, waits up to timeoutMs milliseconds.
-     * Returns false if the timeout expires without acquiring the lock.
+     * <p>Returns true if the lock is granted. Re-entrant: same xid acquiring the same
+     * tag a second time is granted immediately with a single holder entry.
      *
-     * <p>Re-entrant: if xid already holds any lock on this tag, the call succeeds
-     * immediately with a single holder entry.
+     * @throws DeadlockException   if granting would create a cycle in the waits-for graph
+     * @throws LockTimeoutException if timeoutMs elapses before the lock can be granted
      */
     public boolean acquire(int xid, LockTag tag, LockMode mode, long timeoutMs) {
         Lock lock = lockTable.computeIfAbsent(tag, Lock::new);
@@ -42,29 +44,79 @@ public final class LockManager {
                 return true;
             }
 
-            LockRequest req = new LockRequest(xid, tag, mode, Thread.currentThread());
-            lock.waitQueue().addLast(req);
             long nanosRemaining = TimeUnit.MILLISECONDS.toNanos(timeoutMs);
-            try {
-                while (!lock.canGrant(xid, mode)) {
-                    if (nanosRemaining <= 0) {
-                        lock.waitQueue().removeIf(r -> r.thread() == Thread.currentThread());
-                        return false;
-                    }
-                    nanosRemaining = lock.condition().awaitNanos(nanosRemaining);
+            while (!lock.canGrant(xid, mode)) {
+                if (nanosRemaining <= 0) {
+                    throw new LockTimeoutException(xid, timeoutMs);
                 }
-                lock.waitQueue().removeIf(r -> r.thread() == Thread.currentThread());
-                lock.grant(xid, mode);
-                trackLock(xid, tag);
-                return true;
-            } catch (InterruptedException e) {
-                lock.waitQueue().removeIf(r -> r.thread() == Thread.currentThread());
-                Thread.currentThread().interrupt();
-                return false;
+                if (deadlockCheck(xid, tag)) {
+                    throw new DeadlockException(xid);
+                }
+                LockRequest req = new LockRequest(xid, tag, mode, Thread.currentThread());
+                lock.waitQueue().addLast(req);
+                try {
+                    nanosRemaining = lock.condition().awaitNanos(nanosRemaining);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new LockTimeoutException(xid, timeoutMs);
+                } finally {
+                    lock.waitQueue().removeIf(r -> r.thread() == Thread.currentThread());
+                }
             }
+            lock.grant(xid, mode);
+            trackLock(xid, tag);
+            return true;
         } finally {
             lock.mutex().unlock();
         }
+    }
+
+    /**
+     * Returns true if granting (waitingXid → blockingTag) would create a cycle.
+     *
+     * Called while holding blockingTag's mutex. Builds the waits-for graph on the fly
+     * using tryLock() on other lock entries to avoid blocking.
+     */
+    private boolean deadlockCheck(int waitingXid, LockTag blockingTag) {
+        Lock blockingLock = lockTable.get(blockingTag);
+        if (blockingLock == null) return false;
+        Set<Integer> holders = new HashSet<>(blockingLock.holderXids());
+        Set<Integer> visited = new HashSet<>();
+        for (int holder : holders) {
+            if (canReachViaWaitsFor(holder, waitingXid, visited)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * DFS through the waits-for graph. Returns true if `from` can reach `target`.
+     *
+     * Uses tryLock() on each lock entry so it never blocks. Edges that cannot be
+     * inspected (tryLock failed) are skipped — a conservative miss, not a false positive.
+     */
+    private boolean canReachViaWaitsFor(int from, int target, Set<Integer> visited) {
+        if (from == target) return true;
+        if (!visited.add(from)) return false;
+
+        for (Map.Entry<LockTag, Lock> entry : lockTable.entrySet()) {
+            Lock other = entry.getValue();
+            if (!other.mutex().tryLock()) continue;
+            try {
+                boolean fromIsWaiting = other.waitQueue().stream().anyMatch(r -> r.xid() == from);
+                if (fromIsWaiting) {
+                    for (int holder : new HashSet<>(other.holderXids())) {
+                        if (canReachViaWaitsFor(holder, target, visited)) {
+                            return true;
+                        }
+                    }
+                }
+            } finally {
+                other.mutex().unlock();
+            }
+        }
+        return false;
     }
 
     /**
