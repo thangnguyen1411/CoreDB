@@ -188,7 +188,8 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             txnMgr.commit(tx);
             return "xid=" + xid + " committed";
         } catch (IOException e) {
-            return "error: " + e.getMessage();
+            txnMgr.clearCurrentTransaction();
+            return "error: commit failed — transaction cleared, outcome uncertain: " + e.getMessage();
         }
     }
 
@@ -203,7 +204,8 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             txnMgr.rollback(tx);
             return "xid=" + xid + " aborted";
         } catch (IOException e) {
-            return "error: " + e.getMessage();
+            txnMgr.clearCurrentTransaction();
+            return "error: rollback failed — transaction cleared: " + e.getMessage();
         }
     }
 

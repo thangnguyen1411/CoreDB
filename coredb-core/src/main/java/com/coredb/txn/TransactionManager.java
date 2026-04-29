@@ -151,6 +151,19 @@ public final class TransactionManager {
         return currentTx;
     }
 
+    /**
+     * Clears the active transaction after an unrecoverable I/O failure in commit or rollback.
+     *
+     * <p>Does NOT update clog. The XID remains IN_PROGRESS in pg_xact; recovery will
+     * resolve it to COMMITTED (if XACT_COMMIT reached the WAL) or ABORTED (sweep) on
+     * the next startup. Callers must treat the outcome as uncertain.</p>
+     */
+    public void clearCurrentTransaction() {
+        if (currentTx != null) {
+            finishTransaction(currentTx, Transaction.State.ABORTED);
+        }
+    }
+
     private void validateActive(Transaction tx) {
         if (tx == null) {
             throw new TxnException("null transaction");
