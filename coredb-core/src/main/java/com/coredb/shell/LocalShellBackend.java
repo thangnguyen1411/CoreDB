@@ -20,6 +20,8 @@ import com.coredb.mvcc.Snapshot;
 import com.coredb.index.BTreeLeafPage;
 import com.coredb.index.IndexFile;
 import com.coredb.index.IndexPageLayout;
+import com.coredb.txn.LockManager;
+import com.coredb.txn.LockMode;
 import com.coredb.util.Constants;
 import com.coredb.wal.XLogReader;
 import com.coredb.wal.XLogRecord;
@@ -159,6 +161,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             case "clog-status" -> handleClogStatus(args);
             case "vacuum" -> handleVacuum(args);
             case "vacuum-stats" -> handleVacuumStats(args);
+            case "lock-table" -> handleLockTable();
             case "help" -> formatHelp();
             default -> "unknown command: " + command + "  (type 'help' for available commands)";
         };
@@ -275,6 +278,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
           commit                     commit the current transaction
           rollback                   abort the current transaction
           clog-status [xid]          show transaction status log summary or specific XID status
+          lock-table                 show current lock table (holders and waiters)
         """;
     }
 
@@ -1321,6 +1325,44 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         } catch (IOException e) {
             return "error: " + e.getMessage();
         }
+    }
+
+    private String handleLockTable() {
+        List<LockManager.LockSnapshot> locks = db.lockManager().allLocks();
+        if (locks.isEmpty()) {
+            return "(no locks held)";
+        }
+
+        Catalog cat = db.catalog();
+        StringBuilder sb = new StringBuilder();
+        for (LockManager.LockSnapshot snap : locks) {
+            String resourceName = resolveTableName(cat, snap.tag().tableOid());
+            StringBuilder holderPart = new StringBuilder();
+            for (Map.Entry<Integer, LockMode> e : snap.holders().entrySet()) {
+                if (!holderPart.isEmpty()) holderPart.append(", ");
+                holderPart.append(e.getValue()).append(" held by xid=").append(e.getKey());
+            }
+            StringBuilder waiterPart = new StringBuilder();
+            for (LockManager.WaiterInfo w : snap.waiters()) {
+                if (!waiterPart.isEmpty()) waiterPart.append(", ");
+                waiterPart.append("xid=").append(w.xid()).append(" (").append(w.mode()).append(")");
+            }
+            sb.append(resourceName)
+              .append(" (").append(snap.tag().type()).append(")  ")
+              .append(holderPart.isEmpty() ? "(no holders)" : holderPart)
+              .append("  waiters: ").append(waiterPart.isEmpty() ? "none" : waiterPart)
+              .append("\n");
+        }
+        return sb.toString().stripTrailing();
+    }
+
+    private String resolveTableName(Catalog cat, int oid) {
+        try {
+            for (TableMeta meta : cat.listTables()) {
+                if (meta.oid() == oid) return meta.name();
+            }
+        } catch (IOException ignored) {}
+        return "oid=" + oid;
     }
 
     private String handleClogStatus(String args) {

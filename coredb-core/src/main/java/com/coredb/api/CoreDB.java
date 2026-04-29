@@ -11,6 +11,7 @@ import com.coredb.mvcc.SnapshotManager;
 import com.coredb.recovery.RecoveryManager;
 import com.coredb.recovery.RecoveryStats;
 import com.coredb.txn.ClogManager;
+import com.coredb.txn.LockManager;
 import com.coredb.txn.Transaction;
 import com.coredb.txn.TransactionManager;
 import com.coredb.util.Constants;
@@ -38,6 +39,7 @@ public final class CoreDB implements AutoCloseable {
     private final Catalog catalog;
     private final SnapshotManager snapshotManager;
     private final TransactionManager transactionManager;
+    private final LockManager lockManager;
     private final Map<Integer, StorageEngine> engineCache;
     private final RecoveryStats lastRecoveryStats;
     private volatile boolean closed = false;
@@ -61,6 +63,7 @@ public final class CoreDB implements AutoCloseable {
         this.clog = clog;
         this.catalog = catalog;
         this.snapshotManager = snapshotManager;
+        this.lockManager = new LockManager();
         this.transactionManager = new TransactionManager(controlFile, snapshotManager, clog, xlogWriter);
         this.engineCache = new ConcurrentHashMap<>();
         this.lastRecoveryStats = lastRecoveryStats;
@@ -236,6 +239,13 @@ public final class CoreDB implements AutoCloseable {
      */
     public TransactionManager transactionManager() {
         return transactionManager;
+    }
+
+    /**
+     * Returns the lock manager for this database instance.
+     */
+    public LockManager lockManager() {
+        return lockManager;
     }
 
     /**
