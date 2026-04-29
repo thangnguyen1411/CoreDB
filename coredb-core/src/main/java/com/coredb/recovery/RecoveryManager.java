@@ -166,9 +166,15 @@ public final class RecoveryManager {
             }
 
         } finally {
-            reader.close();
-            if (clog != null) clog.close();
-            controlFile.close();
+            try {
+                reader.close();
+            } finally {
+                try {
+                    if (clog != null) clog.close();
+                } finally {
+                    controlFile.close();
+                }
+            }
         }
 
         long elapsedMillis = java.time.Duration.between(startTime, Instant.now()).toMillis();

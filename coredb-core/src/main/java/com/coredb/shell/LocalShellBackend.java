@@ -119,11 +119,12 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             if (autoCommit && tx != null) {
                 try { txnMgr.rollback(tx); } catch (IOException ignored) {}
             }
-            return "error: " + e.getMessage();
+            String msg = e.getMessage();
+            return "error: " + (msg != null ? msg : e.getClass().getSimpleName());
         }
     }
 
-    private String dispatch(String command, String args) {
+    private String dispatch(String command, String args) throws IOException {
         return switch (command) {
             case "version" -> formatVersion();
             case "status" -> formatStatus();
@@ -932,7 +933,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
      * Handles: put <table> <pk> <col1> <col2> ...
      * Inserts or updates a row via the StorageEngine (MVCC upsert).
      */
-    private String handlePut(String args) {
+    private String handlePut(String args) throws IOException {
         if (args.isBlank()) {
             return "usage: put <table> <pk> <col1> <col2> ...";
         }
@@ -992,9 +993,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             boolean isUpdate = engine.get(pk).isPresent();
             engine.put(pk, row);
             return isUpdate ? "ok (updated)" : "ok (inserted)";
-        } catch (IllegalStateException e) {
-            return "error: " + e.getMessage();
-        } catch (IOException | IllegalArgumentException e) {
+        } catch (IllegalStateException | IllegalArgumentException e) {
             return "error: " + e.getMessage();
         }
     }
@@ -1003,7 +1002,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
      * Handles: get <table> <pk>
      * Retrieves a row by primary key via the StorageEngine.
      */
-    private String handleGet(String args) {
+    private String handleGet(String args) throws IOException {
         if (args.isBlank()) {
             return "usage: get <table> <pk>";
         }
@@ -1021,24 +1020,19 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             return "error: primary key must be a long integer";
         }
 
-        try {
-            Catalog cat = getCatalog();
-            Optional<TableMeta> metaOpt = cat.openTable(tableName);
-            if (metaOpt.isEmpty()) {
-                return "error: unknown table: " + tableName;
-            }
-            TableMeta meta = metaOpt.get();
+        Catalog cat = getCatalog();
+        Optional<TableMeta> metaOpt = cat.openTable(tableName);
+        if (metaOpt.isEmpty()) {
+            return "error: unknown table: " + tableName;
+        }
+        TableMeta meta = metaOpt.get();
 
-            // Use cached engine from CoreDB
-            StorageEngine engine = db.getEngineForTable(meta);
-            Optional<Row> row = engine.get(pk);
-            if (row.isPresent()) {
-                return row.get().values().toString();
-            } else {
-                return "(not found)";
-            }
-        } catch (IOException e) {
-            return "error: " + e.getMessage();
+        StorageEngine engine = db.getEngineForTable(meta);
+        Optional<Row> row = engine.get(pk);
+        if (row.isPresent()) {
+            return row.get().values().toString();
+        } else {
+            return "(not found)";
         }
     }
 
@@ -1046,7 +1040,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
      * Handles: delete <table> <pk>
      * Deletes a row by primary key via the StorageEngine.
      */
-    private String handleDelete(String args) {
+    private String handleDelete(String args) throws IOException {
         if (args.isBlank()) {
             return "usage: delete <table> <pk>";
         }
@@ -1064,75 +1058,59 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             return "error: primary key must be a long integer";
         }
 
-        try {
-            Catalog cat = getCatalog();
-            Optional<TableMeta> metaOpt = cat.openTable(tableName);
-            if (metaOpt.isEmpty()) {
-                return "error: unknown table: " + tableName;
-            }
-            TableMeta meta = metaOpt.get();
-
-            // Use cached engine from CoreDB
-            StorageEngine engine = db.getEngineForTable(meta);
-            engine.delete(pk);
-            return "ok";
-        } catch (IOException e) {
-            return "error: " + e.getMessage();
+        Catalog cat = getCatalog();
+        Optional<TableMeta> metaOpt = cat.openTable(tableName);
+        if (metaOpt.isEmpty()) {
+            return "error: unknown table: " + tableName;
         }
+        TableMeta meta = metaOpt.get();
+
+        StorageEngine engine = db.getEngineForTable(meta);
+        engine.delete(pk);
+        return "ok";
     }
 
     /**
      * Handles: scan <table>
      * Full table scan via StorageEngine (returns rows in heap order).
      */
-    private String handleScan(String args) {
+    private String handleScan(String args) throws IOException {
         if (args.isBlank()) {
             return "usage: scan <table>";
         }
 
         String tableName = args.trim().split("\\s+")[0];
 
-        try {
-            Catalog cat = getCatalog();
-            Optional<TableMeta> metaOpt = cat.openTable(tableName);
-            if (metaOpt.isEmpty()) {
-                return "error: unknown table: " + tableName;
-            }
-            TableMeta meta = metaOpt.get();
-
-            StorageEngine engine = db.getEngineForTable(meta);
-            StringBuilder sb = new StringBuilder();
-            int count = 0;
-
-            Iterator<Map.Entry<Long, Row>> it =
-                engine.fullScan();
-            while (it.hasNext()) {
-                Map.Entry<Long, Row> entry = it.next();
-                sb
-                    .append(entry.getKey())
-                    .append(": ")
-                    .append(entry.getValue().values().toString())
-                    .append("\n");
-                count++;
-            }
-
-            if (count == 0) {
-                return "(no rows)";
-            }
-            return (
-                String.format("(%d rows)%n", count) +
-                sb.toString().stripTrailing()
-            );
-        } catch (IOException e) {
-            return "error: " + e.getMessage();
+        Catalog cat = getCatalog();
+        Optional<TableMeta> metaOpt = cat.openTable(tableName);
+        if (metaOpt.isEmpty()) {
+            return "error: unknown table: " + tableName;
         }
+        TableMeta meta = metaOpt.get();
+
+        StorageEngine engine = db.getEngineForTable(meta);
+        StringBuilder sb = new StringBuilder();
+        int count = 0;
+
+        Iterator<Map.Entry<Long, Row>> it = engine.fullScan();
+        while (it.hasNext()) {
+            Map.Entry<Long, Row> entry = it.next();
+            sb.append(entry.getKey()).append(": ")
+              .append(entry.getValue().values().toString()).append("\n");
+            count++;
+        }
+
+        if (count == 0) {
+            return "(no rows)";
+        }
+        return String.format("(%d rows)%n", count) + sb.toString().stripTrailing();
     }
 
     /**
      * Handles: range <table> <from-pk> <to-pk>
      * Range scan via StorageEngine (returns rows in PK order, inclusive).
      */
-    private String handleRange(String args) {
+    private String handleRange(String args) throws IOException {
         if (args.isBlank()) {
             return "usage: range <table> <from-pk> <to-pk>";
         }
@@ -1151,40 +1129,29 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             return "error: primary key range bounds must be long integers";
         }
 
-        try {
-            Catalog cat = getCatalog();
-            Optional<TableMeta> metaOpt = cat.openTable(tableName);
-            if (metaOpt.isEmpty()) {
-                return "error: unknown table: " + tableName;
-            }
-            TableMeta meta = metaOpt.get();
-
-            StorageEngine engine = db.getEngineForTable(meta);
-            StringBuilder sb = new StringBuilder();
-            int count = 0;
-
-            Iterator<Map.Entry<Long, Row>> it =
-                engine.rangeScan(fromPk, toPk);
-            while (it.hasNext()) {
-                Map.Entry<Long, Row> entry = it.next();
-                sb
-                    .append(entry.getKey())
-                    .append(": ")
-                    .append(entry.getValue().values().toString())
-                    .append("\n");
-                count++;
-            }
-
-            if (count == 0) {
-                return "(no rows in range)";
-            }
-            return (
-                String.format("(%d rows)%n", count) +
-                sb.toString().stripTrailing()
-            );
-        } catch (IOException e) {
-            return "error: " + e.getMessage();
+        Catalog cat = getCatalog();
+        Optional<TableMeta> metaOpt = cat.openTable(tableName);
+        if (metaOpt.isEmpty()) {
+            return "error: unknown table: " + tableName;
         }
+        TableMeta meta = metaOpt.get();
+
+        StorageEngine engine = db.getEngineForTable(meta);
+        StringBuilder sb = new StringBuilder();
+        int count = 0;
+
+        Iterator<Map.Entry<Long, Row>> it = engine.rangeScan(fromPk, toPk);
+        while (it.hasNext()) {
+            Map.Entry<Long, Row> entry = it.next();
+            sb.append(entry.getKey()).append(": ")
+              .append(entry.getValue().values().toString()).append("\n");
+            count++;
+        }
+
+        if (count == 0) {
+            return "(no rows in range)";
+        }
+        return String.format("(%d rows)%n", count) + sb.toString().stripTrailing();
     }
 
     /**
@@ -1275,62 +1242,54 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
      * Handles: clog-status [xid]
      * Shows transaction status log summary or specific XID status.
      */
-    private String handleVacuum(String args) {
+    private String handleVacuum(String args) throws IOException {
         if (args.isBlank()) {
             return "usage: vacuum <table>";
         }
         String tableName = args.trim();
-        try {
-            Catalog cat = getCatalog();
-            Optional<TableMeta> metaOpt = cat.openTable(tableName);
-            if (metaOpt.isEmpty()) {
-                return "error: unknown table: " + tableName;
-            }
-            TableMeta meta = metaOpt.get();
-            StorageEngine engine = db.getEngineForTable(meta);
-            if (!(engine instanceof BTreeStorageEngine btEngine)) {
-                return "error: vacuum only supported for BTreeStorageEngine";
-            }
-            int oldestXmin = db.snapshotManager().oldestActiveXmin();
-            VacuumExecutor vacuum = new VacuumExecutor(
-                    btEngine.heap(),
-                    List.of(btEngine.pkIndex()),
-                    db.xlogWriter(),
-                    db.clog());
-            VacuumStats stats = vacuum.vacuum(oldestXmin);
-            return String.format(
-                    "scanned %d pages  dead-tuples=%d  index-entries-removed=%d  reclaimed=%d B",
-                    stats.pagesScanned(), stats.deadTuples(),
-                    stats.indexEntriesRemoved(), stats.bytesReclaimed());
-        } catch (IOException e) {
-            return "error: " + e.getMessage();
+        Catalog cat = getCatalog();
+        Optional<TableMeta> metaOpt = cat.openTable(tableName);
+        if (metaOpt.isEmpty()) {
+            return "error: unknown table: " + tableName;
         }
+        TableMeta meta = metaOpt.get();
+        StorageEngine engine = db.getEngineForTable(meta);
+        if (!(engine instanceof BTreeStorageEngine btEngine)) {
+            return "error: vacuum only supported for BTreeStorageEngine";
+        }
+        int oldestXmin = db.snapshotManager().oldestActiveXmin();
+        VacuumExecutor vacuum = new VacuumExecutor(
+                btEngine.heap(),
+                List.of(btEngine.pkIndex()),
+                db.xlogWriter(),
+                db.clog());
+        VacuumStats stats = vacuum.vacuum(oldestXmin);
+        return String.format(
+                "scanned %d pages  dead-tuples=%d  index-entries-removed=%d  reclaimed=%d B",
+                stats.pagesScanned(), stats.deadTuples(),
+                stats.indexEntriesRemoved(), stats.bytesReclaimed());
     }
 
-    private String handleVacuumStats(String args) {
+    private String handleVacuumStats(String args) throws IOException {
         if (args.isBlank()) {
             return "usage: vacuum-stats <table>";
         }
         String tableName = args.trim();
-        try {
-            Catalog cat = getCatalog();
-            Optional<TableMeta> metaOpt = cat.openTable(tableName);
-            if (metaOpt.isEmpty()) {
-                return "error: unknown table: " + tableName;
-            }
-            TableMeta meta = metaOpt.get();
-            StorageEngine engine = db.getEngineForTable(meta);
-            if (!(engine instanceof BTreeStorageEngine btEngine)) {
-                return "error: vacuum-stats only supported for BTreeStorageEngine";
-            }
-            HeapFile heap = btEngine.heap();
-            int pages = heap.pageCount() - 1; // data pages (excluding header page 0)
-            int oldestXmin = db.snapshotManager().oldestActiveXmin();
-            long[] counts = heap.countTuples(oldestXmin, db.clog());
-            return String.format("pages=%d  live=%d  dead=%d", pages, counts[0], counts[1]);
-        } catch (IOException e) {
-            return "error: " + e.getMessage();
+        Catalog cat = getCatalog();
+        Optional<TableMeta> metaOpt = cat.openTable(tableName);
+        if (metaOpt.isEmpty()) {
+            return "error: unknown table: " + tableName;
         }
+        TableMeta meta = metaOpt.get();
+        StorageEngine engine = db.getEngineForTable(meta);
+        if (!(engine instanceof BTreeStorageEngine btEngine)) {
+            return "error: vacuum-stats only supported for BTreeStorageEngine";
+        }
+        HeapFile heap = btEngine.heap();
+        int pages = heap.pageCount() - 1;
+        int oldestXmin = db.snapshotManager().oldestActiveXmin();
+        long[] counts = heap.countTuples(oldestXmin, db.clog());
+        return String.format("pages=%d  live=%d  dead=%d", pages, counts[0], counts[1]);
     }
 
     private String handleClogStatus(String args) {

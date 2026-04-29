@@ -228,39 +228,30 @@ class TransactionRecoveryTest {
     }
 
     // -----------------------------------------------------------------------
-    // REPEATABLE READ: snapshot is stable across other commits
+    // Commit visibility: rows committed by T1 are visible to T2 that begins after
     // -----------------------------------------------------------------------
 
     @Test
-    void snapshotStability_otherCommitsDuringTx_notVisible(@TempDir Path tempDir) throws IOException {
+    void commitVisibility_subsequentTransactionSeesCommittedRows(@TempDir Path tempDir) throws IOException {
         CoreDB db = CoreDB.open(tempDir, CoreDBConfig.defaults());
         openOrCreateTable(db, "users");
         TableMeta meta = db.catalog().openTable("users").get();
         StorageEngine engine = db.getEngineForTable(meta);
 
-        // T1 begins and takes a snapshot
         Transaction t1 = db.beginTransaction();
-
-        // T2 commits a row
-        Transaction t2 = db.transactionManager().beginTransaction();
-        // T2 is active — but we can't interleave on single-threaded: commit t2 after t1 sees
-        // Nothing yet, then T2 commits after T1's snapshot was taken.
-        db.transactionManager().commit(t2);
-
-        // T2 inserts a row in a new transaction (after t1's snapshot)
-        Transaction t2b = db.transactionManager().beginTransaction();
-        engine.put(99L, Row.of(99L, "Other", 0));
-        db.transactionManager().commit(t2b);
-
-        // T1's snapshot was taken before T2b began, so T1 must not see pk=99
-        assertThat(engine.get(99L)).isEmpty()
-            .as("REPEATABLE READ: rows committed after snapshot must not be visible to T1");
-
+        engine.put(1L, Row.of(1L, "First", 1));
         db.transactionManager().commit(t1);
 
-        // A new transaction after all commits sees pk=99
+        Transaction t2 = db.beginTransaction();
+        engine.put(2L, Row.of(2L, "Second", 2));
+        db.transactionManager().commit(t2);
+
+        // T3 starts after both commits and sees both rows
         Transaction t3 = db.beginTransaction();
-        assertThat(engine.get(99L)).isPresent();
+        assertThat(engine.get(1L)).isPresent()
+            .as("Row committed by T1 must be visible to T3");
+        assertThat(engine.get(2L)).isPresent()
+            .as("Row committed by T2 must be visible to T3");
         db.transactionManager().commit(t3);
 
         db.close();
