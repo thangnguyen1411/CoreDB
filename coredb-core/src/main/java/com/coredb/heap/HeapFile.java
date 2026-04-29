@@ -383,7 +383,8 @@ public final class HeapFile implements AutoCloseable {
                         XLogRecord.RMGR_HEAP,
                         HeapResourceManager.HEAP_INSERT,
                         pageId,
-                        walPayload
+                        walPayload,
+                        xmin
                     );
                 }
 
@@ -418,7 +419,8 @@ public final class HeapFile implements AutoCloseable {
                 XLogRecord.RMGR_HEAP,
                 HeapResourceManager.HEAP_INSERT,
                 newPage.pageId(),
-                walPayload
+                walPayload,
+                xmin
             );
         }
 
@@ -476,7 +478,8 @@ public final class HeapFile implements AutoCloseable {
      * clears the flag. Otherwise, writes the original payload.</p>
      */
     private long appendWalWithFPW(com.coredb.buffer.BufferDescriptor frame, ByteBuffer pageBuffer,
-                                   byte rmgr, byte info, int pageId, byte[] payload) throws IOException {
+                                   byte rmgr, byte info, int pageId, byte[] payload,
+                                   int txnXid) throws IOException {
         if (xlogWriter == null) {
             return XLogWriter.INVALID_LSN;
         }
@@ -485,7 +488,6 @@ public final class HeapFile implements AutoCloseable {
         byte infoWithFlags = info;
 
         if (frame.needsFullPageWrite()) {
-            // Embed full page image + original payload
             walPayload = buildFullPageWritePayload(pageBuffer, payload);
             infoWithFlags = (byte) (info | XLogRecord.XLOG_FPW);
             frame.clearNeedsFullPageWrite();
@@ -496,7 +498,7 @@ public final class HeapFile implements AutoCloseable {
         long lsn = xlogWriter.append(
             rmgr,
             infoWithFlags,
-            xid,
+            txnXid,
             oid,
             pageId,
             walPayload
@@ -607,7 +609,8 @@ public final class HeapFile implements AutoCloseable {
                 XLogRecord.RMGR_HEAP,
                 HeapResourceManager.HEAP_UPDATE,
                 rid.pageId(),
-                walPayload
+                walPayload,
+                xid
             );
         }
 
@@ -651,7 +654,8 @@ public final class HeapFile implements AutoCloseable {
                 XLogRecord.RMGR_HEAP,
                 HeapResourceManager.HEAP_DELETE,
                 rid.pageId(),
-                walPayload
+                walPayload,
+                xmax
             );
         }
 
@@ -711,7 +715,7 @@ public final class HeapFile implements AutoCloseable {
             // then sets frame.pdLsn. We overwrite the frame buffer afterwards.
             long lsn = appendWalWithFPW(
                     pinned.frame(), page.buffer(),
-                    XLogRecord.RMGR_HEAP, HeapResourceManager.HEAP_VACUUM, pageId, walPayload);
+                    XLogRecord.RMGR_HEAP, HeapResourceManager.HEAP_VACUUM, pageId, walPayload, xid);
             // Copy compacted bytes into the frame (overwrites original content).
             ByteBuffer frameBuf = page.buffer();
             frameBuf.position(0);
