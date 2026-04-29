@@ -685,18 +685,15 @@ public final class BTree {
             int targetPageId;
             BTreeLeafPage targetPage;
             IndexFile.PinnedPage targetPinned;
-            boolean targetIsRight;
 
             if (key < splitResult.separatorKey()) {
                 targetPageId = leaf.pageId();
                 targetPage = leaf;
                 targetPinned = leafPinned;
-                targetIsRight = false;
             } else {
                 targetPageId = splitResult.newRightPageId();
                 targetPage = BTreeLeafPage.of(IndexPageLayout.of(rightPinned.page()));
                 targetPinned = rightPinned;
-                targetIsRight = true;
             }
 
             int slotNo = targetPage.layout().findInsertionPoint(key);
