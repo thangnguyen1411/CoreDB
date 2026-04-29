@@ -1,13 +1,17 @@
 package com.coredb.txn;
 
+import com.coredb.util.DeadlockException;
+import com.coredb.util.LockTimeoutException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class LockManagerTest {
 
@@ -117,8 +121,8 @@ class LockManagerTest {
     void exclusive_blocks_second_exclusive_times_out() {
         lm.acquire(10, TAG_USERS, LockMode.EXCLUSIVE, SHORT_TIMEOUT);
 
-        boolean result = lm.acquire(11, TAG_USERS, LockMode.EXCLUSIVE, SHORT_TIMEOUT);
-        assertThat(result).isFalse();
+        assertThatThrownBy(() -> lm.acquire(11, TAG_USERS, LockMode.EXCLUSIVE, SHORT_TIMEOUT))
+            .isInstanceOf(LockTimeoutException.class);
         assertThat(lm.holdersOf(TAG_USERS)).containsExactly(10);
     }
 
@@ -209,5 +213,122 @@ class LockManagerTest {
 
         lm.releaseAll(10);
         waiter.join();
+    }
+
+    // --- 13B: deadlock detection ---
+
+    @Test
+    void deadlock_detected_second_acquire_throws_DeadlockException() throws Exception {
+        // T1 holds USERS, T2 holds ORDERS.
+        // T1 tries ORDERS → blocks.
+        // T2 tries USERS → deadlock detected, DeadlockException thrown in T2.
+        lm.acquire(1, TAG_USERS, LockMode.EXCLUSIVE, 5000L);
+        lm.acquire(2, TAG_ORDERS, LockMode.EXCLUSIVE, 5000L);
+
+        CountDownLatch t1Blocking = new CountDownLatch(1);
+        AtomicReference<Throwable> t1Error = new AtomicReference<>();
+
+        Thread t1 = new Thread(() -> {
+            t1Blocking.countDown();
+            try {
+                lm.acquire(1, TAG_ORDERS, LockMode.EXCLUSIVE, 5000L);
+            } catch (Throwable e) {
+                t1Error.set(e);
+            }
+        });
+        t1.start();
+
+        t1Blocking.await();
+        Thread.sleep(50); // ensure T1 is in TAG_ORDERS wait queue
+
+        // T2 tries to acquire USERS — T1 holds USERS, T1 waits on ORDERS which T2 holds → cycle
+        assertThatThrownBy(() -> lm.acquire(2, TAG_USERS, LockMode.EXCLUSIVE, 5000L))
+            .isInstanceOf(DeadlockException.class);
+
+        // T2 simulates rollback: release its lock on ORDERS
+        lm.releaseAll(2);
+
+        // T1 should now acquire ORDERS and complete
+        t1.join(1000);
+        assertThat(t1.isAlive()).isFalse();
+        assertThat(t1Error.get()).isNull();
+        assertThat(lm.holdersOf(TAG_ORDERS)).containsExactly(1);
+    }
+
+    @Test
+    void deadlock_victim_releases_allow_other_xid_to_proceed() throws Exception {
+        lm.acquire(1, TAG_USERS, LockMode.EXCLUSIVE, 5000L);
+        lm.acquire(2, TAG_ORDERS, LockMode.EXCLUSIVE, 5000L);
+
+        CountDownLatch t1Queued = new CountDownLatch(1);
+        AtomicBoolean t1Succeeded = new AtomicBoolean(false);
+
+        Thread t1 = new Thread(() -> {
+            t1Queued.countDown();
+            try {
+                lm.acquire(1, TAG_ORDERS, LockMode.EXCLUSIVE, 5000L);
+                t1Succeeded.set(true);
+            } catch (Throwable ignored) {}
+        });
+        t1.start();
+
+        t1Queued.await();
+        Thread.sleep(50);
+
+        // T2 is the victim: acquire throws
+        assertThatThrownBy(() -> lm.acquire(2, TAG_USERS, LockMode.EXCLUSIVE, 5000L))
+            .isInstanceOf(DeadlockException.class);
+
+        // Simulate victim rollback
+        lm.releaseAll(2);
+
+        t1.join(1000);
+        assertThat(t1Succeeded.get()).isTrue();
+    }
+
+    @Test
+    void randomised_deadlock_detection_no_thread_hangs() throws Exception {
+        for (int iter = 0; iter < 100; iter++) {
+            LockManager freshLm = new LockManager();
+            LockTag tagA = new LockTag(100 + iter, LockTag.LockType.TABLE);
+            LockTag tagB = new LockTag(200 + iter, LockTag.LockType.TABLE);
+
+            freshLm.acquire(1, tagA, LockMode.EXCLUSIVE, 5000L);
+            freshLm.acquire(2, tagB, LockMode.EXCLUSIVE, 5000L);
+
+            CountDownLatch t1Started = new CountDownLatch(1);
+            AtomicReference<Throwable> t1Error = new AtomicReference<>();
+
+            Thread t1 = new Thread(() -> {
+                t1Started.countDown();
+                try {
+                    freshLm.acquire(1, tagB, LockMode.EXCLUSIVE, 5000L);
+                } catch (Throwable e) {
+                    t1Error.set(e);
+                }
+            });
+            t1.start();
+
+            t1Started.await();
+            Thread.sleep(20);
+
+            DeadlockException deadlock = null;
+            try {
+                freshLm.acquire(2, tagA, LockMode.EXCLUSIVE, 5000L);
+            } catch (DeadlockException e) {
+                deadlock = e;
+            }
+
+            assertThat(deadlock).as("iteration %d: deadlock expected", iter)
+                .isNotNull();
+
+            freshLm.releaseAll(2);
+            t1.join(500);
+            assertThat(t1.isAlive()).as("iteration %d: T1 should have unblocked", iter)
+                .isFalse();
+            assertThat(t1Error.get()).isNull();
+
+            freshLm.releaseAll(1);
+        }
     }
 }
