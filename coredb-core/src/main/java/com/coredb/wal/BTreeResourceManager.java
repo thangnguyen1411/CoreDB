@@ -136,8 +136,8 @@ public final class BTreeResourceManager implements ResourceManager {
         buf.getInt();   // movedCount
 
         // Mark this page as having a new right sibling
-        // btpo_next at offset PAGE_SIZE - 12 + 4 (after btpo_prev)
-        int btpoNextOffset = page.capacity() - 12 + 4;
+        // btpo_next at offset PAGE_SIZE - 20 + 4 (after btpo_prev)
+        int btpoNextOffset = page.capacity() - 20 + 4;
         page.putInt(btpoNextOffset, newRightPageId);
 
         // For a complete redo, we would need to also handle re-initialization of this page
@@ -204,7 +204,7 @@ public final class BTreeResourceManager implements ResourceManager {
         int newRightPageId = buf.getInt();
 
         // Update btpo_next to point to new right sibling
-        int btpoNextOffset = page.capacity() - 12 + 4;
+        int btpoNextOffset = page.capacity() - 20 + 4;
         page.putInt(btpoNextOffset, newRightPageId);
     }
 

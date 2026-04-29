@@ -12,9 +12,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 class BTPageOpaqueTest {
 
     @Test
-    void specialOffsetForIndex_shouldBePageSizeMinus12() {
+    void specialOffsetForIndex_shouldBePageSizeMinusOpaqueSize() {
         assertThat(BTPageOpaque.specialOffsetForIndex())
-                .isEqualTo(Constants.PAGE_SIZE - 12);
+                .isEqualTo(Constants.PAGE_SIZE - BTPageOpaque.SIZE);
     }
 
     @Test

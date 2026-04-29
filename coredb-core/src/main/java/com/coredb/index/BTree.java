@@ -52,18 +52,20 @@ public final class BTree {
     private final XLogWriter xlogWriter; // May be null during early startup
     private final int xid; // Transaction ID for WAL records
 
-    // Path tracking stack for descent and split propagation
-    // pathStack[i] = pageId at level i during descent
-    // Level 0 = leaf, Level height-1 = root
-    private final int[] pathStack;
-    private int pathDepth;
-
     private BTree(IndexFile indexFile, XLogWriter xlogWriter, int xid) {
         this.indexFile = indexFile;
         this.xlogWriter = xlogWriter;
         this.xid = xid;
-        this.pathStack = new int[MAX_HEIGHT];
-        this.pathDepth = 0;
+    }
+
+    /**
+     * Per-call descent path. Holds page IDs from root (index 0) down to the level
+     * just above the leaf (index pathDepth-1). Held on the stack so concurrent
+     * insert calls do not collide on a single shared array.
+     */
+    private static final class PathStack {
+        final int[] stack = new int[MAX_HEIGHT];
+        int depth;
     }
 
     /**
@@ -120,16 +122,24 @@ public final class BTree {
      * @throws IOException if page read fails
      */
     public Optional<RecordId> search(long key) throws IOException {
-        // Descend to the appropriate leaf page
-        int leafPageId = descendToLeaf(key);
-
-        // Search in the leaf
-        IndexFile.PinnedPage pinned = indexFile.readPage(leafPageId);
-        Page page = pinned.page();
-        BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(page));
-        Optional<RecordId> result = leaf.search(key);
-        pinned.unpin(false);
-        return result;
+        // Descend with shared latches; the returned leaf is pinned and read-locked.
+        IndexFile.PinnedPage pinned = descendToLeafShared(key);
+        try {
+            // Lehman-Yao right-link follow: a concurrent split may have moved our key
+            // to a sibling not yet linked from the parent. Walk the right-link chain
+            // until the page actually owns this key range.
+            while (true) {
+                BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(pinned.page()));
+                if (leaf.keyBelongsHere(key)) {
+                    return leaf.search(key);
+                }
+                int nextId = leaf.btpoNext();
+                pinned = handOverShared(pinned, nextId);
+            }
+        } finally {
+            unlockShared(pinned);
+            pinned.unpin(false);
+        }
     }
 
     /**
@@ -185,35 +195,37 @@ public final class BTree {
             this.currentPinned = null;
             this.closed = false;
 
-            // Descend to the leaf containing 'from'
-            int leafPageId = descendToLeaf(from);
-            currentPinned = indexFile.readPage(leafPageId);
-            Page page = currentPinned.page();
-            this.currentLeaf = BTreeLeafPage.of(IndexPageLayout.of(page));
-
-            // Find first slot with key >= from
-            this.currentSlot = currentLeaf.findFirstSlotGe(from);
-
-            // Pre-fetch first entry
-            advance();
+            // Descend with shared latches; the leaf is pinned and shared-locked.
+            // If anything below throws, release the latch+pin we are holding —
+            // the caller has no reference to call close() on a half-built iterator.
+            try {
+                currentPinned = descendToLeafShared(from);
+                while (true) {
+                    BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(currentPinned.page()));
+                    if (leaf.keyBelongsHere(from)) {
+                        this.currentLeaf = leaf;
+                        break;
+                    }
+                    currentPinned = handOverShared(currentPinned, leaf.btpoNext());
+                }
+                this.currentSlot = currentLeaf.findFirstSlotGe(from);
+                advance();
+            } catch (RuntimeException | IOException e) {
+                releaseCurrent();
+                throw e;
+            }
         }
 
         private void advance() throws IOException {
             while (true) {
-                // Check if we have more entries on current leaf
                 if (currentSlot < currentLeaf.entryCount()) {
                     long key = currentLeaf.keyAt(currentSlot);
                     if (key > to) {
-                        // Past our range, we're done - unpin the last page
-                        if (currentPinned != null) {
-                            currentPinned.unpin(false);
-                            currentPinned = null;
-                        }
+                        releaseCurrent();
                         hasNext = false;
                         nextEntry = null;
                         return;
                     }
-                    // Found next entry in range
                     RecordId rid = currentLeaf.ridAt(currentSlot);
                     nextEntry = new AbstractMap.SimpleEntry<>(key, rid);
                     hasNext = true;
@@ -221,30 +233,25 @@ public final class BTree {
                     return;
                 }
 
-                // Need to move to next leaf
                 int nextPageId = currentLeaf.btpoNext();
                 if (nextPageId == 0) {
-                    // No more leaves, we're done - unpin the last page
-                    if (currentPinned != null) {
-                        currentPinned.unpin(false);
-                        currentPinned = null;
-                    }
+                    releaseCurrent();
                     hasNext = false;
                     nextEntry = null;
                     return;
                 }
 
-                // Unpin previous leaf before loading next
-                if (currentPinned != null) {
-                    currentPinned.unpin(false);
-                }
-
-                // Load next leaf
-                currentPinned = indexFile.readPage(nextPageId);
-                Page nextPage = currentPinned.page();
-                currentLeaf = BTreeLeafPage.of(IndexPageLayout.of(nextPage));
+                currentPinned = handOverShared(currentPinned, nextPageId);
+                currentLeaf = BTreeLeafPage.of(IndexPageLayout.of(currentPinned.page()));
                 currentSlot = 0;
-                // Continue loop to check this new leaf
+            }
+        }
+
+        private void releaseCurrent() {
+            if (currentPinned != null) {
+                unlockShared(currentPinned);
+                currentPinned.unpin(false);
+                currentPinned = null;
             }
         }
 
@@ -262,16 +269,19 @@ public final class BTree {
             try {
                 advance();
             } catch (IOException e) {
+                releaseCurrent();
                 throw new java.io.UncheckedIOException(e);
+            } catch (RuntimeException e) {
+                releaseCurrent();
+                throw e;
             }
             return result;
         }
 
         @Override
         public void close() {
-            if (!closed && currentPinned != null) {
-                currentPinned.unpin(false);
-                currentPinned = null;
+            if (!closed) {
+                releaseCurrent();
             }
             closed = true;
         }
@@ -302,27 +312,42 @@ public final class BTree {
      * @throws IOException if page operations fail
      */
     public boolean delete(long key) throws IOException {
-        int leafPageId = descendToLeaf(key);
+        IndexFile.PinnedPage pinned = descendToLeafShared(key);
+        unlockShared(pinned);
+        lockExclusive(pinned);
+        try {
+            while (true) {
+                BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(pinned.page()));
+                if (!leaf.keyBelongsHere(key)) {
+                    int nextId = leaf.btpoNext();
+                    IndexFile.PinnedPage next = indexFile.readPage(nextId);
+                    lockExclusive(next);
+                    unlockExclusive(pinned);
+                    pinned.unpin(false);
+                    pinned = next;
+                    continue;
+                }
 
-        IndexFile.PinnedPage pinned = indexFile.readPage(leafPageId);
-        Page page = pinned.page();
-        BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(page));
-
-        boolean deleted = leaf.delete(key);
-
-        if (deleted) {
-            if (xlogWriter != null && pinned.frame() != null) {
-                byte[] payload = buildBtreeDeletePayload(key);
-                appendWalWithFPW(pinned.frame(), page.buffer(),
-                        XLogRecord.RMGR_BTREE, BTreeResourceManager.BTREE_DELETE,
-                        leafPageId, payload);
+                boolean deleted = leaf.delete(key);
+                if (deleted) {
+                    if (xlogWriter != null && pinned.frame() != null) {
+                        byte[] payload = buildBtreeDeletePayload(key);
+                        appendWalWithFPW(pinned.frame(), pinned.page().buffer(),
+                                XLogRecord.RMGR_BTREE, BTreeResourceManager.BTREE_DELETE,
+                                leaf.pageId(), payload);
+                    }
+                }
+                unlockExclusive(pinned);
+                pinned.unpin(deleted);
+                pinned = null;
+                return deleted;
             }
-            pinned.unpin(true);
-        } else {
-            pinned.unpin(false);
+        } finally {
+            if (pinned != null) {
+                unlockExclusive(pinned);
+                pinned.unpin(false);
+            }
         }
-
-        return deleted;
     }
 
     /**
@@ -340,32 +365,48 @@ public final class BTree {
      * @throws IOException if a page operation fails
      */
     public Optional<Long> removeEntriesPointingAt(RecordId rid) throws IOException {
-        int leafPageId = descendToLeaf(Long.MIN_VALUE);
+        IndexFile.PinnedPage pinned = descendToLeafShared(Long.MIN_VALUE);
+        unlockShared(pinned);
+        lockExclusive(pinned);
 
-        while (leafPageId != 0) {
-            IndexFile.PinnedPage pinned = indexFile.readPage(leafPageId);
-            Page page = pinned.page();
-            BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(page));
+        try {
+            while (true) {
+                BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(pinned.page()));
+                int leafPageId = leaf.pageId();
+                Optional<Long> deletedKey = leaf.deleteByRid(rid);
 
-            int nextLeaf = leaf.btpoNext();
-            Optional<Long> deletedKey = leaf.deleteByRid(rid);
-
-            if (deletedKey.isPresent()) {
-                if (xlogWriter != null && pinned.frame() != null) {
-                    byte[] payload = buildBtreeDeletePayload(deletedKey.get());
-                    appendWalWithFPW(pinned.frame(), page.buffer(),
-                            XLogRecord.RMGR_BTREE, BTreeResourceManager.BTREE_DELETE,
-                            leafPageId, payload);
+                if (deletedKey.isPresent()) {
+                    if (xlogWriter != null && pinned.frame() != null) {
+                        byte[] payload = buildBtreeDeletePayload(deletedKey.get());
+                        appendWalWithFPW(pinned.frame(), pinned.page().buffer(),
+                                XLogRecord.RMGR_BTREE, BTreeResourceManager.BTREE_DELETE,
+                                leafPageId, payload);
+                    }
+                    unlockExclusive(pinned);
+                    pinned.unpin(true);
+                    pinned = null;
+                    return deletedKey;
                 }
-                pinned.unpin(true);
-                return deletedKey;
+
+                int nextLeaf = leaf.btpoNext();
+                if (nextLeaf == 0) {
+                    unlockExclusive(pinned);
+                    pinned.unpin(false);
+                    pinned = null;
+                    return Optional.empty();
+                }
+                IndexFile.PinnedPage next = indexFile.readPage(nextLeaf);
+                lockExclusive(next);
+                unlockExclusive(pinned);
+                pinned.unpin(false);
+                pinned = next;
             }
-
-            pinned.unpin(false);
-            leafPageId = nextLeaf;
+        } finally {
+            if (pinned != null) {
+                unlockExclusive(pinned);
+                pinned.unpin(false);
+            }
         }
-
-        return Optional.empty();
     }
 
     private byte[] buildBtreeDeletePayload(long key) throws IOException {
@@ -389,44 +430,69 @@ public final class BTree {
      * @throws IllegalStateException if key already exists
      */
     public void insert(long key, RecordId rid) throws IOException {
-        // Descend to leaf, tracking the path
-        int leafPageId = descendToLeafWithPath(key);
+        PathStack path = new PathStack();
 
-        IndexFile.PinnedPage pinned = indexFile.readPage(leafPageId);
-        Page page = pinned.page();
-        BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(page));
+        // Descend with shared latches, recording the internal path for split propagation.
+        IndexFile.PinnedPage pinned = descendToLeafShared(key, path);
+        // Drop the shared leaf latch and re-acquire as exclusive. We do not upgrade
+        // in place because rwlock upgrade is a deadlock hazard (two readers each
+        // wanting to upgrade will block each other forever). After re-acquiring we
+        // re-validate the right-link in case a concurrent split moved the key.
+        unlockShared(pinned);
+        lockExclusive(pinned);
 
-        // Pre-check duplicate
-        if (leaf.search(key).isPresent()) {
-            pinned.unpin(false);
-            throw new IllegalStateException("Duplicate key: " + key);
-        }
+        try {
+            while (true) {
+                BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(pinned.page()));
+                if (!leaf.keyBelongsHere(key)) {
+                    int nextId = leaf.btpoNext();
+                    IndexFile.PinnedPage next = indexFile.readPage(nextId);
+                    lockExclusive(next);
+                    unlockExclusive(pinned);
+                    pinned.unpin(false);
+                    pinned = next;
+                    continue;
+                }
 
-        // Pre-check full: 14 bytes leaf entry + 4 bytes ItemId
-        if (leaf.freeBytes() < 18) {
-            handleLeafSplit(leaf, pinned, key, rid);
-            return;
-        }
+                if (leaf.search(key).isPresent()) {
+                    throw new IllegalStateException("Duplicate key: " + key);
+                }
 
-        // WAL-before-data: emit record before mutating the page
-        int slotNo = leaf.layout().findInsertionPoint(key);
-        if (xlogWriter != null && pinned.frame() != null) {
-            byte[] walPayload = buildBtreeInsertPayload(slotNo, key, rid);
-            appendWalWithFPW(
-                pinned.frame(),
-                page.buffer(),
-                XLogRecord.RMGR_BTREE,
-                BTreeResourceManager.BTREE_INSERT,
-                leafPageId,
-                walPayload
-            );
+                if (leaf.freeBytes() < 18) {
+                    // handleLeafSplit consumes pinned (unpins on its own paths) and
+                    // is responsible for releasing the exclusive latch.
+                    handleLeafSplit(leaf, pinned, key, rid, path);
+                    pinned = null;
+                    return;
+                }
+
+                int slotNo = leaf.layout().findInsertionPoint(key);
+                if (xlogWriter != null && pinned.frame() != null) {
+                    byte[] walPayload = buildBtreeInsertPayload(slotNo, key, rid);
+                    appendWalWithFPW(
+                        pinned.frame(),
+                        pinned.page().buffer(),
+                        XLogRecord.RMGR_BTREE,
+                        BTreeResourceManager.BTREE_INSERT,
+                        leaf.pageId(),
+                        walPayload
+                    );
+                }
+                InsertResult result = leaf.insert(key, rid);
+                if (result != InsertResult.OK) {
+                    throw new IllegalStateException("Unexpected insert result after pre-check: " + result);
+                }
+                unlockExclusive(pinned);
+                pinned.unpin(true);
+                pinned = null;
+                return;
+            }
+        } finally {
+            if (pinned != null) {
+                unlockExclusive(pinned);
+                pinned.unpin(false);
+            }
         }
-        InsertResult result = leaf.insert(key, rid);
-        if (result != InsertResult.OK) {
-            pinned.unpin(false);
-            throw new IllegalStateException("Unexpected insert result after pre-check: " + result);
-        }
-        pinned.unpin(true);
     }
 
     /**
@@ -572,14 +638,15 @@ public final class BTree {
      * @param rid the RecordId to insert
      * @throws IOException if file operations fail
      */
-    private void handleLeafSplit(BTreeLeafPage leaf, IndexFile.PinnedPage leafPinned, long key, RecordId rid) throws IOException {
-        // Capture old right sibling before split changes sibling pointers
+    private void handleLeafSplit(BTreeLeafPage leaf, IndexFile.PinnedPage leafPinned, long key, RecordId rid, PathStack path) throws IOException {
+        // Caller holds the exclusive content latch on leafPinned.
         int oldRightSibling = leaf.btpoNext();
 
-        // Split the leaf page (mutates left and right pages in memory)
+        // The new right page is fresh: nobody can reach it until leaf.btpoNext is
+        // updated (which happens inside leaf.split). The mutation runs under our
+        // exclusive latch on the left, so the order is safe.
         SplitResult splitResult = leaf.split(indexFile);
 
-        // WAL-before-data for the left (original) page
         if (xlogWriter != null && leafPinned.frame() != null) {
             byte[] leftPayload = buildBtreeSplitPayload(splitResult.newRightPageId(), oldRightSibling, splitResult.separatorKey());
             appendWalWithFPW(
@@ -592,70 +659,83 @@ public final class BTree {
             );
         }
 
-        // WAL-before-data for the right (new) page: re-fetch to set pdLsn
-        if (xlogWriter != null) {
-            IndexFile.PinnedPage rightRefetch = indexFile.readPage(splitResult.newRightPageId());
-            if (rightRefetch.frame() != null) {
+        // Pin and exclusively latch the new right page for the rest of this routine.
+        // We will need it for WAL pdLsn and possibly as the insertion target.
+        IndexFile.PinnedPage rightPinned = indexFile.readPage(splitResult.newRightPageId());
+        lockExclusive(rightPinned);
+        boolean leafReleased = false;
+        boolean rightReleased = false;
+        try {
+            if (xlogWriter != null && rightPinned.frame() != null) {
                 byte[] rightPayload = buildBtreeSplitRightPayload(
-                    BTreeLeafPage.of(IndexPageLayout.of(rightRefetch.page())),
+                    BTreeLeafPage.of(IndexPageLayout.of(rightPinned.page())),
                     leaf.pageId(),
                     splitResult.separatorKey()
                 );
                 appendWalWithFPW(
-                    rightRefetch.frame(),
-                    rightRefetch.page().buffer(),
+                    rightPinned.frame(),
+                    rightPinned.page().buffer(),
                     XLogRecord.RMGR_BTREE,
                     BTreeResourceManager.BTREE_SPLIT,
                     splitResult.newRightPageId(),
                     rightPayload
                 );
             }
-            rightRefetch.unpin(false); // already dirty from split
-        }
 
-        // Determine which page to insert into
-        int targetPageId;
-        BTreeLeafPage targetPage;
-        IndexFile.PinnedPage targetPinned;
+            int targetPageId;
+            BTreeLeafPage targetPage;
+            IndexFile.PinnedPage targetPinned;
 
-        if (key < splitResult.separatorKey()) {
-            targetPageId = leaf.pageId();
-            targetPage = leaf;
-            targetPinned = leafPinned;
-        } else {
-            targetPageId = splitResult.newRightPageId();
-            targetPinned = indexFile.readPage(targetPageId);
-            Page rightPageData = targetPinned.page();
-            targetPage = BTreeLeafPage.of(IndexPageLayout.of(rightPageData));
+            if (key < splitResult.separatorKey()) {
+                targetPageId = leaf.pageId();
+                targetPage = leaf;
+                targetPinned = leafPinned;
+            } else {
+                targetPageId = splitResult.newRightPageId();
+                targetPage = BTreeLeafPage.of(IndexPageLayout.of(rightPinned.page()));
+                targetPinned = rightPinned;
+            }
+
+            int slotNo = targetPage.layout().findInsertionPoint(key);
+            if (xlogWriter != null && targetPinned.frame() != null) {
+                byte[] insertPayload = buildBtreeInsertPayload(slotNo, key, rid);
+                appendWalWithFPW(
+                    targetPinned.frame(),
+                    targetPinned.page().buffer(),
+                    XLogRecord.RMGR_BTREE,
+                    BTreeResourceManager.BTREE_INSERT,
+                    targetPageId,
+                    insertPayload
+                );
+            }
+            InsertResult insertResult = targetPage.insert(key, rid);
+            if (insertResult != InsertResult.OK) {
+                throw new IllegalStateException("Failed to insert into split page: " + insertResult);
+            }
+
+            // The right-link from leaf to right is now installed and the new
+            // entry is in place. Release the leaf's exclusive latch before
+            // walking up the tree — Lehman-Yao only requires that descendants
+            // are linked before the parent is told about them.
+            unlockExclusive(leafPinned);
             leafPinned.unpin(true);
-        }
+            leafReleased = true;
 
-        // WAL-before-data: emit BTREE_INSERT for the target page before inserting
-        int slotNo = targetPage.layout().findInsertionPoint(key);
-        if (xlogWriter != null && targetPinned.frame() != null) {
-            byte[] insertPayload = buildBtreeInsertPayload(slotNo, key, rid);
-            appendWalWithFPW(
-                targetPinned.frame(),
-                targetPinned.page().buffer(),
-                XLogRecord.RMGR_BTREE,
-                BTreeResourceManager.BTREE_INSERT,
-                targetPageId,
-                insertPayload
-            );
+            unlockExclusive(rightPinned);
+            rightPinned.unpin(true);
+            rightReleased = true;
+        } finally {
+            if (!rightReleased) {
+                unlockExclusive(rightPinned);
+                rightPinned.unpin(true);
+            }
+            if (!leafReleased) {
+                unlockExclusive(leafPinned);
+                leafPinned.unpin(true);
+            }
         }
-        InsertResult insertResult = targetPage.insert(key, rid);
-        if (insertResult != InsertResult.OK) {
-            targetPinned.unpin(true);
-            throw new IllegalStateException("Failed to insert into split page: " + insertResult);
-        }
-        targetPinned.unpin(true);
-
-        // Propagate the split upward
-        propagateSplit(
-            splitResult.separatorKey(),
-            splitResult.newRightPageId(),
-            leaf.pageId()
-        );
+        // After this point neither leaf latch nor right latch is held.
+        propagateSplit(splitResult.separatorKey(), splitResult.newRightPageId(), leaf.pageId(), path);
     }
 
     /**
@@ -666,129 +746,130 @@ public final class BTree {
      * @param leftPageId the left child page ID (for root split detection)
      * @throws IOException if file operations fail
      */
-    private void propagateSplit(long separatorKey, int rightPageId, int leftPageId) throws IOException {
-        while (pathDepth > 0) {
-            pathDepth--;
-            int parentPageId = pathStack[pathDepth];
+    private void propagateSplit(long separatorKey, int rightPageId, int leftPageId, PathStack path) throws IOException {
+        while (path.depth > 0) {
+            path.depth--;
+            int parentPageId = path.stack[path.depth];
 
             IndexFile.PinnedPage parentPinned = indexFile.readPage(parentPageId);
-            Page parentPageData = parentPinned.page();
-            BTreeInternalPage parent = BTreeInternalPage.of(IndexPageLayout.of(parentPageData));
+            lockExclusive(parentPinned);
+            boolean parentReleased = false;
+            try {
+                Page parentPageData = parentPinned.page();
+                BTreeInternalPage parent = BTreeInternalPage.of(IndexPageLayout.of(parentPageData));
 
-            // 12 bytes internal entry + 4 bytes ItemId
-            if (parent.freeBytes() >= 16) {
-                // Parent has room: WAL-before-data, then insert
-                int slotNo = parent.layout().findInternalInsertionPoint(separatorKey);
+                // 12 bytes internal entry + 4 bytes ItemId
+                if (parent.freeBytes() >= 16) {
+                    int slotNo = parent.layout().findInternalInsertionPoint(separatorKey);
+                    if (xlogWriter != null && parentPinned.frame() != null) {
+                        byte[] walPayload = buildBtreeInternalInsertPayload(slotNo, separatorKey, rightPageId);
+                        appendWalWithFPW(
+                            parentPinned.frame(),
+                            parentPageData.buffer(),
+                            XLogRecord.RMGR_BTREE,
+                            BTreeResourceManager.BTREE_INTERNAL_INSERT,
+                            parentPageId,
+                            walPayload
+                        );
+                    }
+                    InsertResult result = parent.insertSeparator(separatorKey, rightPageId);
+                    if (result == InsertResult.DUPLICATE_KEY) {
+                        throw new IllegalStateException("Duplicate separator key during split propagation: " + separatorKey);
+                    }
+                    if (result != InsertResult.OK) {
+                        throw new IllegalStateException("Unexpected insert result after pre-check: " + result);
+                    }
+                    return;
+                }
+
+                // Parent is full, need to split it
+                BTreeInternalPage.InternalSplitResult internalSplit = parent.split(indexFile);
+
                 if (xlogWriter != null && parentPinned.frame() != null) {
-                    byte[] walPayload = buildBtreeInternalInsertPayload(slotNo, separatorKey, rightPageId);
+                    byte[] leftPayload = buildBtreeInternalSplitPayload(internalSplit.rightPageId(), internalSplit.promotedKey());
                     appendWalWithFPW(
                         parentPinned.frame(),
                         parentPageData.buffer(),
-                        XLogRecord.RMGR_BTREE,
-                        BTreeResourceManager.BTREE_INTERNAL_INSERT,
-                        parentPageId,
-                        walPayload
-                    );
-                }
-                InsertResult result = parent.insertSeparator(separatorKey, rightPageId);
-                if (result == InsertResult.DUPLICATE_KEY) {
-                    parentPinned.unpin(false);
-                    throw new IllegalStateException("Duplicate separator key during split propagation: " + separatorKey);
-                }
-                if (result != InsertResult.OK) {
-                    parentPinned.unpin(false);
-                    throw new IllegalStateException("Unexpected insert result after pre-check: " + result);
-                }
-                parentPinned.unpin(true);
-                return;
-            }
-
-            // Parent is full, need to split it
-            BTreeInternalPage.InternalSplitResult internalSplit = parent.split(indexFile);
-
-            // WAL-before-data for the left (original) parent page
-            if (xlogWriter != null && parentPinned.frame() != null) {
-                byte[] leftPayload = buildBtreeInternalSplitPayload(internalSplit.rightPageId(), internalSplit.promotedKey());
-                appendWalWithFPW(
-                    parentPinned.frame(),
-                    parentPageData.buffer(),
-                    XLogRecord.RMGR_BTREE,
-                    BTreeResourceManager.BTREE_INTERNAL_SPLIT,
-                    parentPageId,
-                    leftPayload
-                );
-            }
-
-            // WAL-before-data for the right (new) internal page
-            if (xlogWriter != null) {
-                IndexFile.PinnedPage rightRefetch = indexFile.readPage(internalSplit.rightPageId());
-                if (rightRefetch.frame() != null) {
-                    byte[] rightPayload = buildBtreeInternalSplitPayload(parentPageId, internalSplit.promotedKey());
-                    appendWalWithFPW(
-                        rightRefetch.frame(),
-                        rightRefetch.page().buffer(),
                         XLogRecord.RMGR_BTREE,
                         BTreeResourceManager.BTREE_INTERNAL_SPLIT,
-                        internalSplit.rightPageId(),
-                        rightPayload
-                    );
-                }
-                rightRefetch.unpin(false); // already dirty from split
-            }
-
-            long newSeparator = internalSplit.promotedKey();
-            int newRightPageId = internalSplit.rightPageId();
-
-            if (separatorKey < newSeparator) {
-                // Insert into left page (original parent): WAL-before-data
-                int slotNo = parent.layout().findInternalInsertionPoint(separatorKey);
-                if (xlogWriter != null && parentPinned.frame() != null) {
-                    byte[] walPayload = buildBtreeInternalInsertPayload(slotNo, separatorKey, rightPageId);
-                    appendWalWithFPW(
-                        parentPinned.frame(),
-                        parentPageData.buffer(),
-                        XLogRecord.RMGR_BTREE,
-                        BTreeResourceManager.BTREE_INTERNAL_INSERT,
                         parentPageId,
-                        walPayload
+                        leftPayload
                     );
                 }
-                InsertResult insertResult = parent.insertSeparator(separatorKey, rightPageId);
-                if (insertResult != InsertResult.OK) {
-                    parentPinned.unpin(true);
-                    throw new IllegalStateException("Failed to insert into split internal page: " + insertResult);
-                }
-                parentPinned.unpin(true);
-            } else {
-                // Insert into right page (new): WAL-before-data
-                IndexFile.PinnedPage rightPinned = indexFile.readPage(newRightPageId);
-                Page rightPageData = rightPinned.page();
-                BTreeInternalPage rightPage = BTreeInternalPage.of(IndexPageLayout.of(rightPageData));
-                int slotNo = rightPage.layout().findInternalInsertionPoint(separatorKey);
-                if (xlogWriter != null && rightPinned.frame() != null) {
-                    byte[] walPayload = buildBtreeInternalInsertPayload(slotNo, separatorKey, rightPageId);
-                    appendWalWithFPW(
-                        rightPinned.frame(),
-                        rightPageData.buffer(),
-                        XLogRecord.RMGR_BTREE,
-                        BTreeResourceManager.BTREE_INTERNAL_INSERT,
-                        newRightPageId,
-                        walPayload
-                    );
-                }
-                InsertResult insertResult = rightPage.insertSeparator(separatorKey, rightPageId);
-                if (insertResult != InsertResult.OK) {
-                    rightPinned.unpin(true);
-                    parentPinned.unpin(true);
-                    throw new IllegalStateException("Failed to insert into new internal page: " + insertResult);
-                }
-                rightPinned.unpin(true);
-                parentPinned.unpin(true);
-            }
 
-            separatorKey = newSeparator;
-            rightPageId = newRightPageId;
-            leftPageId = internalSplit.leftPageId();
+                long newSeparator = internalSplit.promotedKey();
+                int newRightPageId = internalSplit.rightPageId();
+
+                IndexFile.PinnedPage internalRightPinned = indexFile.readPage(newRightPageId);
+                lockExclusive(internalRightPinned);
+                try {
+                    if (xlogWriter != null && internalRightPinned.frame() != null) {
+                        byte[] rightPayload = buildBtreeInternalSplitPayload(parentPageId, internalSplit.promotedKey());
+                        appendWalWithFPW(
+                            internalRightPinned.frame(),
+                            internalRightPinned.page().buffer(),
+                            XLogRecord.RMGR_BTREE,
+                            BTreeResourceManager.BTREE_INTERNAL_SPLIT,
+                            newRightPageId,
+                            rightPayload
+                        );
+                    }
+
+                    if (separatorKey < newSeparator) {
+                        int slotNo = parent.layout().findInternalInsertionPoint(separatorKey);
+                        if (xlogWriter != null && parentPinned.frame() != null) {
+                            byte[] walPayload = buildBtreeInternalInsertPayload(slotNo, separatorKey, rightPageId);
+                            appendWalWithFPW(
+                                parentPinned.frame(),
+                                parentPageData.buffer(),
+                                XLogRecord.RMGR_BTREE,
+                                BTreeResourceManager.BTREE_INTERNAL_INSERT,
+                                parentPageId,
+                                walPayload
+                            );
+                        }
+                        InsertResult insertResult = parent.insertSeparator(separatorKey, rightPageId);
+                        if (insertResult != InsertResult.OK) {
+                            throw new IllegalStateException("Failed to insert into split internal page: " + insertResult);
+                        }
+                    } else {
+                        BTreeInternalPage rightPage = BTreeInternalPage.of(IndexPageLayout.of(internalRightPinned.page()));
+                        int slotNo = rightPage.layout().findInternalInsertionPoint(separatorKey);
+                        if (xlogWriter != null && internalRightPinned.frame() != null) {
+                            byte[] walPayload = buildBtreeInternalInsertPayload(slotNo, separatorKey, rightPageId);
+                            appendWalWithFPW(
+                                internalRightPinned.frame(),
+                                internalRightPinned.page().buffer(),
+                                XLogRecord.RMGR_BTREE,
+                                BTreeResourceManager.BTREE_INTERNAL_INSERT,
+                                newRightPageId,
+                                walPayload
+                            );
+                        }
+                        InsertResult insertResult = rightPage.insertSeparator(separatorKey, rightPageId);
+                        if (insertResult != InsertResult.OK) {
+                            throw new IllegalStateException("Failed to insert into new internal page: " + insertResult);
+                        }
+                    }
+                } finally {
+                    unlockExclusive(internalRightPinned);
+                    internalRightPinned.unpin(true);
+                }
+
+                // Release this parent and ascend, carrying the promoted key.
+                unlockExclusive(parentPinned);
+                parentPinned.unpin(true);
+                parentReleased = true;
+
+                separatorKey = newSeparator;
+                rightPageId = newRightPageId;
+                leftPageId = internalSplit.leftPageId();
+            } finally {
+                if (!parentReleased) {
+                    unlockExclusive(parentPinned);
+                    parentPinned.unpin(true);
+                }
+            }
         }
 
         createNewRoot(separatorKey, leftPageId, rightPageId);
@@ -833,55 +914,93 @@ public final class BTree {
     }
 
     /**
-     * Descends from root to the appropriate leaf page for the given key.
-     *
-     * @param key the search key
-     * @return the leaf page ID where the key belongs
-     * @throws IOException if page read fails
+     * Descends from root to the leaf for {@code key}, holding shared content latches
+     * with crabbing: the parent latch is dropped only after the child is latched.
+     * The returned PinnedPage is pinned and read-locked; caller must unlockShared
+     * and unpin.
      */
-    private int descendToLeaf(long key) throws IOException {
-        int currentPageId = rootPageId();
-        int currentHeight = treeHeight();
+    private IndexFile.PinnedPage descendToLeafShared(long key) throws IOException {
+        IndexFile.RootSnapshot snap = indexFile.rootSnapshot();
+        int currentPageId = snap.rootPageId();
+        int height = snap.treeHeight();
+        IndexFile.PinnedPage pinned = indexFile.readPage(currentPageId);
+        lockShared(pinned);
 
-        // Descend through internal levels
-        for (int level = currentHeight; level > 0; level--) {
-            IndexFile.PinnedPage pinned = indexFile.readPage(currentPageId);
-            Page page = pinned.page();
-            BTreeInternalPage internal = BTreeInternalPage.of(IndexPageLayout.of(page));
-            currentPageId = internal.routeChildFor(key);
-            pinned.unpin(false); // Internal pages are read-only during descent
+        for (int level = height; level > 0; level--) {
+            BTreeInternalPage internal =
+                BTreeInternalPage.of(IndexPageLayout.of(pinned.page()));
+            int childId = internal.routeChildFor(key);
+            IndexFile.PinnedPage child = indexFile.readPage(childId);
+            lockShared(child);
+            unlockShared(pinned);
+            pinned.unpin(false);
+            pinned = child;
         }
-
-        return currentPageId;
+        return pinned;
     }
 
     /**
-     * Descends from root to leaf, tracking the path on the stack for split propagation.
-     *
-     * @param key the search key
-     * @return the leaf page ID where the key belongs
-     * @throws IOException if page read fails
+     * Descent variant that records the internal path in {@code path} for split
+     * propagation. Internal pages are visited under shared latches and dropped
+     * before descending further (crab); the leaf is returned pinned and shared-locked.
      */
-    private int descendToLeafWithPath(long key) throws IOException {
-        pathDepth = 0;
-        int currentPageId = rootPageId();
-        int currentHeight = treeHeight();
+    private IndexFile.PinnedPage descendToLeafShared(long key, PathStack path) throws IOException {
+        path.depth = 0;
+        IndexFile.RootSnapshot snap = indexFile.rootSnapshot();
+        int currentPageId = snap.rootPageId();
+        int height = snap.treeHeight();
+        IndexFile.PinnedPage pinned = indexFile.readPage(currentPageId);
+        lockShared(pinned);
 
-        // Descend through internal levels, tracking the path
-        for (int level = currentHeight; level > 0; level--) {
-            // Push current page onto path stack
-            if (pathDepth >= MAX_HEIGHT) {
+        for (int level = height; level > 0; level--) {
+            if (path.depth >= MAX_HEIGHT) {
+                unlockShared(pinned);
+                pinned.unpin(false);
                 throw new IllegalStateException("Tree height exceeds maximum: " + MAX_HEIGHT);
             }
-            pathStack[pathDepth++] = currentPageId;
-
-            IndexFile.PinnedPage pinned = indexFile.readPage(currentPageId);
-            Page page = pinned.page();
-            BTreeInternalPage internal = BTreeInternalPage.of(IndexPageLayout.of(page));
-            currentPageId = internal.routeChildFor(key);
-            pinned.unpin(false); // Internal pages are read-only during descent
+            path.stack[path.depth++] = currentPageId;
+            BTreeInternalPage internal =
+                BTreeInternalPage.of(IndexPageLayout.of(pinned.page()));
+            int childId = internal.routeChildFor(key);
+            IndexFile.PinnedPage child = indexFile.readPage(childId);
+            lockShared(child);
+            unlockShared(pinned);
+            pinned.unpin(false);
+            pinned = child;
+            currentPageId = childId;
         }
+        return pinned;
+    }
 
-        return currentPageId;
+    // === Latch helpers ===
+    // Bootstrap mode (frame == null) is single-threaded by construction, so we
+    // skip latch operations there rather than allocating a no-op lock.
+
+    private static void lockShared(IndexFile.PinnedPage p) {
+        if (p.frame() != null) p.frame().lockShared();
+    }
+
+    private static void unlockShared(IndexFile.PinnedPage p) {
+        if (p.frame() != null) p.frame().unlockShared();
+    }
+
+    private static void lockExclusive(IndexFile.PinnedPage p) {
+        if (p.frame() != null) p.frame().lockExclusive();
+    }
+
+    private static void unlockExclusive(IndexFile.PinnedPage p) {
+        if (p.frame() != null) p.frame().unlockExclusive();
+    }
+
+    /**
+     * Releases the shared latch and pin on {@code current} and returns the next page
+     * pinned and shared-locked. Used to walk the right-link chain.
+     */
+    private IndexFile.PinnedPage handOverShared(IndexFile.PinnedPage current, int nextPageId) throws IOException {
+        IndexFile.PinnedPage next = indexFile.readPage(nextPageId);
+        lockShared(next);
+        unlockShared(current);
+        current.unpin(false);
+        return next;
     }
 }

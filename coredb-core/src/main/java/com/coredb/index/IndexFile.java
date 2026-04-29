@@ -362,7 +362,7 @@ public final class IndexFile implements AutoCloseable {
      * @return a PinnedPage containing the newly allocated page
      * @throws IOException if allocation fails
      */
-    public PinnedPage allocateNewPage(PageType type) throws IOException {
+    public synchronized PinnedPage allocateNewPage(PageType type) throws IOException {
         int newPageId = nextPageId;
 
         if (bufferPool != null) {
@@ -402,11 +402,21 @@ public final class IndexFile implements AutoCloseable {
     /**
      * Updates the root page ID (called when root splits and tree grows).
      */
-    public void setRootPageId(int newRootPageId) throws IOException {
+    public synchronized void setRootPageId(int newRootPageId) throws IOException {
         this.rootPageId = newRootPageId;
         this.treeHeight++;
         updateMetaPage();
     }
+
+    /**
+     * Atomic snapshot of (rootPageId, treeHeight) so a descender always observes
+     * a consistent pair, even if the root grows under it.
+     */
+    public synchronized RootSnapshot rootSnapshot() {
+        return new RootSnapshot(rootPageId, treeHeight);
+    }
+
+    public record RootSnapshot(int rootPageId, int treeHeight) {}
 
     // === File operations ===
 

@@ -16,8 +16,8 @@ import java.nio.ByteBuffer;
  * <p>Index pages use the same basic page structure as heap pages:
  * header, ItemId array, tuple data, and special space. The key differences:
  * <ul>
- *   <li>Special space holds BTPageOpaque (12 bytes) with sibling pointers</li>
- *   <li>pd_special = PAGE_SIZE - 12 for index pages</li>
+ *   <li>Special space holds BTPageOpaque (20 bytes) with sibling pointers and high key</li>
+ *   <li>pd_special = PAGE_SIZE - 20 for index pages</li>
  *   <li>Tuples contain (key, RecordId) pairs for leaf pages</li>
  *   <li>Tuples contain (key, childPageId) pairs for internal pages</li>
  * </ul>
@@ -54,8 +54,8 @@ public final class IndexPageLayout {
 
     /**
      * Initializes the page as an empty leaf:
-     * - Sets pd_special = PAGE_SIZE - 12
-     * - Initializes BTPageOpaque (prev=0, next=0, level=0)
+     * - Sets pd_special = PAGE_SIZE - 20
+     * - Initializes BTPageOpaque (prev=0, next=0, level=0, highKey=0)
      * - Sets pd_lower = header size, pd_upper = pd_special
      */
     public void initializeAsLeaf() {
@@ -136,6 +136,14 @@ public final class IndexPageLayout {
 
     public boolean isLeaf() {
         return opaque.isLeaf();
+    }
+
+    public long highKey() {
+        return opaque.highKey();
+    }
+
+    public void setHighKey(long key) {
+        opaque.setHighKey(key);
     }
 
     // === Free space ===

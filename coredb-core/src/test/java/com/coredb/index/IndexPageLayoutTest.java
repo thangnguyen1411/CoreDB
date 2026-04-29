@@ -17,9 +17,9 @@ class IndexPageLayoutTest {
 
         assertThat(layout.pageId()).isEqualTo(1);
         assertThat(layout.pageType()).isEqualTo(PageType.INDEX_LEAF);
-        assertThat(layout.pdSpecial()).isEqualTo((short) (Constants.PAGE_SIZE - 12));
+        assertThat(layout.pdSpecial()).isEqualTo((short) (Constants.PAGE_SIZE - BTPageOpaque.SIZE));
         assertThat(layout.pdLower()).isEqualTo((short) 16); // PageHeader.SIZE
-        assertThat(layout.pdUpper()).isEqualTo((short) (Constants.PAGE_SIZE - 12));
+        assertThat(layout.pdUpper()).isEqualTo((short) (Constants.PAGE_SIZE - BTPageOpaque.SIZE));
         assertThat(layout.isLeaf()).isTrue();
         assertThat(layout.btpoPrev()).isEqualTo(0);
         assertThat(layout.btpoNext()).isEqualTo(0);
@@ -30,8 +30,8 @@ class IndexPageLayoutTest {
     void freeBytes_onEmptyPage() {
         IndexPageLayout layout = IndexPageLayout.createEmpty(1, PageType.INDEX_LEAF);
 
-        // Free = pd_upper - pd_lower = (8192 - 12) - 16 = 8164
-        int expectedFree = (Constants.PAGE_SIZE - 12) - 16;
+        // Free = pd_upper - pd_lower = (PAGE_SIZE - opaqueSize) - PageHeader.SIZE
+        int expectedFree = (Constants.PAGE_SIZE - BTPageOpaque.SIZE) - 16;
         assertThat(layout.freeBytes()).isEqualTo(expectedFree);
     }
 
