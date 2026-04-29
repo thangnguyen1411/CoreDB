@@ -17,52 +17,53 @@ import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * BufferPool provides in-memory caching of database pages.
+ * Thread-safe in-memory page cache backed by clock-sweep eviction.
  *
- * Core concepts:
- * - Frames: fixed number of 8KB buffers (default 1024 = 8MB)
- * - Pins: prevent eviction while a page is in use
- * - Dirty tracking: modified pages must be flushed to disk
- * - Usage count: for clock-sweep eviction
- * - File registry: manages FileChannels for multiple table files
+ * Concurrency design (four primitives, held in this order):
+ *   1. BufferTable partition lock  — protects hash table lookups and updates
+ *   2. ClockSweep mutex            — disjoint from partition locks; serialises hand advancement
+ *   3. BufferDescriptor.headerMutex — protects pinCount, usageCount, dirty, pdLsn, ioInProgress, valid
+ *   4. BufferDescriptor.contentLock — rwlock protecting page bytes
  *
- * PostgreSQL parallel: bufmgr.c, freelist.c (StrategyGetBuffer)
+ * IO-in-progress flag: prevents duplicate disk reads when two threads miss
+ * on the same (fileId, pageId) concurrently. The second thread waits on
+ * ioCondition; the first signals when its read completes.
+ *
+ * PostgreSQL parallel: src/backend/storage/buffer/bufmgr.c
  */
 public final class BufferPool implements AutoCloseable {
 
+    /** Default sweep timeout: 5 seconds. Tests may pass a shorter value. */
+    static final long DEFAULT_SWEEP_TIMEOUT_MS = 5_000;
+
     private final int frameCount;
     private final BufferDescriptor[] descriptors;
-    private final Map<Long, Integer> pageTable; // (fileId, pageId) -> frameId
-    private final Map<Integer, FileChannel> channels; // fileId -> FileChannel
-    private XLogWriter xlogWriter; // may be null during early startup
+    private final BufferTable bufferTable;
+    private final ClockSweep clockSweep;
+    private final ConcurrentHashMap<Integer, FileChannel> channels = new ConcurrentHashMap<>();
+    private volatile XLogWriter xlogWriter;
 
     // Statistics
-    private long hits;
-    private long misses;
+    private final AtomicLong hits = new AtomicLong();
+    private final AtomicLong misses = new AtomicLong();
+    private final AtomicLong ioWaits = new AtomicLong();
+    private final AtomicLong evictions = new AtomicLong();
 
-    // Clock-sweep hand for eviction
-    private int sweepHand;
-
-    /**
-     * Creates a buffer pool with the specified number of frames.
-     *
-     * @param frameCount number of 8KB frames (default: 1024 for 8MB pool)
-     */
     public BufferPool(int frameCount) {
+        this(frameCount, DEFAULT_SWEEP_TIMEOUT_MS);
+    }
+
+    public BufferPool(int frameCount, long sweepTimeoutMs) {
         this.frameCount = frameCount;
         this.descriptors = new BufferDescriptor[frameCount];
-        this.pageTable = new HashMap<>(frameCount * 2);
-        this.channels = new HashMap<>();
-        this.hits = 0;
-        this.misses = 0;
+        this.bufferTable = new BufferTable();
+        this.clockSweep = new ClockSweep(frameCount, sweepTimeoutMs);
 
-        // Allocate direct ByteBuffer and slice into frames
-        // Direct buffers avoid JVM heap copying during I/O
-        // 1024 frames * 8192 bytes = 8MB, well within int range
         ByteBuffer poolBuffer = ByteBuffer.allocateDirect(
             Constants.PAGE_SIZE * frameCount
         ).order(ByteOrder.BIG_ENDIAN);
@@ -72,75 +73,50 @@ public final class BufferPool implements AutoCloseable {
             poolBuffer.position(offset);
             poolBuffer.limit(offset + Constants.PAGE_SIZE);
             ByteBuffer frameBuffer = poolBuffer.slice().order(ByteOrder.BIG_ENDIAN);
-            
             descriptors[i] = new BufferDescriptor(i, frameBuffer);
         }
-        poolBuffer.clear(); // Reset position/limit for safety
+        poolBuffer.clear();
     }
 
-    /**
-     * Default constructor: 1024 frames = 8MB pool.
-     */
     public BufferPool() {
         this(1024);
     }
 
-    /**
-     * Sets the XLogWriter for WAL-before-data flush rule.
-     * Must be called before any dirty pages are flushed.
-     */
     public void setXLogWriter(XLogWriter xlogWriter) {
         this.xlogWriter = xlogWriter;
     }
 
-    /**
-     * Registers a file with the buffer pool.
-     * Opens a FileChannel that will be used for I/O operations.
-     *
-     * @param fileId   the unique file identifier (may be table OID or derived from it)
-     * @param filePath the path to the file
-     * @throws IOException if the file cannot be opened
-     */
+    // ==================== File registration ====================
+
     public void registerFile(int fileId, Path filePath) throws IOException {
         if (channels.containsKey(fileId)) {
-            return; // Already registered
+            return;
         }
-        FileChannel channel = FileChannel.open(filePath,
-                StandardOpenOption.READ, StandardOpenOption.WRITE);
+        FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ, StandardOpenOption.WRITE);
         channels.put(fileId, channel);
     }
 
-    /**
-     * Unregisters a file and closes its channel.
-     * Flushes any dirty pages for this file before closing.
-     *
-     * @param fileId the unique file identifier
-     * @throws IOException if closing fails
-     */
     public void unregisterFile(int fileId) throws IOException {
         flushAllForFile(fileId);
         FileChannel channel = channels.remove(fileId);
         if (channel != null) {
             channel.close();
         }
-        // Remove any pages for this file from the page table
-        pageTable.entrySet().removeIf(entry -> {
-            int id = (int) (entry.getKey() >> 32);
-            return id == fileId;
-        });
+        bufferTable.removeAllForFile(fileId);
     }
+
+    // ==================== Core fetch operations ====================
 
     /**
      * Fetches a page from the buffer pool.
      *
-     * Hit: returns existing pinned buffer.
-     * Miss: allocates frame, reads from disk via registered FileChannel, pins it.
+     * Hit: pins the existing frame and returns it immediately (after waiting for
+     * any in-flight IO on that frame to complete).
      *
-     * @param fileId the unique file identifier
-     * @param pageId the page ID within the file
-     * @return BufferDescriptor for the page (already pinned)
-     * @throws IOException if disk read fails
-     * @throws StorageException if pool is full, all frames pinned, or file not registered
+     * Miss: selects a victim, evicts its old page if needed, loads the new page
+     * from disk, and returns the frame. The IO-in-progress flag is set before
+     * the disk read begins so that a concurrent miss for the same page waits
+     * rather than issuing a duplicate read.
      */
     public BufferDescriptor fetchPage(int fileId, int pageId) throws IOException {
         FileChannel channel = channels.get(fileId);
@@ -148,167 +124,353 @@ public final class BufferPool implements AutoCloseable {
             throw new StorageException("File not registered for fileId=" + fileId);
         }
 
-        long key = BufferDescriptor.key(fileId, pageId);
+        long key = BufferTable.key(fileId, pageId);
 
-        Integer frameId = pageTable.get(key);
-        if (frameId != null) {
-            // Hit: page already in pool — bump usage count (hot pages survive longer)
-            BufferDescriptor frame = descriptors[frameId];
-            frame.pin();
-            frame.bumpUsageCount();
-            hits++;
-            return frame;
+        // ── HIT path ──────────────────────────────────────────────────────────
+        ReentrantLock partLock = bufferTable.lockFor(key);
+        partLock.lock();
+        try {
+            Integer frameId = bufferTable.lookup(key);
+            if (frameId != null) {
+                BufferDescriptor d = descriptors[frameId];
+                d.headerMutex().lock();
+                try {
+                    d.pinOnHit();
+                } finally {
+                    d.headerMutex().unlock();
+                }
+                hits.incrementAndGet();
+                waitForIo(d);
+                d.headerMutex().lock();
+                try {
+                    if (!d.valid()) {
+                        boolean droppedToZero = d.unpin();
+                        if (droppedToZero) clockSweep.notifyUnpin();
+                        throw new StorageException(
+                            "Page load failed for fileId=" + fileId + " pageId=" + pageId);
+                    }
+                } finally {
+                    d.headerMutex().unlock();
+                }
+                return d;
+            }
+        } finally {
+            partLock.unlock();
         }
 
-        // Miss: need to load from disk
-        misses++;
+        // ── MISS path ─────────────────────────────────────────────────────────
+        // partLock was released above before the sweep call (disjoint mutexes).
 
-        // Find a free frame (uses clock-sweep eviction if needed)
-        BufferDescriptor victim = findFreeFrame(channel);
-        if (victim == null) {
-            throw new StorageException("Buffer pool full (" + frameCount + " frames). ");
+        while (true) {
+            // 1. Select victim under sweepMutex (blocks if all frames pinned).
+            int victimFrameId = clockSweep.selectVictim(descriptors);
+            BufferDescriptor victim = descriptors[victimFrameId];
+
+            // 2. Evict victim's old page if it holds one.
+            // Read `valid` under headerMutex — writes to valid happen under headerMutex
+            // (in completeLoad / abortLoad), so a plain read without the lock can see a
+            // stale value, leaving the old hash entry intact and creating two keys for the
+            // same frame.
+            boolean victimHasPage;
+            victim.headerMutex().lock();
+            try {
+                victimHasPage = victim.valid();
+            } finally {
+                victim.headerMutex().unlock();
+            }
+
+            if (victimHasPage) {
+                boolean evicted = evictFrame(victim);
+                if (!evicted) {
+                    // Victim was re-pinned by another thread between sweep and our eviction check.
+                    // Release only our eviction claim (don't touch other fields — the frame is in
+                    // active use by whoever pinned it). The old hash key was NOT removed by evictFrame.
+                    victim.headerMutex().lock();
+                    try {
+                        victim.unpin();
+                    } finally {
+                        victim.headerMutex().unlock();
+                    }
+                    clockSweep.notifyUnpin();
+                    continue;
+                }
+                evictions.incrementAndGet();
+            }
+
+            // 3. Bind victim to the new (fileId, pageId) and set ioInProgress.
+            victim.headerMutex().lock();
+            try {
+                victim.bindForLoad(fileId, pageId);
+            } finally {
+                victim.headerMutex().unlock();
+            }
+
+            // 4. Insert into hash under partition lock, checking for a concurrent load.
+            partLock.lock();
+            Integer existing = bufferTable.lookup(key);
+            if (existing != null) {
+                // Another thread loaded this page while we were selecting a victim.
+                // Discard our victim claim and pin the already-loaded frame.
+                partLock.unlock();
+
+                victim.headerMutex().lock();
+                try {
+                    victim.releaseVictimClaim();
+                } finally {
+                    victim.headerMutex().unlock();
+                }
+                clockSweep.notifyUnpin();
+
+                // Pin the concurrent frame and wait for its IO.
+                BufferDescriptor other = descriptors[existing];
+                other.headerMutex().lock();
+                try {
+                    other.pinOnHit();
+                } finally {
+                    other.headerMutex().unlock();
+                }
+                // Count as a hit: we got the page without going to disk ourselves.
+                hits.incrementAndGet();
+                waitForIo(other);
+                return other;
+            }
+            // Commit: we own this load. Count it as a miss now.
+            misses.incrementAndGet();
+            bufferTable.insert(key, victimFrameId);
+            partLock.unlock();
+
+            // 5. Perform disk read OUTSIDE all latches.
+            try {
+                Page page = PageIO.readPage(channel, pageId);
+                victim.contentLock().writeLock().lock();
+                try {
+                    victim.page().clear();
+                    victim.page().put(page.buffer().duplicate().clear());
+                    victim.page().flip();
+                } finally {
+                    victim.contentLock().writeLock().unlock();
+                }
+                victim.headerMutex().lock();
+                try {
+                    victim.completeLoad(page.getPdLsn());
+                } finally {
+                    victim.headerMutex().unlock();
+                }
+            } catch (IOException e) {
+                partLock.lock();
+                bufferTable.remove(key);
+                partLock.unlock();
+                boolean droppedToZero;
+                victim.headerMutex().lock();
+                try {
+                    victim.abortLoad();
+                    droppedToZero = victim.unpin(); // release evictor's bindForLoad pin
+                } finally {
+                    victim.headerMutex().unlock();
+                }
+                if (droppedToZero) clockSweep.notifyUnpin();
+                throw e;
+            }
+
+            return victim;
         }
-
-        // Read page from disk into the frame
-        Page page = PageIO.readPage(channel, pageId);
-        victim.page().clear();
-        victim.page().put(page.buffer().duplicate().clear());
-        victim.page().flip();
-
-        // Load pd_lsn from page header into frame (for recovery idempotency)
-        victim.setPdLsn(page.getPdLsn());
-
-        // Set up the frame — usageCount = 1 on first load
-        victim.bind(fileId, pageId);
-        victim.initUsageCount();
-        victim.pin();
-
-        // Register in page table
-        pageTable.put(key, victim.frameId());
-
-        return victim;
     }
 
     /**
-     * Fetches a page for a newly allocated page (no disk read needed).
-     * Used when allocating a new page that doesn't exist on disk yet.
-     *
-     * @param fileId the unique file identifier
-     * @param pageId the new page ID
-     * @return BufferDescriptor for the new page (already pinned, dirty)
-     * @throws StorageException if pool is full or file not registered
-     * @throws IOException if flushing a dirty victim fails
+     * Fetches a frame for a newly allocated page (no disk read needed).
      */
     public BufferDescriptor fetchNewPage(int fileId, int pageId) throws IOException {
-        FileChannel channel = channels.get(fileId);
-        if (channel == null) {
+        if (!channels.containsKey(fileId)) {
             throw new StorageException("File not registered for fileId=" + fileId);
         }
 
-        long key = BufferDescriptor.key(fileId, pageId);
+        long key = BufferTable.key(fileId, pageId);
 
-        Integer frameId = pageTable.get(key);
-        if (frameId != null) {
-            // Shouldn't happen for new pages, but handle it
-            BufferDescriptor frame = descriptors[frameId];
-            frame.pin();
-            hits++;
-            return frame;
+        // Check for existing entry (should not happen for genuinely new pages).
+        ReentrantLock partLock = bufferTable.lockFor(key);
+        partLock.lock();
+        try {
+            Integer frameId = bufferTable.lookup(key);
+            if (frameId != null) {
+                BufferDescriptor d = descriptors[frameId];
+                d.headerMutex().lock();
+                try {
+                    d.pinOnHit();
+                } finally {
+                    d.headerMutex().unlock();
+                }
+                hits.incrementAndGet();
+                return d;
+            }
+        } finally {
+            partLock.unlock();
         }
 
-        misses++;
+        while (true) {
+            int victimFrameId = clockSweep.selectVictim(descriptors);
+            BufferDescriptor victim = descriptors[victimFrameId];
 
-        BufferDescriptor victim = findFreeFrame(channel);
-        if (victim == null) {
-            throw new StorageException("Buffer pool full (" + frameCount + " frames).");
+            boolean victimHasPage;
+            victim.headerMutex().lock();
+            try {
+                victimHasPage = victim.valid();
+            } finally {
+                victim.headerMutex().unlock();
+            }
+
+            if (victimHasPage) {
+                boolean evicted = evictFrame(victim);
+                if (!evicted) {
+                    victim.headerMutex().lock();
+                    try {
+                        victim.unpin();
+                    } finally {
+                        victim.headerMutex().unlock();
+                    }
+                    clockSweep.notifyUnpin();
+                    continue;
+                }
+                evictions.incrementAndGet();
+            }
+
+            victim.headerMutex().lock();
+            try {
+                victim.page().clear();
+                victim.page().limit(Constants.PAGE_SIZE);
+                victim.bindNewPage(fileId, pageId);
+            } finally {
+                victim.headerMutex().unlock();
+            }
+
+            partLock.lock();
+            Integer existing = bufferTable.lookup(key);
+            if (existing != null) {
+                partLock.unlock();
+                victim.headerMutex().lock();
+                try {
+                    victim.releaseVictimClaim();
+                } finally {
+                    victim.headerMutex().unlock();
+                }
+                clockSweep.notifyUnpin();
+                BufferDescriptor other = descriptors[existing];
+                other.headerMutex().lock();
+                try {
+                    other.pinOnHit();
+                } finally {
+                    other.headerMutex().unlock();
+                }
+                hits.incrementAndGet();
+                return other;
+            }
+            misses.incrementAndGet();
+            bufferTable.insert(key, victimFrameId);
+            partLock.unlock();
+
+            return victim;
         }
-
-        // Clear the frame for the new page
-        victim.page().clear();
-        victim.page().limit(Constants.PAGE_SIZE);
-
-        victim.bind(fileId, pageId);
-        victim.pin();
-        victim.markDirty(); // New pages are dirty by definition
-
-        pageTable.put(key, victim.frameId());
-
-        return victim;
     }
 
     /**
      * Unpins a buffer frame.
-     * 
-     * @param frame the buffer descriptor to unpin
-     * @param dirty true if the page was modified (will be flushed later)
+     *
+     * If dirty is true, marks the page dirty (bumps usageCount so hot pages survive
+     * longer). Signals the ClockSweep condition when pinCount drops to zero so
+     * blocked victim selectors wake immediately.
      */
     public void unpinPage(BufferDescriptor frame, boolean dirty) {
-        if (dirty) {
-            frame.markDirty();
+        boolean droppedToZero;
+        frame.headerMutex().lock();
+        try {
+            if (dirty) {
+                frame.markDirty();
+            }
+            droppedToZero = frame.unpin();
+        } finally {
+            frame.headerMutex().unlock();
         }
-        frame.unpin();
+        if (droppedToZero) {
+            clockSweep.notifyUnpin();
+        }
     }
 
+    // ==================== Flush operations ====================
+
     /**
-     * Flushes a specific dirty frame to disk.
-     * Enforces WAL-before-data flush rule: WAL up to frame.pdLsn must be
-     * flushed before the page is written.
-     *
-     * @param frameId the frame to flush
-     * @param channel the FileChannel to write to
-     * @throws IOException if write fails
+     * Flushes a specific frame to disk if dirty.
+     * Enforces WAL-before-data: flushes WAL up to frame.pdLsn before writing.
      */
     public void flushFrame(int frameId, FileChannel channel) throws IOException {
         BufferDescriptor frame = descriptors[frameId];
-        if (!frame.dirty()) {
+        boolean isDirty;
+        long lsn;
+        frame.headerMutex().lock();
+        try {
+            isDirty = frame.dirty();
+            lsn = frame.pdLsn();
+        } finally {
+            frame.headerMutex().unlock();
+        }
+
+        if (!isDirty) {
             return;
         }
 
-        // WAL-before-data flush rule: ensure WAL is flushed up to this page's LSN
-        if (xlogWriter != null && frame.pdLsn() > 0) {
-            xlogWriter.flushUpTo(frame.pdLsn());
+        if (xlogWriter != null && lsn > 0) {
+            xlogWriter.flushUpTo(lsn);
         }
 
-        // Write pd_lsn to page header before flushing
-        Page page = Page.Factory.wrap(frame.pageId(), frame.page().duplicate().clear());
-        page.setPdLsn(frame.pdLsn());
+        frame.contentLock().readLock().lock();
+        try {
+            Page page = Page.Factory.wrap(frame.pageId(), frame.page().duplicate().clear());
+            page.setPdLsn(lsn);
+            PageIO.writePage(channel, page);
+        } finally {
+            frame.contentLock().readLock().unlock();
+        }
 
-        // Write the page to disk
-        PageIO.writePage(channel, page);
-
-        // Mark clean (just clear dirty flag, preserve binding for potential reuse)
-        frame.markClean();
+        frame.headerMutex().lock();
+        try {
+            frame.markClean();
+        } finally {
+            frame.headerMutex().unlock();
+        }
     }
 
-    /**
-     * Flushes all dirty frames for a specific file to disk.
-     *
-     * @param fileId the file identifier whose dirty pages should be flushed
-     * @throws IOException if any write fails
-     */
     public void flushAllForFile(int fileId) throws IOException {
         FileChannel channel = channels.get(fileId);
         if (channel == null) {
-            return; // No file registered for this id
+            return;
         }
         for (int i = 0; i < frameCount; i++) {
             BufferDescriptor frame = descriptors[i];
-            if (frame.dirty() && frame.fileId() == fileId) {
+            boolean shouldFlush;
+            frame.headerMutex().lock();
+            try {
+                shouldFlush = frame.dirty() && frame.fileId() == fileId;
+            } finally {
+                frame.headerMutex().unlock();
+            }
+            if (shouldFlush) {
                 flushFrame(i, channel);
             }
         }
     }
 
-    /**
-     * Flushes all dirty frames to disk across all registered files.
-     *
-     * @throws IOException if any write fails
-     */
     public void flushAllDirty() throws IOException {
         for (int i = 0; i < frameCount; i++) {
             BufferDescriptor frame = descriptors[i];
-            if (frame.dirty() && frame.fileId() != 0) {
-                FileChannel channel = channels.get(frame.fileId());
+            int fid;
+            boolean isDirty;
+            frame.headerMutex().lock();
+            try {
+                fid = frame.fileId();
+                isDirty = frame.dirty();
+            } finally {
+                frame.headerMutex().unlock();
+            }
+            if (isDirty && fid != 0) {
+                FileChannel channel = channels.get(fid);
                 if (channel != null) {
                     flushFrame(i, channel);
                 }
@@ -316,38 +478,29 @@ public final class BufferPool implements AutoCloseable {
         }
     }
 
-    /**
-     * Checkpoint result containing statistics about the checkpoint operation.
-     */
+    // ==================== Checkpoint ====================
+
     public record CheckpointResult(long checkpointLsn, int flushedPages) {}
 
-    /**
-     * Performs a checkpoint operation.
-     *
-     * <p>The checkpoint procedure:
-     * <ol>
-     *   <li>Flush all dirty frames (each flush waits for its pd_lsn)</li>
-     *   <li>Append CHECKPOINT WAL record</li>
-     *   <li>Flush WAL up to checkpoint LSN</li>
-     *   <li>Update control file with checkpoint LSN</li>
-     *   <li>Set needsFullPageWrite=true on all frames</li>
-     * </ol>
-     *
-     * @param controlFile the control file to update with checkpoint LSN
-     * @return the checkpoint result with LSN and flushed page count
-     * @throws IOException if any operation fails
-     */
     public CheckpointResult checkpoint(ControlFile controlFile) throws IOException {
         if (xlogWriter == null) {
             throw new IllegalStateException("XLogWriter not set - cannot perform checkpoint");
         }
 
-        // 1. Flush all dirty frames (each flush waits for its pd_lsn per WAL-before-data rule)
         int flushedPages = 0;
         for (int i = 0; i < frameCount; i++) {
             BufferDescriptor frame = descriptors[i];
-            if (frame.dirty() && frame.fileId() != 0) {
-                FileChannel channel = channels.get(frame.fileId());
+            int fid;
+            boolean isDirty;
+            frame.headerMutex().lock();
+            try {
+                fid = frame.fileId();
+                isDirty = frame.dirty();
+            } finally {
+                frame.headerMutex().unlock();
+            }
+            if (isDirty && fid != 0) {
+                FileChannel channel = channels.get(fid);
                 if (channel != null) {
                     flushFrame(i, channel);
                     flushedPages++;
@@ -355,38 +508,30 @@ public final class BufferPool implements AutoCloseable {
             }
         }
 
-        // 2. Append CHECKPOINT record
-        // Payload: (long redoLsn) - the LSN at which redo should start on next recovery
         long checkpointLsn = xlogWriter.currentLsn();
         byte[] payload = buildCheckpointPayload(checkpointLsn);
         long recordLsn = xlogWriter.append(
             XLogRecord.RMGR_XLOG,
             XLogResourceManager.CHECKPOINT,
-            0, // xid not relevant for checkpoint
-            0, // tableOid not relevant for checkpoint
-            0, // pageId not relevant for checkpoint
+            0, 0, 0,
             payload
         );
 
-        // 3. Flush WAL up to checkpoint LSN
         xlogWriter.flushUpTo(recordLsn);
-
-        // 4. Update control file with checkpoint LSN
         controlFile.updateCheckpointLsn(checkpointLsn);
 
-        // 5. Set needsFullPageWrite=true on all frames
-        // This ensures the first modification to each page after checkpoint embeds full page image
         for (BufferDescriptor frame : descriptors) {
-            frame.setNeedsFullPageWrite(true);
+            frame.headerMutex().lock();
+            try {
+                frame.setNeedsFullPageWrite(true);
+            } finally {
+                frame.headerMutex().unlock();
+            }
         }
 
         return new CheckpointResult(checkpointLsn, flushedPages);
     }
 
-    /**
-     * Builds the WAL payload for a CHECKPOINT record.
-     * Format: (long redoLsn)
-     */
     private byte[] buildCheckpointPayload(long redoLsn) throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         DataOutputStream dos = new DataOutputStream(baos);
@@ -395,73 +540,45 @@ public final class BufferPool implements AutoCloseable {
         return baos.toByteArray();
     }
 
-    /**
-     * Closes the buffer pool and all registered file channels.
-     * Flushes all dirty pages before closing.
-     */
+    // ==================== Lifecycle ====================
+
     @Override
     public void close() throws IOException {
-        // Flush all dirty pages first
         flushAllDirty();
-
-        // Close all file channels
         for (FileChannel channel : channels.values()) {
-            try {
-                channel.close();
-            } catch (IOException e) {
-                // Continue closing others
-            }
+            try { channel.close(); } catch (IOException ignored) {}
         }
         channels.clear();
-        pageTable.clear();
     }
 
-    /**
-     * Closes the buffer pool WITHOUT flushing dirty pages.
-     * Used for simulating crashes in tests.
-     *
-     * <p>File channels are still closed, but dirty pages are lost.
-     * On next startup, recovery must replay WAL to restore them.</p>
-     *
-     * @throws IOException if closing channels fails
-     */
     public void closeWithoutFlush() throws IOException {
-        // Close all file channels without flushing dirty pages
         for (FileChannel channel : channels.values()) {
-            try {
-                channel.close();
-            } catch (IOException e) {
-                // Continue closing others
-            }
+            try { channel.close(); } catch (IOException ignored) {}
         }
         channels.clear();
-        pageTable.clear();
     }
 
     // ==================== Statistics ====================
 
-    public int frameCount() {
-        return frameCount;
-    }
+    public int frameCount() { return frameCount; }
 
-    public long hits() {
-        return hits;
-    }
+    public long hits() { return hits.get(); }
 
-    public long misses() {
-        return misses;
-    }
+    public long misses() { return misses.get(); }
 
     public double hitRate() {
-        long total = hits + misses;
-        return total == 0 ? 0.0 : (double) hits / total * 100.0;
+        long total = hits.get() + misses.get();
+        return total == 0 ? 0.0 : (double) hits.get() / total * 100.0;
     }
 
     public int pinnedCount() {
         int count = 0;
         for (BufferDescriptor frame : descriptors) {
-            if (frame.pinCount() > 0) {
-                count++;
+            frame.headerMutex().lock();
+            try {
+                if (frame.pinCount() > 0) count++;
+            } finally {
+                frame.headerMutex().unlock();
             }
         }
         return count;
@@ -470,8 +587,11 @@ public final class BufferPool implements AutoCloseable {
     public int dirtyCount() {
         int count = 0;
         for (BufferDescriptor frame : descriptors) {
-            if (frame.dirty()) {
-                count++;
+            frame.headerMutex().lock();
+            try {
+                if (frame.dirty()) count++;
+            } finally {
+                frame.headerMutex().unlock();
             }
         }
         return count;
@@ -480,103 +600,135 @@ public final class BufferPool implements AutoCloseable {
     public int usedFrames() {
         int count = 0;
         for (BufferDescriptor frame : descriptors) {
-            if (frame.fileId() != 0) {
-                count++;
+            frame.headerMutex().lock();
+            try {
+                if (frame.fileId() != 0) count++;
+            } finally {
+                frame.headerMutex().unlock();
             }
         }
         return count;
     }
 
-    /**
-     * Returns statistics as a formatted string for the shell.
-     */
+    public long ioWaits() { return ioWaits.get(); }
+
+    public long evictions() { return evictions.get(); }
+
     public String statsString() {
         return String.format(
-            "frames=%d  pinned=%d  dirty=%d  hits=%d  misses=%d  hit-rate=%.1f%%",
-            frameCount, pinnedCount(), dirtyCount(), hits, misses, hitRate()
+            "frames=%d  pinned=%d  dirty=%d  hits=%d  misses=%d  hit-rate=%.1f%%  " +
+            "partitions=%d  io-waits=%d  evictions=%d",
+            frameCount, pinnedCount(), dirtyCount(), hits(), misses(), hitRate(),
+            BufferTable.N_PARTITIONS, ioWaits(), evictions()
         );
     }
 
-    // ==================== Internal methods ====================
+    // ==================== Internal helpers ====================
 
     /**
-     * Finds a free (unbound) frame in the pool.
-     * If no free frames, uses clock-sweep eviction to select a victim.
-     * 
-     * @param channel FileChannel for flushing dirty victims
-     * @return a free BufferDescriptor (possibly after eviction)
-     * @throws IOException if flushing a dirty victim fails
+     * Evicts a victim frame that holds an old page.
+     *
+     * Protocol:
+     *   1. Acquire old partition lock → acquire victim's headerMutex
+     *   2. If pinCount > 1: another thread pinned it after we claimed it — back off
+     *   3. Remove old key from hash
+     *   4. Release both locks
+     *   5. Flush dirty page if needed (outside all latches)
+     *
+     * Returns true if eviction succeeded; false if the victim was re-pinned.
+     *
+     * The victim must have pinCount=1 (claimed by selectVictim) before this call.
+     * Partition lock > headerMutex ordering is respected throughout.
      */
-    private BufferDescriptor findFreeFrame(FileChannel channel) throws IOException {
-        // First: look for completely free (unbound) frames
-        for (BufferDescriptor frame : descriptors) {
-            if (frame.fileId() == 0 && frame.pinCount() == 0) {
-                return frame;
-            }
+    private boolean evictFrame(BufferDescriptor victim) throws IOException {
+        int oldFileId;
+        int oldPageId;
+
+        victim.headerMutex().lock();
+        try {
+            oldFileId = victim.fileId();
+            oldPageId = victim.pageId();
+        } finally {
+            victim.headerMutex().unlock();
         }
-        
-        // No free frames - use clock-sweep eviction
-        return selectVictim(channel);
-    }
 
-    /**
-     * Clock-sweep eviction algorithm (PostgreSQL: StrategyGetBuffer/freelist.c).
-     *
-     * Sweeps through frames looking for an unpinned victim:
-     * - If usageCount == 0: select as victim (flush if dirty)
-     * - Otherwise: decrement usageCount and continue
-     *
-     * After frameCount * 2 attempts, throws if no evictable frame found.
-     *
-     * @param newFileChannel FileChannel for the new file being loaded (fallback if victim's channel unknown)
-     * @return evicted frame ready for reuse
-     * @throws IOException if flushing fails
-     * @throws StorageException if all frames are pinned
-     */
-    private BufferDescriptor selectVictim(FileChannel newFileChannel) throws IOException {
-        for (int attempts = 0; attempts < frameCount * 2; attempts++) {
-            BufferDescriptor frame = descriptors[sweepHand];
+        long oldKey = BufferTable.key(oldFileId, oldPageId);
+        ReentrantLock oldPartLock = bufferTable.lockFor(oldKey);
 
-            if (frame.pinCount() == 0) {
-                if (frame.usageCount() == 0) {
-                    // Found victim - evict it
-                    if (frame.dirty()) {
-                        // Use the correct channel for this frame's file
-                        FileChannel flushChannel = channels.get(frame.fileId());
-                        if (flushChannel == null) {
-                            flushChannel = newFileChannel; // Fallback
-                        }
-                        flushFrame(frame.frameId(), flushChannel);
-                    }
-                    // Remove from page table
-                    removeFromPageTable(frame.fileId(), frame.pageId());
-                    // Reset for reuse
-                    frame.reset();
-                    return frame;
+        oldPartLock.lock();
+        try {
+            victim.headerMutex().lock();
+            try {
+                if (victim.pinCount() > 1) {
+                    // Another thread pinned the frame via the old key — we cannot evict.
+                    return false;
                 }
-                // Decrement usage count (gives hot pages more chances)
-                frame.decrementUsage();
+                // Only we hold a pin. Remove the old hash entry while holding both locks
+                // so that no new thread can pin via the old key after we remove it.
+                bufferTable.remove(oldKey);
+            } finally {
+                victim.headerMutex().unlock();
             }
-
-            sweepHand = (sweepHand + 1) % frameCount;
+        } finally {
+            oldPartLock.unlock();
         }
 
-        throw new StorageException(
-            "No evictable frame found - all " + frameCount + " frames pinned?"
-        );
+        // Flush dirty page outside all latches (WAL-before-data rule applied inside flushFrame).
+        boolean isDirty;
+        victim.headerMutex().lock();
+        try {
+            isDirty = victim.dirty();
+        } finally {
+            victim.headerMutex().unlock();
+        }
+
+        if (isDirty) {
+            FileChannel channel = channels.get(oldFileId);
+            if (channel != null) {
+                flushFrame(victim.frameId(), channel);
+            }
+        }
+
+        return true;
     }
 
     /**
-     * Removes a frame from the page table (called during eviction in 7B).
+     * Waits for any in-flight IO on a frame to complete.
+     * Called after pinning on a HIT where ioInProgress might be set.
      */
-    void removeFromPageTable(int fileId, int pageId) {
-        pageTable.remove(BufferDescriptor.key(fileId, pageId));
+    private void waitForIo(BufferDescriptor d) {
+        d.headerMutex().lock();
+        try {
+            if (d.ioInProgress()) {
+                ioWaits.incrementAndGet();
+                while (d.ioInProgress()) {
+                    try {
+                        d.ioCondition().await();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new StorageException("Interrupted while waiting for page IO");
+                    }
+                }
+            }
+        } finally {
+            d.headerMutex().unlock();
+        }
     }
 
-    /**
-     * Gets the frame descriptor by ID.
-     */
+    /** Package-private: used by tests. */
     BufferDescriptor descriptor(int frameId) {
         return descriptors[frameId];
+    }
+
+    /** Package-private: kept for legacy callers that flush directly. */
+    void removeFromPageTable(int fileId, int pageId) {
+        long key = BufferTable.key(fileId, pageId);
+        ReentrantLock partLock = bufferTable.lockFor(key);
+        partLock.lock();
+        try {
+            bufferTable.remove(key);
+        } finally {
+            partLock.unlock();
+        }
     }
 }
