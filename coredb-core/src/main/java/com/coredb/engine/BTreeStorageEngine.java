@@ -14,6 +14,7 @@ import com.coredb.mvcc.Snapshot;
 import com.coredb.txn.ClogManager;
 import com.coredb.txn.Transaction;
 import com.coredb.txn.TransactionManager;
+import com.coredb.util.StorageException;
 import com.coredb.txn.ClogManager.Status;
 import com.coredb.util.Constants;
 import com.coredb.util.SerializationFailureException;
@@ -142,7 +143,17 @@ public class BTreeStorageEngine implements StorageEngine {
             // Delete index entry first: if heap.update() fails, old tuple is still
             // live (xmax not set) so the row remains findable via scan.
             pkIndex.delete(pk);
-            RecordId newRid = heap.update(oldRid, row, currentXid);
+            RecordId newRid;
+            try {
+                newRid = heap.update(oldRid, row, currentXid);
+            } catch (StorageException e) {
+                // xmax was set between our firstUpdaterWins check and the actual write —
+                // a narrow race under high contention. Surface as serialization failure
+                // so the client retries rather than seeing a generic storage error.
+                pkIndex.insert(pk, oldRid); // restore index entry before throwing
+                throw new SerializationFailureException(
+                    "row for pk=" + pk + " modified concurrently; please retry");
+            }
             pkIndex.insert(pk, newRid);
             log.debug("Updated row with pk={}: oldRid={} -> newRid={}", pk, oldRid, newRid);
         } else {
@@ -323,20 +334,25 @@ public class BTreeStorageEngine implements StorageEngine {
         }
 
         Status xminStatus = clog.getStatus(h.xmin());
-        if (xminStatus == Status.IN_PROGRESS) {
-            // Another writer is mid-transaction on this row. Wait for it to finish,
-            // then retry the visibility check by re-entering put().
-            transactionManager.waitForXid(h.xmin());
-            firstUpdaterWins(pk, oldRid, tx);
-            return;
+        switch (xminStatus) {
+            case IN_PROGRESS -> {
+                // Another writer is mid-transaction on this row. Wait for it to finish,
+                // then re-evaluate: the outcome (commit or abort) determines whether
+                // we have a real conflict.
+                transactionManager.waitForXid(h.xmin());
+                firstUpdaterWins(pk, oldRid, tx);
+            }
+            case COMMITTED -> throw new SerializationFailureException(
+                // A concurrent transaction committed an update after our snapshot was taken.
+                // Our update would overwrite data we never read — first-updater-wins.
+                "row for pk=" + pk + " updated by concurrent transaction; please retry");
+            case ABORTED -> {
+                // The writer whose xmin we found aborted; its version is invisible by design.
+                // The index entry is stale (points to the aborted writer's new version).
+                // Returning here lets put() proceed: pkIndex.delete() + heap.update() will
+                // overwrite the stale entry. VACUUM cleans up any remaining dead tuples.
+            }
         }
-
-        // COMMITTED: a concurrent transaction committed an update after our snapshot —
-        // our update would overwrite data we never read (lost update).
-        // ABORTED: index is stale; the aborted writer left an invisible version in the
-        // index. This is a known v1 limitation cleaned up by VACUUM.
-        throw new SerializationFailureException(
-            "row for pk=" + pk + " updated by concurrent transaction; please retry");
     }
 
     private Long extractPk(Row row) {

@@ -178,30 +178,37 @@ class RepeatableReadTest {
 
     @Test
     void writeSkewAllowed_atRepeatableRead() throws Exception {
-        // Classic write-skew: two transactions each read a condition and each update based on it.
-        // Both should commit at REPEATABLE READ (write skew is allowed).
-        // This contrasts with SERIALIZABLE, where one would be aborted.
+        // Classic write skew (doctors-on-call pattern):
+        //   - invariant: at least one person must be on call (age > 0)
+        //   - T1 and T2 each read that 2 people are on call, conclude they can go off, and
+        //     each update a *different* row
+        //   - at REPEATABLE READ both commits succeed, leaving 0 people on call
+        //   - this anomaly is only blocked at SERIALIZABLE
+        //
+        // Both transactions read the *same* aggregate condition (two rows summing > 0).
+        // Each then updates a different row — their write sets do not overlap, so there
+        // is no first-updater-wins conflict, but the combined effect breaks the invariant.
 
-        // Setup: items 1 = Alice (active=true simulated via age>0), items 2 = Bob (age>0)
         LocalShellBackend t1 = new LocalShellBackend(db);
         LocalShellBackend t2 = new LocalShellBackend(db);
 
         t1.execute("begin");
         t2.execute("begin");
 
-        // Both read the rows (age > 0 means "on call").
-        assertThat(t1.execute("get items 1")).contains("Alice");
-        assertThat(t2.execute("get items 2")).contains("Bob");
+        // Both see two people "on call" (age 30 and 25 respectively).
+        assertThat(t1.execute("scan items")).contains("Alice").contains("Bob");
+        assertThat(t2.execute("scan items")).contains("Alice").contains("Bob");
 
-        // T1 "goes off call" by setting age=0.
+        // T1 sets Alice off-call (age=0), based on reading 2 people are on call.
         assertThat(t1.execute("put items 1 Alice 0")).doesNotStartWith("serialization failure");
         assertThat(t1.execute("commit")).doesNotContain("error");
 
-        // T2 "goes off call" by setting age=0 on a different row — no conflict with T1.
+        // T2 sets Bob off-call (age=0), also based on its snapshot showing 2 on-call.
+        // No overlap with T1's write set — first-updater-wins does not fire.
         assertThat(t2.execute("put items 2 Bob 0")).doesNotStartWith("serialization failure");
         assertThat(t2.execute("commit")).doesNotContain("error");
 
-        // Both committed — write skew occurred at REPEATABLE READ.
+        // Invariant broken: 0 people on call. Write skew allowed at REPEATABLE READ.
         assertThat(shell.execute("get items 1")).contains("0");
         assertThat(shell.execute("get items 2")).contains("0");
     }
