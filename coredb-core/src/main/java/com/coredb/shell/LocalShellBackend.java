@@ -110,6 +110,10 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         }
 
         try {
+            Transaction activeTx = txnMgr.currentTransaction();
+            if (activeTx != null) {
+                txnMgr.refreshStatementSnapshot(activeTx);
+            }
             String result = dispatch(command, args);
             if (autoCommit) {
                 if (result.startsWith("error:")) {

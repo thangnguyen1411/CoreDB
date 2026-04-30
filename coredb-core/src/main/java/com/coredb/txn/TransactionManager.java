@@ -182,6 +182,20 @@ public final class TransactionManager {
     }
 
     /**
+     * Refreshes the statement-level snapshot for READ COMMITTED transactions.
+     *
+     * <p>Called by the shell layer at the start of each statement. For READ COMMITTED,
+     * this takes a fresh snapshot so the statement sees all transactions that committed
+     * since the current transaction began. For other isolation levels this is a no-op —
+     * those levels use the transaction-level snapshot taken at {@code beginTransaction()}.
+     */
+    public void refreshStatementSnapshot(Transaction tx) {
+        if (tx.level() == IsolationLevel.READ_COMMITTED) {
+            tx.currentStatementSnapshot = snapshotManager.takeSnapshot();
+        }
+    }
+
+    /**
      * Clears the active transaction after an unrecoverable I/O failure in commit or rollback.
      *
      * <p>Does NOT update clog. The XID remains IN_PROGRESS in pg_xact; recovery will
