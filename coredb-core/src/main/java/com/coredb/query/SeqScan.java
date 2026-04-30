@@ -12,11 +12,13 @@ import java.util.Optional;
 public final class SeqScan implements Operator {
 
     private final StorageEngine engine;
+    private final String table;
     private final Transaction tx;
     private Iterator<Map.Entry<Long, Row>> rows;
 
-    public SeqScan(StorageEngine engine, Transaction tx) {
+    public SeqScan(StorageEngine engine, String table, Transaction tx) {
         this.engine = engine;
+        this.table = table;
         this.tx = tx;
     }
 

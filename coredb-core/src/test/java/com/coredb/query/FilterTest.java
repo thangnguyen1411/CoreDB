@@ -62,7 +62,7 @@ class FilterTest {
     void filter_ageGreaterThan_returnsMatchingRows() throws IOException {
         Transaction tx = db.transactionManager().beginTransaction();
         Predicate pred = new Predicate("age", GT, 25, schema);
-        Filter filter = new Filter(pred, new SeqScan(engine, tx));
+        Filter filter = new Filter(pred, new SeqScan(engine, "users", tx));
         filter.open();
 
         List<Row> rows = drainAll(filter);
@@ -77,7 +77,7 @@ class FilterTest {
     void filter_noMatch_returnsEmpty() throws IOException {
         Transaction tx = db.transactionManager().beginTransaction();
         Predicate pred = new Predicate("age", GT, 100, schema);
-        Filter filter = new Filter(pred, new SeqScan(engine, tx));
+        Filter filter = new Filter(pred, new SeqScan(engine, "users", tx));
         filter.open();
 
         List<Row> rows = drainAll(filter);
@@ -91,7 +91,7 @@ class FilterTest {
     void filter_exactMatch_returnsSingleRow() throws IOException {
         Transaction tx = db.transactionManager().beginTransaction();
         Predicate pred = new Predicate("age", EQ, 30, schema);
-        Filter filter = new Filter(pred, new SeqScan(engine, tx));
+        Filter filter = new Filter(pred, new SeqScan(engine, "users", tx));
         filter.open();
 
         List<Row> rows = drainAll(filter);
@@ -106,7 +106,7 @@ class FilterTest {
     void filter_ageLessThan_returnsMatchingRows() throws IOException {
         Transaction tx = db.transactionManager().beginTransaction();
         Predicate pred = new Predicate("age", LT, 25, schema);
-        Filter filter = new Filter(pred, new SeqScan(engine, tx));
+        Filter filter = new Filter(pred, new SeqScan(engine, "users", tx));
         filter.open();
 
         List<Row> rows = drainAll(filter);
@@ -121,7 +121,7 @@ class FilterTest {
     void filter_closePropagatedToChild() throws IOException {
         Transaction tx = db.transactionManager().beginTransaction();
         Predicate pred = new Predicate("age", GT, 0, schema);
-        Filter filter = new Filter(pred, new SeqScan(engine, tx));
+        Filter filter = new Filter(pred, new SeqScan(engine, "users", tx));
         filter.open();
         filter.close();
         db.transactionManager().commit(tx);

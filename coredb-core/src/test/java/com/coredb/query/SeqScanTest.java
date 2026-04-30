@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class SeqScanTest {
 
@@ -51,7 +52,7 @@ class SeqScanTest {
     @Test
     void scan_emptyTable_returnsEmpty() throws IOException {
         Transaction tx = db.transactionManager().beginTransaction();
-        SeqScan scan = new SeqScan(engine, tx);
+        SeqScan scan = new SeqScan(engine, "users", tx);
         scan.open();
         assertThat(scan.next()).isEmpty();
         scan.close();
@@ -67,7 +68,7 @@ class SeqScanTest {
         db.transactionManager().commit(writeTx);
 
         Transaction readTx = db.transactionManager().beginTransaction();
-        SeqScan scan = new SeqScan(engine, readTx);
+        SeqScan scan = new SeqScan(engine, "users", readTx);
         scan.open();
 
         int count = 0;
@@ -92,7 +93,7 @@ class SeqScanTest {
         db.transactionManager().commit(deleteTx);
 
         Transaction readTx = db.transactionManager().beginTransaction();
-        SeqScan scan = new SeqScan(engine, readTx);
+        SeqScan scan = new SeqScan(engine, "users", readTx);
         scan.open();
 
         List<Row> rows = drainAll(scan);
@@ -110,7 +111,7 @@ class SeqScanTest {
         db.transactionManager().rollback(writerTx);
 
         Transaction readTx = db.transactionManager().beginTransaction();
-        SeqScan scan = new SeqScan(engine, readTx);
+        SeqScan scan = new SeqScan(engine, "users", readTx);
         scan.open();
         List<Row> rows = drainAll(scan);
         scan.close();
@@ -120,9 +121,21 @@ class SeqScanTest {
     }
 
     @Test
+    void scan_withoutStatementSnapshot_throwsIllegalStateException() throws IOException {
+        Transaction tx = db.transactionManager().beginTransaction();
+        tx.setCurrentStatementSnapshot(null);
+        SeqScan scan = new SeqScan(engine, "users", tx);
+        assertThatThrownBy(scan::open)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("snapshot not set");
+        scan.close();
+        db.transactionManager().rollback(tx);
+    }
+
+    @Test
     void scan_closedProperly_noException() throws IOException {
         Transaction tx = db.transactionManager().beginTransaction();
-        SeqScan scan = new SeqScan(engine, tx);
+        SeqScan scan = new SeqScan(engine, "users", tx);
         scan.open();
         scan.close();
         db.transactionManager().commit(tx);

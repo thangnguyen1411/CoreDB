@@ -18,6 +18,7 @@ public record Predicate(String column, Op op, Object literal, Schema schema) {
         return compare(value, op, literal);
     }
 
+    // All Row values are Comparable by construction: Long, Integer, String, Boolean
     @SuppressWarnings("unchecked")
     private static boolean compare(Object value, Op op, Object literal) {
         Comparable<Object> cv = (Comparable<Object>) value;

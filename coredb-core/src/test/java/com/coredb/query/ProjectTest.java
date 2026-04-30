@@ -58,7 +58,7 @@ class ProjectTest {
     @Test
     void project_specificColumns_returnsOnlyThoseColumns() throws IOException {
         Transaction tx = db.transactionManager().beginTransaction();
-        Project project = new Project(List.of("id", "name"), schema, new SeqScan(engine, tx));
+        Project project = new Project(List.of("id", "name"), schema, new SeqScan(engine, "users", tx));
         project.open();
 
         List<Row> rows = drainAll(project);
@@ -74,7 +74,7 @@ class ProjectTest {
     @Test
     void project_passThrough_returnsAllColumns() throws IOException {
         Transaction tx = db.transactionManager().beginTransaction();
-        Project project = new Project(List.of(), schema, new SeqScan(engine, tx));
+        Project project = new Project(List.of(), schema, new SeqScan(engine, "users", tx));
         project.open();
 
         List<Row> rows = drainAll(project);
@@ -90,7 +90,7 @@ class ProjectTest {
     @Test
     void project_nullColumns_passThroughAllColumns() throws IOException {
         Transaction tx = db.transactionManager().beginTransaction();
-        Project project = new Project(null, schema, new SeqScan(engine, tx));
+        Project project = new Project(null, schema, new SeqScan(engine, "users", tx));
         project.open();
 
         List<Row> rows = drainAll(project);
@@ -106,7 +106,7 @@ class ProjectTest {
     @Test
     void project_singleColumn_returnsOnlyThatColumn() throws IOException {
         Transaction tx = db.transactionManager().beginTransaction();
-        Project project = new Project(List.of("name"), schema, new SeqScan(engine, tx));
+        Project project = new Project(List.of("name"), schema, new SeqScan(engine, "users", tx));
         project.open();
 
         List<Row> rows = drainAll(project);
@@ -124,7 +124,7 @@ class ProjectTest {
         Project project = new Project(
             List.of("name"),
             schema,
-            new Filter(pred, new SeqScan(engine, tx))
+            new Filter(pred, new SeqScan(engine, "users", tx))
         );
         project.open();
 
@@ -146,7 +146,7 @@ class ProjectTest {
     @Test
     void project_closePropagatedToChild() throws IOException {
         Transaction tx = db.transactionManager().beginTransaction();
-        Project project = new Project(List.of("name"), schema, new SeqScan(engine, tx));
+        Project project = new Project(List.of("name"), schema, new SeqScan(engine, "users", tx));
         project.open();
         project.close();
         db.transactionManager().commit(tx);
