@@ -103,7 +103,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
         Transaction tx = null;
         if (autoCommit) {
             try {
-                tx = txnMgr.beginTransaction();
+                tx = txnMgr.beginTransaction(currentDefaultLevel);
             } catch (IOException e) {
                 return "error: failed to begin transaction: " + e.getMessage();
             }

@@ -36,6 +36,8 @@ public final class Transaction {
 
     public Snapshot currentStatementSnapshot() { return currentStatementSnapshot; }
 
+    void setCurrentStatementSnapshot(Snapshot snap) { this.currentStatementSnapshot = snap; }
+
     public State state() { return state; }
 
     void setState(State state) { this.state = state; }

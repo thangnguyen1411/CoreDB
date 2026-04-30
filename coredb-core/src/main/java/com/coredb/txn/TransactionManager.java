@@ -191,7 +191,7 @@ public final class TransactionManager {
      */
     public void refreshStatementSnapshot(Transaction tx) {
         if (tx.level() == IsolationLevel.READ_COMMITTED) {
-            tx.currentStatementSnapshot = snapshotManager.takeSnapshot();
+            tx.setCurrentStatementSnapshot(snapshotManager.takeSnapshot());
         }
     }
 

@@ -2,6 +2,7 @@ package com.coredb.txn;
 
 import com.coredb.api.CoreDBConfig;
 import com.coredb.catalog.ControlFile;
+import com.coredb.mvcc.Snapshot;
 import com.coredb.mvcc.SnapshotManager;
 import com.coredb.util.Constants;
 import org.junit.jupiter.api.AfterEach;
@@ -79,6 +80,45 @@ class IsolationLevelTest {
     void currentStatementSnapshot_initiallyEqualToTransactionSnapshot() throws IOException {
         Transaction tx = txnMgr.beginTransaction(IsolationLevel.REPEATABLE_READ);
         assertThat(tx.currentStatementSnapshot()).isEqualTo(tx.snapshot());
+        txnMgr.rollback(tx);
+    }
+
+    @Test
+    void refreshStatementSnapshot_readCommitted_updatesSnapshot() throws IOException {
+        // Simulate a second transaction committing, advancing the snapshot boundary.
+        Transaction other = txnMgr.beginTransaction();
+        txnMgr.commit(other);
+
+        Transaction tx = txnMgr.beginTransaction(IsolationLevel.READ_COMMITTED);
+        Snapshot before = tx.currentStatementSnapshot();
+
+        txnMgr.refreshStatementSnapshot(tx);
+        Snapshot after = tx.currentStatementSnapshot();
+
+        // The refreshed snapshot's xmax must be >= the original's, reflecting the committed transaction.
+        assertThat(after.xmax()).isGreaterThanOrEqualTo(before.xmax());
+        txnMgr.rollback(tx);
+    }
+
+    @Test
+    void refreshStatementSnapshot_repeatableRead_isNoOp() throws IOException {
+        Transaction tx = txnMgr.beginTransaction(IsolationLevel.REPEATABLE_READ);
+        Snapshot txnSnapshot = tx.snapshot();
+
+        txnMgr.refreshStatementSnapshot(tx);
+
+        assertThat(tx.currentStatementSnapshot()).isSameAs(txnSnapshot);
+        txnMgr.rollback(tx);
+    }
+
+    @Test
+    void refreshStatementSnapshot_serializable_isNoOp() throws IOException {
+        Transaction tx = txnMgr.beginTransaction(IsolationLevel.SERIALIZABLE);
+        Snapshot txnSnapshot = tx.snapshot();
+
+        txnMgr.refreshStatementSnapshot(tx);
+
+        assertThat(tx.currentStatementSnapshot()).isSameAs(txnSnapshot);
         txnMgr.rollback(tx);
     }
 
