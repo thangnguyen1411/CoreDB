@@ -6,6 +6,7 @@ import com.coredb.api.Schema;
 import com.coredb.buffer.BufferPool;
 import com.coredb.catalog.TableMeta;
 import com.coredb.heap.HeapFile;
+import com.coredb.heap.HeapTupleHeader;
 import com.coredb.heap.RecordId;
 import com.coredb.index.BTree;
 import com.coredb.index.IndexFile;
@@ -13,7 +14,9 @@ import com.coredb.mvcc.Snapshot;
 import com.coredb.txn.ClogManager;
 import com.coredb.txn.Transaction;
 import com.coredb.txn.TransactionManager;
+import com.coredb.txn.ClogManager.Status;
 import com.coredb.util.Constants;
+import com.coredb.util.SerializationFailureException;
 import com.coredb.wal.XLogWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -135,6 +138,7 @@ public class BTreeStorageEngine implements StorageEngine {
         Optional<RecordId> existing = pkIndex.search(pk);
         if (existing.isPresent()) {
             RecordId oldRid = existing.get();
+            firstUpdaterWins(pk, oldRid, tx);
             // Delete index entry first: if heap.update() fails, old tuple is still
             // live (xmax not set) so the row remains findable via scan.
             pkIndex.delete(pk);
@@ -294,6 +298,45 @@ public class BTreeStorageEngine implements StorageEngine {
             throw new IllegalStateException("no active transaction");
         }
         return tx;
+    }
+
+    /**
+     * First-updater-wins: detects whether another committed (or in-progress) transaction
+     * has already modified the row at {@code oldRid} since {@code tx}'s snapshot was taken.
+     *
+     * <p>If the indexed version is invisible to the current snapshot and its {@code xmin}
+     * is a committed transaction, a concurrent writer won — raise
+     * {@link SerializationFailureException} so the caller retries. If {@code xmin} is
+     * in-progress, wait for it to commit or abort, then re-evaluate.</p>
+     */
+    private void firstUpdaterWins(long pk, RecordId oldRid, Transaction tx) throws IOException {
+        Optional<Row> visible = heap.get(oldRid, tx.currentStatementSnapshot(), clog, tx.xid());
+        if (visible.isPresent()) {
+            return; // version is visible to our snapshot — no conflict
+        }
+
+        // Version invisible: find out why by reading the raw header.
+        HeapTupleHeader h = heap.rawHeader(oldRid);
+        if (h == null) {
+            throw new SerializationFailureException(
+                "row for pk=" + pk + " not found; concurrent modification likely");
+        }
+
+        Status xminStatus = clog.getStatus(h.xmin());
+        if (xminStatus == Status.IN_PROGRESS) {
+            // Another writer is mid-transaction on this row. Wait for it to finish,
+            // then retry the visibility check by re-entering put().
+            transactionManager.waitForXid(h.xmin());
+            firstUpdaterWins(pk, oldRid, tx);
+            return;
+        }
+
+        // COMMITTED: a concurrent transaction committed an update after our snapshot —
+        // our update would overwrite data we never read (lost update).
+        // ABORTED: index is stale; the aborted writer left an invisible version in the
+        // index. This is a known v1 limitation cleaned up by VACUUM.
+        throw new SerializationFailureException(
+            "row for pk=" + pk + " updated by concurrent transaction; please retry");
     }
 
     private Long extractPk(Row row) {

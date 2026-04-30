@@ -30,6 +30,7 @@ import com.coredb.wal.XLogResourceManager;
 import com.coredb.txn.ClogManager;
 import com.coredb.txn.Transaction;
 import com.coredb.txn.TransactionManager;
+import com.coredb.util.SerializationFailureException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
@@ -123,6 +124,11 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
                 }
             }
             return result;
+        } catch (SerializationFailureException e) {
+            if (tx != null) {
+                try { txnMgr.rollback(tx); } catch (IOException ignored) {}
+            }
+            return "serialization failure: " + e.getMessage() + "; please retry";
         } catch (RuntimeException e) {
             if (autoCommit && tx != null) {
                 try { txnMgr.rollback(tx); } catch (IOException ignored) {}

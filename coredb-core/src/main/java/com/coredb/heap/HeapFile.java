@@ -508,6 +508,37 @@ public final class HeapFile implements AutoCloseable {
         return lsn;
     }
 
+    /**
+     * Returns the raw {@link HeapTupleHeader} for the given record without applying any
+     * visibility filter. Returns {@code null} if the slot does not hold a live item.
+     *
+     * <p>Callers use this to inspect {@code xmin} or {@code xmax} to make first-updater-wins
+     * decisions before the full visibility check.</p>
+     */
+    public HeapTupleHeader rawHeader(RecordId rid) throws IOException {
+        if (rid.pageId() < 1 || rid.pageId() >= pageCount()) {
+            return null;
+        }
+        PinnedPage pinned = readPage(rid.pageId());
+        try {
+            Page page = pinned.page();
+            if (page.pageType() != com.coredb.page.PageType.HEAP) {
+                return null;
+            }
+            HeapPage heapPage = new HeapPage(page);
+            if (rid.slotNo() < 0 || rid.slotNo() >= heapPage.slotCount()) {
+                return null;
+            }
+            int raw = page.readItemId(rid.slotNo());
+            if (ItemId.flags(raw) != ItemId.FLAGS_NORMAL) {
+                return null;
+            }
+            return HeapTupleHeader.readFrom(page.buffer(), ItemId.offset(raw));
+        } finally {
+            pinned.unpin(false);
+        }
+    }
+
     public Optional<Row> get(RecordId recordId, Snapshot snapshot, ClogManager clog) throws IOException {
         return get(recordId, snapshot, clog, Constants.INVALID_XID);
     }

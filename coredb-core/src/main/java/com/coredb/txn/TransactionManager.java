@@ -87,6 +87,13 @@ public final class TransactionManager {
         Snapshot snap = snapshotManager.takeSnapshot();
         Transaction tx = new Transaction(xid, snap, canonical);
         currentTx.set(tx);
+        // Hold an EXCLUSIVE TXN_COMMIT lock for the lifetime of this transaction.
+        // Other transactions waiting for this one call waitForXid(), which acquires
+        // a SHARE lock on the same tag — blocking until we releaseAll() at commit/rollback.
+        if (lockManager != null) {
+            lockManager.acquire(xid, new LockTag(xid, LockTag.LockType.TXN_COMMIT),
+                                LockMode.EXCLUSIVE, 30_000L);
+        }
         return tx;
     }
 
@@ -193,6 +200,25 @@ public final class TransactionManager {
         if (tx.level() == IsolationLevel.READ_COMMITTED) {
             tx.setCurrentStatementSnapshot(snapshotManager.takeSnapshot());
         }
+    }
+
+    /**
+     * Blocks until the target transaction commits or rolls back.
+     *
+     * <p>Acquires a SHARE lock on the target's TXN_COMMIT slot, which is held exclusively
+     * by the target from its {@code beginTransaction()} until its {@code commit()} or
+     * {@code rollback()}. Returns immediately if the target has already finished.</p>
+     *
+     * <p>Used by first-updater-wins to stall the current writer until an in-progress
+     * concurrent writer on the same row has resolved.</p>
+     */
+    public void waitForXid(int targetXid) {
+        if (lockManager == null) return;
+        Transaction tx = currentTx.get();
+        if (tx == null) return;
+        LockTag tag = new LockTag(targetXid, LockTag.LockType.TXN_COMMIT);
+        lockManager.acquire(tx.xid(), tag, LockMode.SHARE, 30_000L);
+        lockManager.release(tx.xid(), tag);
     }
 
     /**
