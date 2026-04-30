@@ -3,19 +3,35 @@ package com.coredb.query;
 import com.coredb.api.Row;
 import com.coredb.api.Schema;
 
-public record Predicate(String column, Op op, Object literal, Schema schema) {
+public final class Predicate {
 
     public enum Op { EQ, NEQ, LT, LE, GT, GE }
 
-    public Predicate {
-        if (schema.indexOf(column) < 0) {
+    private final String column;
+    private final Op op;
+    private final Object literal;
+    private final Schema schema;
+    private final int columnIndex;
+
+    public Predicate(String column, Op op, Object literal, Schema schema) {
+        int idx = schema.indexOf(column);
+        if (idx < 0) {
             throw new IllegalArgumentException("Column not found in schema: " + column);
         }
+        this.column = column;
+        this.op = op;
+        this.literal = literal;
+        this.schema = schema;
+        this.columnIndex = idx;
     }
 
+    public String column() { return column; }
+    public Op op() { return op; }
+    public Object literal() { return literal; }
+    public Schema schema() { return schema; }
+
     public boolean test(Row row) {
-        Object value = row.get(schema.indexOf(column));
-        return compare(value, op, literal);
+        return compare(row.get(columnIndex), op, literal);
     }
 
     // All Row values are Comparable by construction: Long, Integer, String, Boolean

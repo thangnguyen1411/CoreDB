@@ -19,8 +19,11 @@ import java.util.List;
 import java.util.Optional;
 
 import static com.coredb.query.Predicate.Op.EQ;
+import static com.coredb.query.Predicate.Op.GE;
 import static com.coredb.query.Predicate.Op.GT;
+import static com.coredb.query.Predicate.Op.LE;
 import static com.coredb.query.Predicate.Op.LT;
+import static com.coredb.query.Predicate.Op.NEQ;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class FilterTest {
@@ -115,6 +118,51 @@ class FilterTest {
 
         assertThat(rows).hasSize(1);
         assertThat(rows.get(0).getString(1)).isEqualTo("Dave");
+    }
+
+    @Test
+    void filter_notEqual_excludesMatchedRow() throws IOException {
+        Transaction tx = db.transactionManager().beginTransaction();
+        Predicate pred = new Predicate("age", NEQ, 30, schema);
+        Filter filter = new Filter(pred, new SeqScan(engine, "users", tx));
+        filter.open();
+
+        List<Row> rows = drainAll(filter);
+        filter.close();
+        db.transactionManager().commit(tx);
+
+        assertThat(rows).hasSize(3);
+        assertThat(rows).noneMatch(r -> r.getInt(2) == 30);
+    }
+
+    @Test
+    void filter_lessThanOrEqual_includesBoundary() throws IOException {
+        Transaction tx = db.transactionManager().beginTransaction();
+        Predicate pred = new Predicate("age", LE, 25, schema);
+        Filter filter = new Filter(pred, new SeqScan(engine, "users", tx));
+        filter.open();
+
+        List<Row> rows = drainAll(filter);
+        filter.close();
+        db.transactionManager().commit(tx);
+
+        assertThat(rows).hasSize(2);
+        assertThat(rows).allMatch(r -> r.getInt(2) <= 25);
+    }
+
+    @Test
+    void filter_greaterThanOrEqual_includesBoundary() throws IOException {
+        Transaction tx = db.transactionManager().beginTransaction();
+        Predicate pred = new Predicate("age", GE, 30, schema);
+        Filter filter = new Filter(pred, new SeqScan(engine, "users", tx));
+        filter.open();
+
+        List<Row> rows = drainAll(filter);
+        filter.close();
+        db.transactionManager().commit(tx);
+
+        assertThat(rows).hasSize(2);
+        assertThat(rows).allMatch(r -> r.getInt(2) >= 30);
     }
 
     @Test

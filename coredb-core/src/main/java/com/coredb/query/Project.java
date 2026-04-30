@@ -9,19 +9,25 @@ import java.util.Optional;
 public final class Project implements Operator {
 
     private final List<String> columns;
-    private final Schema schema;
+    private final int[] columnIndices;
     private final Operator child;
 
     public Project(List<String> columns, Schema schema, Operator child) {
-        if (columns != null) {
-            for (String col : columns) {
-                if (schema.indexOf(col) < 0) {
-                    throw new IllegalArgumentException("Column not found in schema: " + col);
+        if (columns == null || columns.isEmpty()) {
+            this.columns = List.of();
+            this.columnIndices = new int[0];
+        } else {
+            int[] indices = new int[columns.size()];
+            for (int i = 0; i < columns.size(); i++) {
+                int idx = schema.indexOf(columns.get(i));
+                if (idx < 0) {
+                    throw new IllegalArgumentException("Column not found in schema: " + columns.get(i));
                 }
+                indices[i] = idx;
             }
+            this.columns = List.copyOf(columns);
+            this.columnIndices = indices;
         }
-        this.columns = (columns == null || columns.isEmpty()) ? List.of() : List.copyOf(columns);
-        this.schema = schema;
         this.child = child;
     }
 
@@ -34,12 +40,12 @@ public final class Project implements Operator {
     public Optional<Row> next() {
         Optional<Row> r = child.next();
         if (r.isEmpty()) return Optional.empty();
-        if (columns.isEmpty()) return r;
+        if (columnIndices.length == 0) return r;
 
         Row row = r.get();
-        List<Object> projected = new ArrayList<>(columns.size());
-        for (String col : columns) {
-            projected.add(row.get(schema.indexOf(col)));
+        List<Object> projected = new ArrayList<>(columnIndices.length);
+        for (int idx : columnIndices) {
+            projected.add(row.get(idx));
         }
         return Optional.of(Row.of(projected));
     }
