@@ -2,32 +2,39 @@ package com.coredb.txn;
 
 import com.coredb.mvcc.Snapshot;
 
-/**
- * Represents a single database transaction.
- *
- * <p>A transaction holds an immutable XID and snapshot (taken once at
- * {@code beginTransaction()} for REPEATABLE READ semantics) plus a mutable
- * lifecycle state.</p>
- *
- * <p>PostgreSQL equivalent: {@code TransactionStateData} + {@code PGPROC}</p>
- */
 public final class Transaction {
 
     public enum State { ACTIVE, COMMITTED, ABORTED }
 
     private final int xid;
     private final Snapshot snapshot;
+    private final IsolationLevel level;
     private State state;
 
-    Transaction(int xid, Snapshot snapshot) {
+    /**
+     * Statement-level snapshot. Set at statement start; reused for the duration of one
+     * shell command. At REPEATABLE_READ and SERIALIZABLE this is identical to {@link #snapshot}.
+     * At READ_COMMITTED it is refreshed before each statement so the transaction sees
+     * committed data from other transactions that committed since this transaction began.
+     * Populated by the shell layer before dispatching any command.
+     */
+    Snapshot currentStatementSnapshot;
+
+    Transaction(int xid, Snapshot snapshot, IsolationLevel level) {
         this.xid = xid;
         this.snapshot = snapshot;
+        this.level = level;
         this.state = State.ACTIVE;
+        this.currentStatementSnapshot = snapshot;
     }
 
     public int xid() { return xid; }
 
     public Snapshot snapshot() { return snapshot; }
+
+    public IsolationLevel level() { return level; }
+
+    public Snapshot currentStatementSnapshot() { return currentStatementSnapshot; }
 
     public State state() { return state; }
 
@@ -35,6 +42,6 @@ public final class Transaction {
 
     @Override
     public String toString() {
-        return "Transaction{xid=" + xid + ", state=" + state + "}";
+        return "Transaction{xid=" + xid + ", level=" + level + ", state=" + state + "}";
     }
 }

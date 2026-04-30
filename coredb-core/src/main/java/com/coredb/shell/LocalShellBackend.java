@@ -20,6 +20,7 @@ import com.coredb.mvcc.Snapshot;
 import com.coredb.index.BTreeLeafPage;
 import com.coredb.index.IndexFile;
 import com.coredb.index.IndexPageLayout;
+import com.coredb.txn.IsolationLevel;
 import com.coredb.txn.LockManager;
 import com.coredb.txn.LockMode;
 import com.coredb.util.Constants;
@@ -48,6 +49,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
     );
 
     private final CoreDB db;
+    private IsolationLevel currentDefaultLevel = IsolationLevel.REPEATABLE_READ;
 
     public LocalShellBackend(CoreDB db) {
         this.db = db;
@@ -75,10 +77,11 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
 
         // Transaction control commands are never auto-committed
         return switch (command) {
-            case "begin"    -> handleBegin();
-            case "commit"   -> handleCommit();
-            case "rollback" -> handleRollback();
-            default         -> executeWithAutoCommit(command, args);
+            case "begin"          -> handleBegin();
+            case "commit"         -> handleCommit();
+            case "rollback"       -> handleRollback();
+            case "set-isolation"  -> handleSetIsolation(args);
+            default               -> executeWithAutoCommit(command, args);
         };
     }
 
@@ -173,11 +176,44 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             return "error: transaction already active (xid=" + txnMgr.currentTransaction().xid() + ")";
         }
         try {
-            Transaction tx = txnMgr.beginTransaction();
-            return "xid=" + tx.xid() + " started";
+            Transaction tx = txnMgr.beginTransaction(currentDefaultLevel);
+            return "xid=" + tx.xid() + " started (" + formatLevel(tx.level()) + ")";
         } catch (IOException e) {
             return "error: " + e.getMessage();
         }
+    }
+
+    private String handleSetIsolation(String args) {
+        TransactionManager txnMgr = db.transactionManager();
+        if (txnMgr.currentTransaction() != null) {
+            return "error: cannot change isolation level inside a transaction";
+        }
+        IsolationLevel level = parseIsolationLevel(args.trim().toLowerCase());
+        if (level == null) {
+            return "error: unknown isolation level: " + args.trim() +
+                   "\n  valid values: read-uncommitted, read-committed, repeatable-read, serializable";
+        }
+        currentDefaultLevel = level;
+        return "default isolation level set to " + formatLevel(level.canonical());
+    }
+
+    private static IsolationLevel parseIsolationLevel(String s) {
+        return switch (s) {
+            case "read-uncommitted", "read_uncommitted"   -> IsolationLevel.READ_UNCOMMITTED;
+            case "read-committed",   "read_committed"     -> IsolationLevel.READ_COMMITTED;
+            case "repeatable-read",  "repeatable_read"    -> IsolationLevel.REPEATABLE_READ;
+            case "serializable"                           -> IsolationLevel.SERIALIZABLE;
+            default                                       -> null;
+        };
+    }
+
+    private static String formatLevel(IsolationLevel level) {
+        return switch (level) {
+            case READ_UNCOMMITTED -> "READ UNCOMMITTED";
+            case READ_COMMITTED   -> "READ COMMITTED";
+            case REPEATABLE_READ  -> "REPEATABLE READ";
+            case SERIALIZABLE     -> "SERIALIZABLE";
+        };
     }
 
     private String handleCommit() {
@@ -277,6 +313,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
           begin                      start a new transaction
           commit                     commit the current transaction
           rollback                   abort the current transaction
+          set-isolation <level>      set default isolation level (read-uncommitted | read-committed | repeatable-read | serializable)
           clog-status [xid]          show transaction status log summary or specific XID status
           lock-table                 show current lock table (holders and waiters)
         """;
