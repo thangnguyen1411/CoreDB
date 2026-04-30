@@ -23,6 +23,8 @@ import com.coredb.index.IndexPageLayout;
 import com.coredb.txn.IsolationLevel;
 import com.coredb.txn.LockManager;
 import com.coredb.txn.LockMode;
+import com.coredb.txn.PredicateLockManager;
+import com.coredb.txn.PredicateLockTag;
 import com.coredb.util.Constants;
 import com.coredb.wal.XLogReader;
 import com.coredb.wal.XLogRecord;
@@ -39,6 +41,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 public final class LocalShellBackend implements ShellBackend, AutoCloseable {
 
@@ -175,6 +178,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
             case "vacuum" -> handleVacuum(args);
             case "vacuum-stats" -> handleVacuumStats(args);
             case "lock-table" -> handleLockTable();
+            case "predicate-locks" -> handlePredicateLocks(args);
             case "help" -> formatHelp();
             default -> "unknown command: " + command + "  (type 'help' for available commands)";
         };
@@ -326,6 +330,7 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
           set-isolation <level>      set default isolation level (read-uncommitted | read-committed | repeatable-read | serializable)
           clog-status [xid]          show transaction status log summary or specific XID status
           lock-table                 show current lock table (holders and waiters)
+          predicate-locks [xid]      show SIREAD predicate locks (all, or for one xid)
         """;
     }
 
@@ -1399,6 +1404,45 @@ public final class LocalShellBackend implements ShellBackend, AutoCloseable {
               .append(holderPart.isEmpty() ? "(no holders)" : holderPart)
               .append("  waiters: ").append(waiterPart.isEmpty() ? "none" : waiterPart)
               .append("\n");
+        }
+        return sb.toString().stripTrailing();
+    }
+
+    private String handlePredicateLocks(String args) {
+        PredicateLockManager mgr = db.predicateLockManager();
+        String xidFilter = args.trim();
+
+        if (!xidFilter.isEmpty()) {
+            int xid;
+            try {
+                xid = Integer.parseInt(xidFilter);
+            } catch (NumberFormatException e) {
+                return "usage: predicate-locks [xid]";
+            }
+            Set<PredicateLockTag> tags = mgr.locksHeldBy(xid);
+            if (tags.isEmpty()) {
+                return "xid=" + xid + " holds no SIREAD locks";
+            }
+            StringBuilder sb = new StringBuilder();
+            sb.append("xid=").append(xid).append(" holds SIREAD on:");
+            Catalog cat = db.catalog();
+            for (PredicateLockTag tag : tags) {
+                sb.append("\n  ").append(resolveTableName(cat, tag.tableOid()))
+                  .append(" page=").append(tag.pageId());
+            }
+            return sb.toString();
+        }
+
+        Map<PredicateLockTag, Set<Integer>> all = mgr.allLocks();
+        if (all.isEmpty()) {
+            return "(no predicate locks held)";
+        }
+        Catalog cat = db.catalog();
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<PredicateLockTag, Set<Integer>> e : all.entrySet()) {
+            PredicateLockTag tag = e.getKey();
+            String resource = resolveTableName(cat, tag.tableOid()) + " page=" + tag.pageId();
+            sb.append(resource).append("  readers=").append(e.getValue()).append("\n");
         }
         return sb.toString().stripTrailing();
     }

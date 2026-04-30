@@ -13,6 +13,7 @@ import com.coredb.recovery.RecoveryManager;
 import com.coredb.recovery.RecoveryStats;
 import com.coredb.txn.ClogManager;
 import com.coredb.txn.LockManager;
+import com.coredb.txn.PredicateLockManager;
 import com.coredb.txn.Transaction;
 import com.coredb.txn.TransactionManager;
 import com.coredb.util.Constants;
@@ -41,6 +42,7 @@ public final class CoreDB implements AutoCloseable {
     private final SnapshotManager snapshotManager;
     private final TransactionManager transactionManager;
     private final LockManager lockManager;
+    private final PredicateLockManager predicateLockManager;
     private final Map<Integer, StorageEngine> engineCache;
     private final RecoveryStats lastRecoveryStats;
     private volatile boolean closed = false;
@@ -65,7 +67,8 @@ public final class CoreDB implements AutoCloseable {
         this.catalog = catalog;
         this.snapshotManager = snapshotManager;
         this.lockManager = new LockManager();
-        this.transactionManager = new TransactionManager(controlFile, snapshotManager, clog, xlogWriter, lockManager);
+        this.predicateLockManager = new PredicateLockManager();
+        this.transactionManager = new TransactionManager(controlFile, snapshotManager, clog, xlogWriter, lockManager, predicateLockManager);
         this.engineCache = new ConcurrentHashMap<>();
         this.lastRecoveryStats = lastRecoveryStats;
         log.debug(
@@ -248,6 +251,13 @@ public final class CoreDB implements AutoCloseable {
      */
     public LockManager lockManager() {
         return lockManager;
+    }
+
+    /**
+     * Returns the predicate lock manager used for SIREAD tracking in serializable transactions.
+     */
+    public PredicateLockManager predicateLockManager() {
+        return predicateLockManager;
     }
 
     /**
