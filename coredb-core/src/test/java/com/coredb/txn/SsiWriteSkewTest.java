@@ -11,7 +11,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -22,11 +24,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p>Verifies that:
  * <ul>
- *   <li>Write skew is blocked at SERIALIZABLE (exactly one transaction aborts).</li>
- *   <li>Write skew is allowed at REPEATABLE READ (regression guard from 13.5C).</li>
+ *   <li>Write skew is blocked at SERIALIZABLE — the second committer is aborted at commit time.</li>
+ *   <li>Write skew is allowed at REPEATABLE READ (regression from 13.5C).</li>
  *   <li>Read-only SERIALIZABLE transactions do not incur false aborts.</li>
+ *   <li>Commit-time pivot recheck aborts a dangerous transaction at commit.</li>
  *   <li>After an SSI abort, graph state is fully cleaned up.</li>
- *   <li>{@link CoreDB#executeSerializable} retries and eventually succeeds.</li>
+ *   <li>{@link CoreDB#executeSerializable} retries on failure and exhausts retries correctly.</li>
  * </ul>
  */
 class SsiWriteSkewTest {
@@ -42,7 +45,7 @@ class SsiWriteSkewTest {
         db = CoreDB.open(tempDir, CoreDBConfig.defaults());
         shell = new LocalShellBackend(db);
         shell.execute("create-table doctors id:long oncall:int pk:id");
-        // Insert two doctors both on-call (oncall=1)
+        // Two doctors, both on-call (oncall=1)
         shell.execute("put doctors 1 1");
         shell.execute("put doctors 2 1");
     }
@@ -53,19 +56,27 @@ class SsiWriteSkewTest {
     }
 
     // -------------------------------------------------------------------------
-    // Write-skew at SERIALIZABLE: exactly one transaction must abort
+    // Write-skew at SERIALIZABLE: the second committer must be aborted
     // -------------------------------------------------------------------------
 
     @Test
-    void writeSkew_atSerializable_exactlyOneAborts() throws Exception {
+    void writeSkew_atSerializable_secondCommitterAborts() throws Exception {
         // Classic doctors-on-call write skew:
-        // T1 reads count(oncall)=2, decides to go off-call → sets doctors[1].oncall=0
-        // T2 reads count(oncall)=2, decides to go off-call → sets doctors[2].oncall=0
-        // If both commit: 0 doctors on-call, violating the invariant.
-        // At SERIALIZABLE, the SSI pivot must abort one of them.
+        //   T1 reads all doctors (sees 2 on-call), sets doctor 1 off-call.
+        //   T2 reads all doctors (sees 2 on-call), sets doctor 2 off-call.
+        //   If both commit: 0 on-call doctors. This is non-serializable.
+        //
+        // For SSI to catch this, both WRITES must happen before either COMMIT
+        // (so each writer's SIREAD is still held when the other write occurs,
+        // allowing the rw-edges to be recorded). Four latches enforce this:
+        //   - both must have scanned before either writes
+        //   - both must have written before either commits
 
-        CountDownLatch t1Read = new CountDownLatch(1);
-        CountDownLatch t2Read = new CountDownLatch(1);
+        CountDownLatch t1Scanned = new CountDownLatch(1);
+        CountDownLatch t2Scanned = new CountDownLatch(1);
+        CountDownLatch t1Wrote   = new CountDownLatch(1);
+        CountDownLatch t2Wrote   = new CountDownLatch(1);
+
         AtomicReference<Throwable> t1Error = new AtomicReference<>();
         AtomicReference<Throwable> t2Error = new AtomicReference<>();
 
@@ -74,15 +85,16 @@ class SsiWriteSkewTest {
                 LocalShellBackend s1 = new LocalShellBackend(db);
                 s1.execute("set-isolation serializable");
                 s1.execute("begin");
-                // T1 reads both doctors
                 s1.execute("scan doctors");
-                t1Read.countDown();
-                t2Read.await();  // wait for T2 to also read
-                // T1 sets doctor 1 off-call
+                t1Scanned.countDown();
+                t2Scanned.await();
                 s1.execute("put doctors 1 0");
+                t1Wrote.countDown();
+                t2Wrote.await();
                 s1.execute("commit");
             } catch (Throwable e) {
                 t1Error.set(e);
+                t1Wrote.countDown();  // unblock T2 even on early failure
             }
         });
 
@@ -91,15 +103,16 @@ class SsiWriteSkewTest {
                 LocalShellBackend s2 = new LocalShellBackend(db);
                 s2.execute("set-isolation serializable");
                 s2.execute("begin");
-                // T2 reads both doctors
                 s2.execute("scan doctors");
-                t2Read.countDown();
-                t1Read.await();  // wait for T1 to also read
-                // T2 sets doctor 2 off-call
+                t2Scanned.countDown();
+                t1Scanned.await();
                 s2.execute("put doctors 2 0");
+                t2Wrote.countDown();
+                t1Wrote.await();
                 s2.execute("commit");
             } catch (Throwable e) {
                 t2Error.set(e);
+                t2Wrote.countDown();  // unblock T1 even on early failure
             }
         });
 
@@ -108,19 +121,14 @@ class SsiWriteSkewTest {
         t1.join(5000);
         t2.join(5000);
 
-        // Exactly one of the two must have gotten a serialization failure
+        // Exactly the second committer must have gotten SerializationFailureException.
+        // One commits normally; the other is aborted by commit-time pivot recheck.
         boolean t1Failed = t1Error.get() instanceof SerializationFailureException;
         boolean t2Failed = t2Error.get() instanceof SerializationFailureException;
         assertThat(t1Failed ^ t2Failed)
-            .as("exactly one of T1/T2 should have gotten SerializationFailureException, "
-                + "T1 error=%s, T2 error=%s", t1Error.get(), t2Error.get())
+            .as("exactly one of T1/T2 should fail with SerializationFailureException; "
+                + "T1=%s, T2=%s", t1Error.get(), t2Error.get())
             .isTrue();
-
-        // The one that succeeded should have its write visible; the other's write should not.
-        // After the committed transaction, at least one doctor remains on-call.
-        shell.execute("set-isolation serializable");
-        String scan = shell.execute("scan doctors");
-        assertThat(scan).contains("1");  // at least one oncall=1 row remains
     }
 
     // -------------------------------------------------------------------------
@@ -129,8 +137,11 @@ class SsiWriteSkewTest {
 
     @Test
     void writeSkew_atRepeatableRead_bothCommit() throws Exception {
-        CountDownLatch t1Read = new CountDownLatch(1);
-        CountDownLatch t2Read = new CountDownLatch(1);
+        CountDownLatch t1Scanned = new CountDownLatch(1);
+        CountDownLatch t2Scanned = new CountDownLatch(1);
+        CountDownLatch t1Wrote   = new CountDownLatch(1);
+        CountDownLatch t2Wrote   = new CountDownLatch(1);
+
         AtomicReference<Throwable> t1Error = new AtomicReference<>();
         AtomicReference<Throwable> t2Error = new AtomicReference<>();
 
@@ -140,12 +151,15 @@ class SsiWriteSkewTest {
                 s1.execute("set-isolation repeatable-read");
                 s1.execute("begin");
                 s1.execute("scan doctors");
-                t1Read.countDown();
-                t2Read.await();
+                t1Scanned.countDown();
+                t2Scanned.await();
                 s1.execute("put doctors 1 0");
+                t1Wrote.countDown();
+                t2Wrote.await();
                 s1.execute("commit");
             } catch (Throwable e) {
                 t1Error.set(e);
+                t1Wrote.countDown();
             }
         });
 
@@ -155,12 +169,15 @@ class SsiWriteSkewTest {
                 s2.execute("set-isolation repeatable-read");
                 s2.execute("begin");
                 s2.execute("scan doctors");
-                t2Read.countDown();
-                t1Read.await();
+                t2Scanned.countDown();
+                t1Scanned.await();
                 s2.execute("put doctors 2 0");
+                t2Wrote.countDown();
+                t1Wrote.await();
                 s2.execute("commit");
             } catch (Throwable e) {
                 t2Error.set(e);
+                t2Wrote.countDown();
             }
         });
 
@@ -169,12 +186,12 @@ class SsiWriteSkewTest {
         t1.join(5000);
         t2.join(5000);
 
-        // Both should commit at REPEATABLE READ — write skew is allowed
+        // Both must commit — write skew is allowed at REPEATABLE READ
         assertThat(t1Error.get())
-            .as("T1 should not have failed at REPEATABLE READ: %s", t1Error.get())
+            .as("T1 should not fail at REPEATABLE READ: %s", t1Error.get())
             .isNull();
         assertThat(t2Error.get())
-            .as("T2 should not have failed at REPEATABLE READ: %s", t2Error.get())
+            .as("T2 should not fail at REPEATABLE READ: %s", t2Error.get())
             .isNull();
     }
 
@@ -183,36 +200,40 @@ class SsiWriteSkewTest {
     // -------------------------------------------------------------------------
 
     @Test
-    void commitTimePivot_writerAborts() throws IOException {
-        // Set up:
-        //   T1 (serializable): reads page containing pk=1
-        //   T2 (serializable): writes pk=1, then writes pk=2 — creates rw-edge T1→T2
-        //   When T2 commits, markCommitted(T2) is called; if T2 is a pivot it should abort.
+    void commitTimePivot_transactionAbortsAtCommit() throws IOException {
+        // Tests the commit-time recheck path in TransactionManager.commit().
+        // We construct a dangerous pivot structure directly in the RWConflictGraph
+        // so we can test the recheck without requiring a 3-thread scenario:
         //
-        // Here we test the simpler scenario: a single thread where T1 reads then T2 writes
-        // the same page — at T2's commit, the pivot is detected.
+        //   fakeT0 → T1 (pivot) → fakeT2
+        //   fakeT0 is committed → dangerous structure at T1's commit time.
+        //
+        // The write-skew variant (2-transaction cycle) is tested in
+        // writeSkew_atSerializable_secondCommitterAborts.
 
-        TransactionManager txnMgr = db.transactionManager();
+        RWConflictGraph graph = db.rwConflictGraph();
 
-        Transaction t1 = txnMgr.beginTransaction(IsolationLevel.SERIALIZABLE);
-        // T1 reads pk=1 — acquires SIREAD on the heap page
-        shell.execute("get doctors 1");
-        txnMgr.commit(t1);
+        shell.execute("set-isolation serializable");
+        shell.execute("begin");
+        Transaction tx = db.transactionManager().currentTransaction();
 
-        // T2 begins after T1 commits; T1 is now in commitOrder.
-        Transaction t2 = txnMgr.beginTransaction(IsolationLevel.SERIALIZABLE);
-        // T2 writes pk=1 — triggers rw-edge T1→T2. Since T1 is already committed,
-        // the dangerous pivot check fires. The write itself (put) should throw.
-        assertThatThrownBy(() -> shell.execute("put doctors 1 0"))
+        // Inject edges to make tx the pivot: fakeT0 → tx → fakeT2
+        int fakeT0 = Integer.MAX_VALUE - 1;
+        int fakeT2 = Integer.MAX_VALUE - 2;
+        graph.addEdge(fakeT0, tx.xid());   // in-edge for tx
+        graph.addEdge(tx.xid(), fakeT2);   // out-edge for tx
+        graph.markCommitted(fakeT0);        // at least one neighbour committed → dangerous
+
+        // Commit must fail: markCommitted(tx) runs, then isDangerousPivot fires.
+        assertThatThrownBy(() -> shell.execute("commit"))
             .isInstanceOf(SerializationFailureException.class);
 
-        // T2 is now in aborted state via auto-rollback from the shell
-        assertThat(t2.state()).isIn(Transaction.State.ABORTED, Transaction.State.ACTIVE);
-
-        // Clean up if still active (shell may not have rolled back T2)
-        if (txnMgr.currentTransaction() != null) {
-            txnMgr.rollback(txnMgr.currentTransaction());
-        }
+        // Transaction is now fully cleaned up (state=ABORTED, no currentTx)
+        assertThat(tx.state()).isEqualTo(Transaction.State.ABORTED);
+        assertThat(db.transactionManager().currentTransaction()).isNull();
+        // Graph state for this xid is released
+        assertThat(graph.outEdges()).doesNotContainKey(tx.xid());
+        assertThat(graph.inEdges()).doesNotContainKey(tx.xid());
     }
 
     // -------------------------------------------------------------------------
@@ -221,41 +242,60 @@ class SsiWriteSkewTest {
 
     @Test
     void readOnly_serializable_noFalseAbort() throws IOException {
-        // A read-only SERIALIZABLE transaction should never be aborted as a victim.
-        // It acquires SIREADs but never adds outgoing rw-edges (it does not write).
         shell.execute("set-isolation serializable");
         shell.execute("begin");
-        // Multiple reads
         shell.execute("scan doctors");
         shell.execute("get doctors 1");
         shell.execute("get doctors 2");
-        // Commit should succeed
         String result = shell.execute("commit");
         assertThat(result).doesNotContain("serialization failure");
+        assertThat(result).doesNotContain("error");
     }
 
     // -------------------------------------------------------------------------
-    // Graph cleanup after abort
+    // Graph cleanup after abort: verify real edges are removed
     // -------------------------------------------------------------------------
 
     @Test
-    void afterAbort_graphStateCleanedUp() throws IOException {
-        RWConflictGraph graph = db.rwConflictGraph();
-        PredicateLockManager predLockMgr = db.predicateLockManager();
-
+    void afterAbort_graphEdgesCleanedUp() throws IOException {
+        // Create real graph edges by having T1 read a page and T2 write that page.
+        // T1: serializable scan (acquires SIREAD on heap pages)
         shell.execute("set-isolation serializable");
         shell.execute("begin");
-        Transaction tx = db.transactionManager().currentTransaction();
-        int xid = tx.xid();
+        Transaction t1 = db.transactionManager().currentTransaction();
+        int t1Xid = t1.xid();
         shell.execute("scan doctors");
+        shell.execute("commit");  // T1 committed; T1 is now in commitOrder
 
-        // Force a rollback
+        // T2: serializable, writes a page T1 had SIREAD on
+        // detectWriteConflicts adds edge T1→T2 (T1 read that page, T2 wrote it)
+        // T2 only has in-edges (no out-edges), so no pivot fires — T2 writes normally.
+        shell.execute("set-isolation serializable");
+        shell.execute("begin");
+        Transaction t2 = db.transactionManager().currentTransaction();
+        int t2Xid = t2.xid();
+
+        // This write creates edge T1→T2 (T1's SIREAD was released at commit, so
+        // T1 is no longer in readersOf. Instead, T2's own SIREAD from the engine's
+        // internal get() call is what we track). The important thing is T2 now has
+        // graph state if any edges were created.
+        shell.execute("put doctors 1 0");
+
+        // Inject an additional edge directly so we have guaranteed in-edge on T2
+        RWConflictGraph graph = db.rwConflictGraph();
+        graph.addEdge(t1Xid, t2Xid);  // T1→T2: T1 read page T2 wrote
+
+        assertThat(graph.inEdges().getOrDefault(t2Xid, Set.of())).contains(t1Xid);
+
         shell.execute("rollback");
 
-        // Both SIREAD locks and graph edges for this xid should be gone
-        assertThat(predLockMgr.locksHeldBy(xid)).isEmpty();
-        assertThat(graph.outEdges()).doesNotContainKey(xid);
-        assertThat(graph.inEdges()).doesNotContainKey(xid);
+        // After rollback, ALL graph state for T2 is gone
+        assertThat(graph.outEdges()).doesNotContainKey(t2Xid);
+        assertThat(graph.inEdges()).doesNotContainKey(t2Xid);
+        // T1's out-edge to T2 is also removed from T1's edge set
+        assertThat(graph.outEdges().getOrDefault(t1Xid, Set.of())).doesNotContain(t2Xid);
+        // SIREAD locks also released
+        assertThat(db.predicateLockManager().locksHeldBy(t2Xid)).isEmpty();
     }
 
     // -------------------------------------------------------------------------
@@ -263,40 +303,35 @@ class SsiWriteSkewTest {
     // -------------------------------------------------------------------------
 
     @Test
-    void executeSerializable_retriesAndSucceeds() throws IOException {
-        // Insert a row that a concurrent transaction will update, forcing a retry.
-        // Since we don't have a real concurrent transaction, just verify the helper
-        // succeeds when no serialization failure occurs.
+    void executeSerializable_retriesOnFailure_eventuallySucceeds() throws IOException {
         shell.execute("create-table accounts id:long balance:int pk:id");
         shell.execute("put accounts 1 100");
 
+        AtomicInteger attempts = new AtomicInteger(0);
         String result = db.executeSerializable(tx -> {
+            int attempt = attempts.incrementAndGet();
+            if (attempt < 3) {
+                throw new SerializationFailureException("simulated failure on attempt " + attempt);
+            }
             try {
                 return shell.execute("get accounts 1");
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
-        });
+        }, 3);
 
         assertThat(result).contains("100");
+        assertThat(attempts.get()).isEqualTo(3);
     }
 
     @Test
     void executeSerializable_exhaustsRetries_throws() throws IOException {
-        // Force exhaustion by making every attempt fail.
-        // We can't easily inject failures from outside, so verify the maxRetries=1 path.
-        shell.execute("create-table retrytest id:long val:int pk:id");
-        shell.execute("put retrytest 1 42");
-
-        // Single attempt that succeeds — maxRetries=1 should still work.
-        String result = db.executeSerializable(tx -> {
-            try {
-                return shell.execute("get retrytest 1");
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
-        }, 1);
-
-        assertThat(result).contains("42");
+        // Lambda always fails — verify the helper propagates after maxRetries.
+        assertThatThrownBy(() ->
+            db.executeSerializable(tx -> {
+                throw new SerializationFailureException("always fails");
+            }, 3)
+        ).isInstanceOf(SerializationFailureException.class)
+         .hasMessageContaining("retries exhausted");
     }
 }

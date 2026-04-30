@@ -63,6 +63,12 @@ public final class RWConflictGraph {
      * <p>The "at least one committed" check is what prevents false positives under heavy load —
      * a transaction that has both in and out edges but all its neighbours are still in-progress
      * is not yet a confirmed dangerous structure.</p>
+     *
+     * <p>Note: T0 and T2 may be the same transaction. The two-transaction write-skew pattern
+     * (T_A reads X, T_B reads X, T_A writes Y, T_B writes Y) produces a cycle
+     * T_A →rw T_B →rw T_A. When checking the pivot at T_A: in={T_B}, out={T_B}. Skipping
+     * this pair would cause write-skew to go undetected. The important check is solely whether
+     * at least one neighbour has committed, making the structure concrete.</p>
      */
     public boolean isDangerousPivot(int xid) {
         Set<Integer> in = inEdges.getOrDefault(xid, Set.of());
@@ -72,9 +78,6 @@ public final class RWConflictGraph {
         }
         for (int t0 : in) {
             for (int t2 : out) {
-                if (t0 == t2) {
-                    continue;
-                }
                 if (commitOrder.containsKey(t0) || commitOrder.containsKey(t2)) {
                     return true;
                 }
