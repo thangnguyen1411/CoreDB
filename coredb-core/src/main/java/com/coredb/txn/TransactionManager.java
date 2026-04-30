@@ -55,9 +55,16 @@ public final class TransactionManager {
     }
 
     /**
-     * Begins a new transaction.
+     * Begins a new transaction at the default isolation level (REPEATABLE_READ).
+     */
+    public Transaction beginTransaction() throws IOException {
+        return beginTransaction(IsolationLevel.REPEATABLE_READ);
+    }
+
+    /**
+     * Begins a new transaction at the requested isolation level.
      *
-     * <p>Order matters for REPEATABLE READ:
+     * <p>Order matters for snapshot isolation:
      * <ol>
      *   <li>Allocate XID from control file (durable)</li>
      *   <li>Register XID as active — BEFORE taking the snapshot</li>
@@ -65,16 +72,20 @@ public final class TransactionManager {
      * </ol>
      * If 2 and 3 were swapped, another transaction's snapshot taken between 1 and 3
      * would not see this XID as active, violating isolation.</p>
+     *
+     * <p>READ_UNCOMMITTED is aliased to READ_COMMITTED — MVCC cannot expose uncommitted
+     * versions, so the two levels are equivalent in this implementation.</p>
      */
-    public Transaction beginTransaction() throws IOException {
+    public Transaction beginTransaction(IsolationLevel level) throws IOException {
         Transaction active = currentTx.get();
         if (active != null && active.state() == Transaction.State.ACTIVE) {
             throw new TxnException("A transaction is already active (nested transactions not supported)");
         }
+        IsolationLevel canonical = level.canonical();
         int xid = controlFile.allocateXid();
         snapshotManager.registerActiveXid(xid);
         Snapshot snap = snapshotManager.takeSnapshot();
-        Transaction tx = new Transaction(xid, snap);
+        Transaction tx = new Transaction(xid, snap, canonical);
         currentTx.set(tx);
         return tx;
     }
