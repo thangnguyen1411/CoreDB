@@ -156,7 +156,7 @@ public class BTreeStorageEngine implements StorageEngine {
             return Optional.empty();
         }
 
-        return heap.get(ridOpt.get(), tx.snapshot(), clog, tx.xid());
+        return heap.get(ridOpt.get(), tx.currentStatementSnapshot(), clog, tx.xid());
     }
 
     @Override
@@ -180,7 +180,7 @@ public class BTreeStorageEngine implements StorageEngine {
     @Override
     public Iterator<Map.Entry<Long, Row>> rangeScan(long fromPk, long toPk) throws IOException {
         Transaction tx = requireActiveTransaction();
-        Snapshot snapshot = tx.snapshot();
+        Snapshot snapshot = tx.currentStatementSnapshot();
         int currentXid = tx.xid();
         Iterator<Map.Entry<Long, RecordId>> indexIterator = pkIndex.rangeScan(fromPk, toPk);
 
@@ -222,7 +222,7 @@ public class BTreeStorageEngine implements StorageEngine {
     @Override
     public Iterator<Map.Entry<Long, Row>> fullScan() throws IOException {
         Transaction tx = requireActiveTransaction();
-        Iterator<Row> heapIterator = heap.scan(tx.snapshot(), clog, tx.xid());
+        Iterator<Row> heapIterator = heap.scan(tx.currentStatementSnapshot(), clog, tx.xid());
 
         return new Iterator<>() {
             private Map.Entry<Long, Row> nextEntry = computeNext();
