@@ -12,11 +12,14 @@ import com.coredb.mvcc.SnapshotManager;
 import com.coredb.recovery.RecoveryManager;
 import com.coredb.recovery.RecoveryStats;
 import com.coredb.txn.ClogManager;
+import com.coredb.txn.IsolationLevel;
 import com.coredb.txn.LockManager;
 import com.coredb.txn.PredicateLockManager;
+import com.coredb.txn.RWConflictGraph;
 import com.coredb.txn.Transaction;
 import com.coredb.txn.TransactionManager;
 import com.coredb.util.Constants;
+import com.coredb.util.SerializationFailureException;
 import com.coredb.wal.XLogWriter;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -25,6 +28,7 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.Collections;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,6 +47,7 @@ public final class CoreDB implements AutoCloseable {
     private final TransactionManager transactionManager;
     private final LockManager lockManager;
     private final PredicateLockManager predicateLockManager;
+    private final RWConflictGraph rwConflictGraph;
     private final Map<Integer, StorageEngine> engineCache;
     private final RecoveryStats lastRecoveryStats;
     private volatile boolean closed = false;
@@ -68,7 +73,8 @@ public final class CoreDB implements AutoCloseable {
         this.snapshotManager = snapshotManager;
         this.lockManager = new LockManager();
         this.predicateLockManager = new PredicateLockManager();
-        this.transactionManager = new TransactionManager(controlFile, snapshotManager, clog, xlogWriter, lockManager, predicateLockManager);
+        this.rwConflictGraph = new RWConflictGraph();
+        this.transactionManager = new TransactionManager(controlFile, snapshotManager, clog, xlogWriter, lockManager, predicateLockManager, rwConflictGraph);
         this.engineCache = new ConcurrentHashMap<>();
         this.lastRecoveryStats = lastRecoveryStats;
         log.debug(
@@ -258,6 +264,68 @@ public final class CoreDB implements AutoCloseable {
      */
     public PredicateLockManager predicateLockManager() {
         return predicateLockManager;
+    }
+
+    /**
+     * Returns the rw-conflict graph used for SSI pivot detection.
+     */
+    public RWConflictGraph rwConflictGraph() {
+        return rwConflictGraph;
+    }
+
+    /**
+     * Executes {@code work} inside a SERIALIZABLE transaction, retrying automatically on
+     * serialization failure up to {@code maxRetries} times with exponential back-off.
+     *
+     * <p>On each attempt a new transaction is begun at {@link IsolationLevel#SERIALIZABLE},
+     * {@code work} is applied to it, and the result is committed. If a
+     * {@link SerializationFailureException} is thrown (by SSI pivot detection or
+     * first-updater-wins), the transaction is rolled back and retried after a short delay.</p>
+     *
+     * <p>The shell's auto-commit path does NOT auto-retry — it surfaces the error to the user.
+     * Programmatic clients use this method for transparent retry.</p>
+     *
+     * @param work     function to execute; receives the active transaction
+     * @param maxRetries maximum number of attempts (must be >= 1)
+     * @return the result of the first successful commit
+     * @throws SerializationFailureException if all retries are exhausted
+     */
+    public <T> T executeSerializable(Function<Transaction, T> work, int maxRetries)
+            throws IOException {
+        if (maxRetries < 1) {
+            throw new IllegalArgumentException("maxRetries must be >= 1");
+        }
+        SerializationFailureException lastFailure = null;
+        for (int attempt = 0; attempt < maxRetries; attempt++) {
+            Transaction tx = transactionManager.beginTransaction(IsolationLevel.SERIALIZABLE);
+            try {
+                T result = work.apply(tx);
+                transactionManager.commit(tx);
+                return result;
+            } catch (SerializationFailureException e) {
+                lastFailure = e;
+                if (tx.state() == Transaction.State.ACTIVE) {
+                    transactionManager.rollback(tx);
+                }
+                if (attempt < maxRetries - 1) {
+                    long delayMs = 1L << Math.min(attempt, 10);
+                    try {
+                        Thread.sleep(delayMs);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new SerializationFailureException("interrupted during retry");
+                    }
+                }
+            }
+        }
+        throw new SerializationFailureException("retries exhausted: " + lastFailure.getMessage());
+    }
+
+    /**
+     * Convenience overload of {@link #executeSerializable(Function, int)} with three retries.
+     */
+    public <T> T executeSerializable(Function<Transaction, T> work) throws IOException {
+        return executeSerializable(work, 3);
     }
 
     /**
