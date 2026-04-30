@@ -14,6 +14,7 @@ import com.coredb.mvcc.Snapshot;
 import com.coredb.txn.ClogManager;
 import com.coredb.txn.IsolationLevel;
 import com.coredb.txn.PredicateLockManager;
+import com.coredb.txn.RWConflictGraph;
 import com.coredb.txn.Transaction;
 import com.coredb.txn.TransactionManager;
 import com.coredb.util.StorageException;
@@ -142,6 +143,7 @@ public class BTreeStorageEngine implements StorageEngine {
     public void put(long pk, Row row) throws IOException {
         Transaction tx = requireActiveTransaction();
         int currentXid = tx.xid();
+        boolean serializable = tx.level() == IsolationLevel.SERIALIZABLE;
 
         Optional<RecordId> existing = pkIndex.search(pk);
         if (existing.isPresent()) {
@@ -162,10 +164,26 @@ public class BTreeStorageEngine implements StorageEngine {
                     "row for pk=" + pk + " modified concurrently; please retry");
             }
             pkIndex.insert(pk, newRid);
+            if (serializable) {
+                // The old heap page is where t_xmax was set; the new heap page is where
+                // the new version was written. Both may have been read by concurrent readers.
+                detectWriteConflicts(currentXid, tableOid, oldRid.pageId());
+                if (newRid.pageId() != oldRid.pageId()) {
+                    detectWriteConflicts(currentXid, tableOid, newRid.pageId());
+                }
+                // Find the index leaf page that now holds the updated key and check it.
+                pkIndex.search(pk, indexPageId ->
+                    detectWriteConflicts(currentXid, indexFileId, indexPageId));
+            }
             log.debug("Updated row with pk={}: oldRid={} -> newRid={}", pk, oldRid, newRid);
         } else {
             RecordId rid = heap.insert(row, currentXid);
             pkIndex.insert(pk, rid);
+            if (serializable) {
+                detectWriteConflicts(currentXid, tableOid, rid.pageId());
+                pkIndex.search(pk, indexPageId ->
+                    detectWriteConflicts(currentXid, indexFileId, indexPageId));
+            }
             log.debug("Inserted row with pk={} at rid={}", pk, rid);
         }
     }
@@ -199,16 +217,28 @@ public class BTreeStorageEngine implements StorageEngine {
     public void delete(long pk) throws IOException {
         Transaction tx = requireActiveTransaction();
         int currentXid = tx.xid();
+        boolean serializable = tx.level() == IsolationLevel.SERIALIZABLE;
 
-        Optional<RecordId> ridOpt = pkIndex.search(pk);
+        // Find the index leaf page before deletion so we can check SIREAD readers.
+        int[] indexLeafPage = serializable ? new int[]{-1} : null;
+        Optional<RecordId> ridOpt = serializable
+            ? pkIndex.search(pk, pageId -> indexLeafPage[0] = pageId)
+            : pkIndex.search(pk);
+
         if (ridOpt.isEmpty()) {
             return;
         }
 
         RecordId rid = ridOpt.get();
-
         heap.delete(rid, currentXid);
         pkIndex.delete(pk);
+
+        if (serializable) {
+            detectWriteConflicts(currentXid, tableOid, rid.pageId());
+            if (indexLeafPage[0] >= 0) {
+                detectWriteConflicts(currentXid, indexFileId, indexLeafPage[0]);
+            }
+        }
 
         log.debug("Deleted row with pk={} at rid={}", pk, rid);
     }
@@ -356,6 +386,38 @@ public class BTreeStorageEngine implements StorageEngine {
 
     private PredicateLockManager predicateLockManager() {
         return transactionManager != null ? transactionManager.predicateLockManager() : null;
+    }
+
+    private RWConflictGraph rwConflictGraph() {
+        return transactionManager != null ? transactionManager.rwConflictGraph() : null;
+    }
+
+    /**
+     * SSI write-conflict check: for a page this transaction is about to write, find every
+     * other serializable transaction that holds a SIREAD on that page, record a rw-edge
+     * (reader → this writer), and abort if a dangerous pivot is detected.
+     *
+     * <p>Called after each write operation completes so the RecordId / page ID is known.
+     * {@link SerializationFailureException} is a RuntimeException and therefore safe to
+     * throw from an {@code IntConsumer} callback.</p>
+     */
+    private void detectWriteConflicts(int writerXid, int pageOid, int pageId) {
+        PredicateLockManager predLockMgr = predicateLockManager();
+        RWConflictGraph graph = rwConflictGraph();
+        if (predLockMgr == null || graph == null) {
+            return;
+        }
+        Set<Integer> readers = predLockMgr.readersOf(pageOid, pageId);
+        for (int readerXid : readers) {
+            if (readerXid == writerXid) {
+                continue;
+            }
+            graph.addEdge(readerXid, writerXid);
+            if (graph.isDangerousPivot(readerXid) || graph.isDangerousPivot(writerXid)) {
+                throw new SerializationFailureException(
+                    "SSI: dangerous structure detected; xid=" + writerXid + " aborted");
+            }
+        }
     }
 
     /**

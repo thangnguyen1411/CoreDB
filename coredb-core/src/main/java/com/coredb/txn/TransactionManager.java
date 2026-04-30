@@ -3,6 +3,7 @@ package com.coredb.txn;
 import com.coredb.catalog.ControlFile;
 import com.coredb.mvcc.Snapshot;
 import com.coredb.mvcc.SnapshotManager;
+import com.coredb.util.SerializationFailureException;
 import com.coredb.util.TxnException;
 import com.coredb.wal.XLogRecord;
 import com.coredb.wal.XLogResourceManager;
@@ -34,32 +35,41 @@ public final class TransactionManager {
     private final XLogWriter xlogWriter;
     private final LockManager lockManager;
     private final PredicateLockManager predicateLockManager;
+    private final RWConflictGraph rwConflictGraph;
 
     private final ThreadLocal<Transaction> currentTx = new ThreadLocal<>();
 
     public TransactionManager(ControlFile controlFile, SnapshotManager snapshotManager, ClogManager clog) {
-        this(controlFile, snapshotManager, clog, null, null, null);
+        this(controlFile, snapshotManager, clog, null, null, null, null);
     }
 
     public TransactionManager(ControlFile controlFile, SnapshotManager snapshotManager,
                                ClogManager clog, XLogWriter xlogWriter) {
-        this(controlFile, snapshotManager, clog, xlogWriter, null, null);
+        this(controlFile, snapshotManager, clog, xlogWriter, null, null, null);
     }
 
     public TransactionManager(ControlFile controlFile, SnapshotManager snapshotManager,
                                ClogManager clog, XLogWriter xlogWriter, LockManager lockManager) {
-        this(controlFile, snapshotManager, clog, xlogWriter, lockManager, null);
+        this(controlFile, snapshotManager, clog, xlogWriter, lockManager, null, null);
     }
 
     public TransactionManager(ControlFile controlFile, SnapshotManager snapshotManager,
                                ClogManager clog, XLogWriter xlogWriter, LockManager lockManager,
                                PredicateLockManager predicateLockManager) {
+        this(controlFile, snapshotManager, clog, xlogWriter, lockManager, predicateLockManager, null);
+    }
+
+    public TransactionManager(ControlFile controlFile, SnapshotManager snapshotManager,
+                               ClogManager clog, XLogWriter xlogWriter, LockManager lockManager,
+                               PredicateLockManager predicateLockManager,
+                               RWConflictGraph rwConflictGraph) {
         this.controlFile = controlFile;
         this.snapshotManager = snapshotManager;
         this.clog = clog;
         this.xlogWriter = xlogWriter;
         this.lockManager = lockManager;
         this.predicateLockManager = predicateLockManager;
+        this.rwConflictGraph = rwConflictGraph;
     }
 
     /**
@@ -108,12 +118,19 @@ public final class TransactionManager {
     /**
      * Commits a transaction with strict WAL ordering.
      *
+     * <p>For SERIALIZABLE transactions, a commit-time pivot check is performed after
+     * marking the transaction committed in the conflict graph but before releasing
+     * predicate locks. If a dangerous structure is detected, the commit fails with
+     * {@link SerializationFailureException} and the transaction is rolled back.</p>
+     *
      * <p>Order matters for durability and crash recovery:
      * <ol>
      *   <li>Append XACT_COMMIT WAL record</li>
      *   <li>Flush WAL (durability point)</li>
      *   <li>Mark committed in clog</li>
      *   <li>Flush clog</li>
+     *   <li>SSI: mark committed in conflict graph + recheck pivot</li>
+     *   <li>Release all locks (mutex + predicate) and graph state</li>
      *   <li>Remove from active set</li>
      *   <li>Set transaction state to COMMITTED</li>
      * </ol>
@@ -136,12 +153,24 @@ public final class TransactionManager {
 
         clog.setCommitted(tx.xid());
         clog.flush();
-        if (lockManager != null) {
-            lockManager.releaseAll(tx.xid());
+
+        // SSI commit-time pivot recheck: marking the transaction committed may complete a
+        // dangerous structure that was not detectable at write time (the "at least one
+        // committed" condition now holds for edges involving this xid).
+        if (rwConflictGraph != null && tx.level() == IsolationLevel.SERIALIZABLE) {
+            rwConflictGraph.markCommitted(tx.xid());
+            if (rwConflictGraph.isDangerousPivot(tx.xid())) {
+                // Abort rather than commit: roll back visible state and clean up.
+                clog.setAborted(tx.xid());
+                clog.flush();
+                releaseAllResources(tx);
+                finishTransaction(tx, Transaction.State.ABORTED);
+                throw new SerializationFailureException(
+                    "SSI: dangerous structure detected at commit; xid=" + tx.xid() + " aborted");
+            }
         }
-        if (predicateLockManager != null) {
-            predicateLockManager.releaseAll(tx.xid());
-        }
+
+        releaseAllResources(tx);
         finishTransaction(tx, Transaction.State.COMMITTED);
     }
 
@@ -154,6 +183,7 @@ public final class TransactionManager {
      *   <li>Flush WAL (optional but recommended)</li>
      *   <li>Mark aborted in clog</li>
      *   <li>Flush clog</li>
+     *   <li>Release all locks and graph state</li>
      *   <li>Remove from active set</li>
      *   <li>Set transaction state to ABORTED</li>
      * </ol>
@@ -176,13 +206,20 @@ public final class TransactionManager {
 
         clog.setAborted(tx.xid());
         clog.flush();
+        releaseAllResources(tx);
+        finishTransaction(tx, Transaction.State.ABORTED);
+    }
+
+    private void releaseAllResources(Transaction tx) {
         if (lockManager != null) {
             lockManager.releaseAll(tx.xid());
         }
         if (predicateLockManager != null) {
             predicateLockManager.releaseAll(tx.xid());
         }
-        finishTransaction(tx, Transaction.State.ABORTED);
+        if (rwConflictGraph != null) {
+            rwConflictGraph.releaseAll(tx.xid());
+        }
     }
 
     private byte[] encodeCommitPayload(int xid, long timestamp) {
@@ -245,12 +282,7 @@ public final class TransactionManager {
     public void clearCurrentTransaction() {
         Transaction tx = currentTx.get();
         if (tx != null) {
-            if (lockManager != null) {
-                lockManager.releaseAll(tx.xid());
-            }
-            if (predicateLockManager != null) {
-                predicateLockManager.releaseAll(tx.xid());
-            }
+            releaseAllResources(tx);
             finishTransaction(tx, Transaction.State.ABORTED);
         }
     }
@@ -261,6 +293,14 @@ public final class TransactionManager {
      */
     public PredicateLockManager predicateLockManager() {
         return predicateLockManager;
+    }
+
+    /**
+     * Returns the rw-conflict graph used for SSI pivot detection, or null if this
+     * instance was constructed without one.
+     */
+    public RWConflictGraph rwConflictGraph() {
+        return rwConflictGraph;
     }
 
     private void validateActive(Transaction tx) {
