@@ -33,25 +33,33 @@ public final class TransactionManager {
     private final ClogManager clog;
     private final XLogWriter xlogWriter;
     private final LockManager lockManager;
+    private final PredicateLockManager predicateLockManager;
 
     private final ThreadLocal<Transaction> currentTx = new ThreadLocal<>();
 
     public TransactionManager(ControlFile controlFile, SnapshotManager snapshotManager, ClogManager clog) {
-        this(controlFile, snapshotManager, clog, null, null);
+        this(controlFile, snapshotManager, clog, null, null, null);
     }
 
     public TransactionManager(ControlFile controlFile, SnapshotManager snapshotManager,
                                ClogManager clog, XLogWriter xlogWriter) {
-        this(controlFile, snapshotManager, clog, xlogWriter, null);
+        this(controlFile, snapshotManager, clog, xlogWriter, null, null);
     }
 
     public TransactionManager(ControlFile controlFile, SnapshotManager snapshotManager,
                                ClogManager clog, XLogWriter xlogWriter, LockManager lockManager) {
+        this(controlFile, snapshotManager, clog, xlogWriter, lockManager, null);
+    }
+
+    public TransactionManager(ControlFile controlFile, SnapshotManager snapshotManager,
+                               ClogManager clog, XLogWriter xlogWriter, LockManager lockManager,
+                               PredicateLockManager predicateLockManager) {
         this.controlFile = controlFile;
         this.snapshotManager = snapshotManager;
         this.clog = clog;
         this.xlogWriter = xlogWriter;
         this.lockManager = lockManager;
+        this.predicateLockManager = predicateLockManager;
     }
 
     /**
@@ -131,6 +139,9 @@ public final class TransactionManager {
         if (lockManager != null) {
             lockManager.releaseAll(tx.xid());
         }
+        if (predicateLockManager != null) {
+            predicateLockManager.releaseAll(tx.xid());
+        }
         finishTransaction(tx, Transaction.State.COMMITTED);
     }
 
@@ -167,6 +178,9 @@ public final class TransactionManager {
         clog.flush();
         if (lockManager != null) {
             lockManager.releaseAll(tx.xid());
+        }
+        if (predicateLockManager != null) {
+            predicateLockManager.releaseAll(tx.xid());
         }
         finishTransaction(tx, Transaction.State.ABORTED);
     }
@@ -234,8 +248,19 @@ public final class TransactionManager {
             if (lockManager != null) {
                 lockManager.releaseAll(tx.xid());
             }
+            if (predicateLockManager != null) {
+                predicateLockManager.releaseAll(tx.xid());
+            }
             finishTransaction(tx, Transaction.State.ABORTED);
         }
+    }
+
+    /**
+     * Returns the predicate lock manager used to track SIREAD locks for SSI, or null
+     * if this instance was constructed without one.
+     */
+    public PredicateLockManager predicateLockManager() {
+        return predicateLockManager;
     }
 
     private void validateActive(Transaction tx) {

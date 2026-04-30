@@ -12,6 +12,8 @@ import com.coredb.index.BTree;
 import com.coredb.index.IndexFile;
 import com.coredb.mvcc.Snapshot;
 import com.coredb.txn.ClogManager;
+import com.coredb.txn.IsolationLevel;
+import com.coredb.txn.PredicateLockManager;
 import com.coredb.txn.Transaction;
 import com.coredb.txn.TransactionManager;
 import com.coredb.util.StorageException;
@@ -26,10 +28,12 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.AbstractMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * B+ tree storage engine implementation.
@@ -61,6 +65,8 @@ public class BTreeStorageEngine implements StorageEngine {
     private IndexFile indexFile;
     private BTree pkIndex;
     private int pkColumnIndex;
+    private int tableOid;
+    private int indexFileId;
 
     BTreeStorageEngine(CoreDBConfig config) {
         this.config = config;
@@ -99,11 +105,12 @@ public class BTreeStorageEngine implements StorageEngine {
             this.pkIndex = BTree.open(indexFile, xlogWriter, Constants.BOOTSTRAP_XID);
         } else {
             // Allocate a new file ID for the index file
-            int indexFileId = meta.oid() + INDEX_OID_OFFSET;
-            this.indexFile = IndexFile.create(indexPath, indexFileId, bufferPool);
+            this.indexFile = IndexFile.create(indexPath, meta.oid() + INDEX_OID_OFFSET, bufferPool);
             this.pkIndex = BTree.create(indexFile, xlogWriter, Constants.BOOTSTRAP_XID);
         }
 
+        this.tableOid = meta.oid();
+        this.indexFileId = meta.oid() + INDEX_OID_OFFSET;
         log.debug("Opened BTreeStorageEngine for table {} (oid={})", meta.name(), meta.oid());
     }
 
@@ -166,12 +173,26 @@ public class BTreeStorageEngine implements StorageEngine {
     @Override
     public Optional<Row> get(long pk) throws IOException {
         Transaction tx = requireActiveTransaction();
-        Optional<RecordId> ridOpt = pkIndex.search(pk);
+        PredicateLockManager predLockMgr = predicateLockManager();
+        boolean serializable = predLockMgr != null && tx.level() == IsolationLevel.SERIALIZABLE;
+
+        Optional<RecordId> ridOpt;
+        if (serializable) {
+            ridOpt = pkIndex.search(pk,
+                indexPageId -> predLockMgr.acquireSiread(tx.xid(), indexFileId, indexPageId));
+        } else {
+            ridOpt = pkIndex.search(pk);
+        }
+
         if (ridOpt.isEmpty()) {
             return Optional.empty();
         }
 
-        return heap.get(ridOpt.get(), tx.currentStatementSnapshot(), clog, tx.xid());
+        RecordId rid = ridOpt.get();
+        if (serializable) {
+            predLockMgr.acquireSiread(tx.xid(), tableOid, rid.pageId());
+        }
+        return heap.get(rid, tx.currentStatementSnapshot(), clog, tx.xid());
     }
 
     @Override
@@ -197,7 +218,16 @@ public class BTreeStorageEngine implements StorageEngine {
         Transaction tx = requireActiveTransaction();
         Snapshot snapshot = tx.currentStatementSnapshot();
         int currentXid = tx.xid();
-        Iterator<Map.Entry<Long, RecordId>> indexIterator = pkIndex.rangeScan(fromPk, toPk);
+        PredicateLockManager predLockMgr = predicateLockManager();
+        boolean serializable = predLockMgr != null && tx.level() == IsolationLevel.SERIALIZABLE;
+
+        // Track heap pages already locked to avoid redundant acquires for the same page.
+        Set<Integer> lockedHeapPages = serializable ? new HashSet<>() : null;
+
+        Iterator<Map.Entry<Long, RecordId>> indexIterator = serializable
+            ? pkIndex.rangeScan(fromPk, toPk,
+                indexPageId -> predLockMgr.acquireSiread(currentXid, indexFileId, indexPageId))
+            : pkIndex.rangeScan(fromPk, toPk);
 
         return new Iterator<>() {
             private Map.Entry<Long, Row> nextEntry = computeNext();
@@ -205,8 +235,12 @@ public class BTreeStorageEngine implements StorageEngine {
             private Map.Entry<Long, Row> computeNext() {
                 while (indexIterator.hasNext()) {
                     Map.Entry<Long, RecordId> entry = indexIterator.next();
+                    RecordId rid = entry.getValue();
+                    if (serializable && lockedHeapPages.add(rid.pageId())) {
+                        predLockMgr.acquireSiread(currentXid, tableOid, rid.pageId());
+                    }
                     try {
-                        Optional<Row> rowOpt = heap.get(entry.getValue(), snapshot, clog, currentXid);
+                        Optional<Row> rowOpt = heap.get(rid, snapshot, clog, currentXid);
                         if (rowOpt.isPresent()) {
                             return new AbstractMap.SimpleEntry<>(entry.getKey(), rowOpt.get());
                         }
@@ -237,6 +271,15 @@ public class BTreeStorageEngine implements StorageEngine {
     @Override
     public Iterator<Map.Entry<Long, Row>> fullScan() throws IOException {
         Transaction tx = requireActiveTransaction();
+        PredicateLockManager predLockMgr = predicateLockManager();
+        if (predLockMgr != null && tx.level() == IsolationLevel.SERIALIZABLE) {
+            // Acquire SIREAD on all currently allocated heap pages — a full scan touches
+            // every page in the table (page 0 is the meta page; data pages start at 1).
+            int pageCount = heap.pageCount();
+            for (int p = 1; p < pageCount; p++) {
+                predLockMgr.acquireSiread(tx.xid(), tableOid, p);
+            }
+        }
         Iterator<Row> heapIterator = heap.scan(tx.currentStatementSnapshot(), clog, tx.xid());
 
         return new Iterator<>() {
@@ -309,6 +352,10 @@ public class BTreeStorageEngine implements StorageEngine {
             throw new IllegalStateException("no active transaction");
         }
         return tx;
+    }
+
+    private PredicateLockManager predicateLockManager() {
+        return transactionManager != null ? transactionManager.predicateLockManager() : null;
     }
 
     /**

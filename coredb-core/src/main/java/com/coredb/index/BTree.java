@@ -20,6 +20,7 @@ import java.util.Map;
 import java.util.Collections;
 import java.util.NoSuchElementException;
 import java.util.Optional;
+import java.util.function.IntConsumer;
 
 /**
  * B+ tree index structure.
@@ -122,6 +123,17 @@ public final class BTree {
      * @throws IOException if page read fails
      */
     public Optional<RecordId> search(long key) throws IOException {
+        return search(key, null);
+    }
+
+    /**
+     * Searches for a key, notifying {@code leafPageCallback} with the leaf page ID
+     * that was touched. Used by SERIALIZABLE transactions to acquire SIREAD locks.
+     *
+     * @param key the key to search for
+     * @param leafPageCallback called with the leaf page ID; may be null
+     */
+    public Optional<RecordId> search(long key, IntConsumer leafPageCallback) throws IOException {
         // Descend with shared latches; the returned leaf is pinned and read-locked.
         IndexFile.PinnedPage pinned = descendToLeafShared(key);
         try {
@@ -131,6 +143,9 @@ public final class BTree {
             while (true) {
                 BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(pinned.page()));
                 if (leaf.keyBelongsHere(key)) {
+                    if (leafPageCallback != null) {
+                        leafPageCallback.accept(pinned.page().pageId());
+                    }
                     return leaf.search(key);
                 }
                 int nextId = leaf.btpoNext();
@@ -157,11 +172,23 @@ public final class BTree {
      * @throws IOException if page read fails
      */
     public Iterator<Map.Entry<Long, RecordId>> rangeScan(long from, long to) throws IOException {
+        return rangeScan(from, to, null);
+    }
+
+    /**
+     * Range scan that additionally notifies {@code leafPageCallback} each time a new
+     * leaf page is entered. Used by SERIALIZABLE transactions to acquire SIREAD locks
+     * on index pages.
+     *
+     * @param leafPageCallback called with each leaf page ID as it is entered; may be null
+     */
+    public Iterator<Map.Entry<Long, RecordId>> rangeScan(long from, long to,
+                                                          IntConsumer leafPageCallback) throws IOException {
         if (from > to) {
             return Collections.emptyIterator();
         }
 
-        return new RangeScanIterator(from, to);
+        return new RangeScanIterator(from, to, leafPageCallback);
     }
 
     /**
@@ -178,6 +205,7 @@ public final class BTree {
      */
     private class RangeScanIterator implements Iterator<Map.Entry<Long, RecordId>>, AutoCloseable {
         private final long to;
+        private final IntConsumer leafPageCallback;
         private BTreeLeafPage currentLeaf;
         private int currentSlot;
         private Map.Entry<Long, RecordId> nextEntry;
@@ -186,8 +214,9 @@ public final class BTree {
         private IndexFile.PinnedPage currentPinned;
         private boolean closed = false;
 
-        RangeScanIterator(long from, long to) throws IOException {
+        RangeScanIterator(long from, long to, IntConsumer leafPageCallback) throws IOException {
             this.to = to;
+            this.leafPageCallback = leafPageCallback;
             this.currentLeaf = null;
             this.currentSlot = 0;
             this.nextEntry = null;
@@ -204,6 +233,7 @@ public final class BTree {
                     BTreeLeafPage leaf = BTreeLeafPage.of(IndexPageLayout.of(currentPinned.page()));
                     if (leaf.keyBelongsHere(from)) {
                         this.currentLeaf = leaf;
+                        notifyLeafPage();
                         break;
                     }
                     currentPinned = handOverShared(currentPinned, leaf.btpoNext());
@@ -213,6 +243,12 @@ public final class BTree {
             } catch (RuntimeException | IOException e) {
                 releaseCurrent();
                 throw e;
+            }
+        }
+
+        private void notifyLeafPage() {
+            if (leafPageCallback != null && currentPinned != null) {
+                leafPageCallback.accept(currentPinned.page().pageId());
             }
         }
 
@@ -243,6 +279,7 @@ public final class BTree {
 
                 currentPinned = handOverShared(currentPinned, nextPageId);
                 currentLeaf = BTreeLeafPage.of(IndexPageLayout.of(currentPinned.page()));
+                notifyLeafPage();
                 currentSlot = 0;
             }
         }
