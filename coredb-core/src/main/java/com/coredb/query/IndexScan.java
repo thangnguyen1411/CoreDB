@@ -5,6 +5,8 @@ import com.coredb.engine.StorageEngine;
 import com.coredb.txn.Transaction;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.Iterator;
+import java.util.Map;
 import java.util.Optional;
 
 public final class IndexScan implements Operator {
@@ -31,7 +33,8 @@ public final class IndexScan implements Operator {
             throw new IllegalStateException("snapshot not set; statement boundary missing");
         }
         try {
-            result = engine.get(((Number) key).longValue());
+            Iterator<Map.Entry<Long, Row>> it = engine.indexLookup(indexName, key);
+            result = it.hasNext() ? Optional.of(it.next().getValue()) : Optional.empty();
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }

@@ -68,6 +68,7 @@ public class BTreeStorageEngine implements StorageEngine {
     private int pkColumnIndex;
     private int tableOid;
     private int indexFileId;
+    private String pkIndexName;
 
     BTreeStorageEngine(CoreDBConfig config) {
         this.config = config;
@@ -112,6 +113,7 @@ public class BTreeStorageEngine implements StorageEngine {
 
         this.tableOid = meta.oid();
         this.indexFileId = meta.oid() + INDEX_OID_OFFSET;
+        this.pkIndexName = meta.name() + "_pk";
         log.debug("Opened BTreeStorageEngine for table {} (oid={})", meta.name(), meta.oid());
     }
 
@@ -355,6 +357,16 @@ public class BTreeStorageEngine implements StorageEngine {
 
     @Override
     public Iterator<Map.Entry<Long, Row>> indexLookup(String indexName, Object value) throws IOException {
+        if (indexName.equals(pkIndexName)) {
+            long pk = ((Number) value).longValue();
+            Optional<Row> row = get(pk);
+            if (row.isEmpty()) {
+                return java.util.Collections.emptyIterator();
+            }
+            return java.util.Collections.singletonList(
+                new AbstractMap.SimpleEntry<>(pk, row.get())
+            ).iterator();
+        }
         throw new UnsupportedOperationException("Secondary indexes not yet implemented");
     }
 

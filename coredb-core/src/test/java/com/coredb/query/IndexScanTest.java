@@ -165,4 +165,15 @@ class IndexScanTest {
         scan.close();
         db.transactionManager().commit(readTx);
     }
+
+    @Test
+    void lookup_unknownIndexName_throwsUnsupportedOperationException() {
+        Transaction tx = db.transactionManager().beginTransaction();
+        IndexScan scan = new IndexScan(engine, "users", "users_age_idx", 30, tx);
+
+        assertThatThrownBy(scan::open)
+            .isInstanceOf(UnsupportedOperationException.class);
+
+        db.transactionManager().rollback(tx);
+    }
 }
