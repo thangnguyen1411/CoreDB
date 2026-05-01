@@ -363,8 +363,8 @@ public class BTreeStorageEngine implements StorageEngine {
             if (row.isEmpty()) {
                 return java.util.Collections.emptyIterator();
             }
-            return java.util.Collections.singletonList(
-                new AbstractMap.SimpleEntry<>(pk, row.get())
+            return java.util.Collections.<Map.Entry<Long, Row>>singletonList(
+                Map.entry(pk, row.get())
             ).iterator();
         }
         throw new UnsupportedOperationException("Secondary indexes not yet implemented");
