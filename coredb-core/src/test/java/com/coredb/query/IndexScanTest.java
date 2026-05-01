@@ -137,7 +137,7 @@ class IndexScanTest {
     }
 
     @Test
-    void lookup_withoutStatementSnapshot_throwsIllegalStateException() {
+    void lookup_withoutStatementSnapshot_throwsIllegalStateException() throws IOException {
         Transaction tx = db.transactionManager().beginTransaction();
         tx.setCurrentStatementSnapshot(null);
 
@@ -167,7 +167,7 @@ class IndexScanTest {
     }
 
     @Test
-    void lookup_unknownIndexName_throwsUnsupportedOperationException() {
+    void lookup_unknownIndexName_throwsUnsupportedOperationException() throws IOException {
         Transaction tx = db.transactionManager().beginTransaction();
         IndexScan scan = new IndexScan(engine, "users", "users_age_idx", 30, tx);
 
